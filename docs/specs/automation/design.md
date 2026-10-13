@@ -982,11 +982,11 @@ and host tests reproduce the prototype screens deterministically.
 8. Uninstall → task gone for every user that had one; no `ferrum-automation.exe` running.
 9. Copy `automation.db` to another Windows user → all automations show Needs review.
 
-## 14. Open questions for the owner
+## 14. Owner decisions
 
-Each has a recommended default that the spec currently assumes; changing it affects the packages listed.
+**Status: decided (2026-10-13).** The owner accepted every default below, so the "Decision" column is binding for implementation. Q1 still depends on the P3.0 spike result, as stated.
 
-| #   | Question                                                                                                                                                                                        | Default in this spec                                                                                                      | Affects          |
+| #   | Question                                                                                                                                                                                        | Decision                                                                                                                  | Affects          |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | Q1  | If Windows refuses a per-user **logon** task without admin on some editions/policies, may the runner fall back to a per-user `HKCU\…\Run` entry (no restart-on-failure, no battery conditions)? | Yes, fallback allowed, shown as "Starts at sign-in (Run key)" in Settings; P3.0 spike decides whether it is needed at all | P3.0, P3.2, P3.4 |
 | Q2  | Watching **network shares**: keep Unsupported (prototype), or offer best-effort SMB change notifications with an explicit "may miss changes" label?                                             | Unsupported in v1                                                                                                         | P2.1             |

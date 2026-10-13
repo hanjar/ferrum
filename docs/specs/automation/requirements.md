@@ -623,7 +623,7 @@ scope; nothing in Automation requires or obtains elevation.
 - Linux and macOS.
 - Email, webhook or mobile notifications.
 
-## 15. Open questions
+## 15. Owner decisions
 
-Tracked with recommended defaults in [design.md §14](design.md#14-open-questions-for-the-owner). Requirements that
+All questions are decided; see [design.md §14](design.md#14-owner-decisions) (every recommended default was accepted). Requirements that
 depend on them: WA-1.4 (Q3), WA-2.3 (Q2), SP-5 (Q4), SP-2.3 (Q5), RT-2 (Q1), RT-3.6 (Q8).

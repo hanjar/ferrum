@@ -8,7 +8,7 @@ Requirements: [requirements.md](requirements.md) · Design: [design.md](design.m
   done when every cited ID has a passing test (named after the ID or referencing it in a comment) and the gates
   below are green.
 - Do not make decisions the design already made. If something in the design is impossible or ambiguous, stop and
-  report instead of improvising; open questions are in design §14.
+  report instead of improvising; owner decisions are in design §14.
 - **Security review** is either **REQUIRED** (a dedicated security reviewer signs off before merge; the package
   report lists the threat-model rows of design §10.2 it touches and how each is tested) or **recommended**.
 - Gates for every package (see `CONTRIBUTING.md`): `cargo fmt -- --check`, `cargo clippy --all-targets -- -D
