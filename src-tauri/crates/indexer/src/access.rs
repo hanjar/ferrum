@@ -554,6 +554,23 @@ mod tests {
         assert_ne!(unsafe { CreateDirectoryW(w.as_ptr(), &sa) }, 0);
     }
 
+    /// A directory this user may traverse, read attributes/control and
+    /// delete, but NOT list — whether or not the test runs elevated.
+    ///
+    /// - Owner is set explicitly to the user (always assignable): it keeps
+    ///   READ_CONTROL/WRITE_DAC implicitly (cleanup can reset the ACL), and
+    ///   the owner no longer depends on the token's default owner, which is
+    ///   BUILTIN\Administrators in an elevated process.
+    /// - No ACE for BUILTIN\Administrators: an elevated token has that
+    ///   group ENABLED, so a `(A;;FA;;;BA)` ACE grants it list access and
+    ///   AccessCheck rightly answers `Yes` (CI runners are elevated). A
+    ///   UAC-filtered token has it deny-only, which is why such an ACE only
+    ///   looked harmless on a normal desktop. The admin path itself is
+    ///   covered by `administrators_ace_counts_only_when_the_group_is_enabled`.
+    fn closed_sddl(user: &str) -> String {
+        format!("O:{user}D:P(A;;0x1200a0;;;{user})(A;;FA;;;SY)(A;;SD;;;{user})")
+    }
+
     /// Real AccessCheck without admin rights: a directory the user may
     /// list, one where the user may traverse/read attributes but NOT list,
     /// a stale file reference (wrong sequence) and the cache behaviour.
@@ -566,12 +583,7 @@ mod tests {
         let open = root.join("open");
         let closed = root.join("closed");
         std::fs::create_dir(&open).unwrap();
-        // Owner keeps READ_CONTROL/WRITE_DAC implicitly; the DACL grants
-        // the user traverse + read attributes + read control + delete only.
-        mkdir_sd(
-            &closed,
-            &format!("D:P(A;;0x1200a0;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)(A;;SD;;;{user})"),
-        );
+        mkdir_sd(&closed, &closed_sddl(&user));
         let letter = root.to_string_lossy().as_bytes()[0].to_ascii_uppercase();
         let token = Arc::new(own_identification_token().unwrap());
         let vol = open_volume_root(letter).expect("volume root");
@@ -651,10 +663,7 @@ mod tests {
         let closed = root.join("closed");
         // The user may not list this directory (definite `No` from
         // AccessCheck — not an evaluation failure).
-        mkdir_sd(
-            &closed,
-            &format!("D:P(A;;0x1200a0;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)(A;;SD;;;{user})"),
-        );
+        mkdir_sd(&closed, &closed_sddl(&user));
         let letter = root.to_string_lossy().as_bytes()[0].to_ascii_uppercase();
         let closed_frn = frn_of(&closed);
         let stale = closed_frn ^ (0x7FFF << 48);
@@ -757,6 +766,44 @@ mod tests {
             .args(["/reset"])
             .output();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder listable ONLY through BUILTIN\Administrators: AccessCheck
+    /// grants it exactly when the client token has that group ENABLED (an
+    /// elevated administrator — legitimate, the same answer Windows gives
+    /// that client when it lists the folder itself), never when the group
+    /// is deny-only (a UAC-filtered administrator or a standard user).
+    /// Deterministic in elevated and non-elevated runs alike.
+    #[test]
+    fn administrators_ace_counts_only_when_the_group_is_enabled() {
+        use crate::win::{SID_ADMINISTRATORS, token_has_enabled_group};
+        let tmp = AclTempDir::new("ba");
+        let user = sid_string(&current_user_sid().unwrap()).unwrap();
+        let ba_only = tmp.0.join("ba-only");
+        // The user itself may traverse/read attributes (for `frn_of`) but
+        // not list; only the Administrators ACE carries FILE_LIST_DIRECTORY.
+        mkdir_sd(
+            &ba_only,
+            &format!("O:{user}D:P(A;;0x1200a0;;;{user})(A;;0x1200a9;;;BA)(A;;FA;;;SY)"),
+        );
+        let letter = tmp.0.to_string_lossy().as_bytes()[0].to_ascii_uppercase();
+        let frn = frn_of(&ba_only);
+        let vol = open_volume_root(letter).unwrap();
+        let full = own_identification_token().unwrap();
+        let admin = token_has_enabled_group(full.raw(), &SID_ADMINISTRATORS).unwrap();
+        assert_eq!(
+            token_check(&full, &vol, frn),
+            if admin { Access::Yes } else { Access::No },
+            "listable exactly when Administrators is enabled (admin={admin})"
+        );
+        let deny = crate::win::deny_only_token(&["S-1-5-32-544"]).unwrap();
+        assert!(!token_has_enabled_group(deny.raw(), &SID_ADMINISTRATORS).unwrap());
+        assert_eq!(
+            token_check(&deny, &vol, frn),
+            Access::No,
+            "deny-only Administrators never lists"
+        );
+        // `tmp` restores the ACLs and deletes the tree when dropped.
     }
 
     /// Review N3: one identity filling its cap never empties another one's

@@ -408,6 +408,50 @@ fn frn_of(path: &std::path::Path) -> u64 {
     ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64
 }
 
+/// Replace the DACL of `path` with exactly `sddl`'s (protected: no
+/// inherited ACEs), whatever ACEs the folder was created with.
+fn set_dacl(path: &std::path::Path, sddl: &str) {
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    };
+    let sd = ferrum_indexer::win::SecurityDescriptor::from_sddl(sddl).unwrap();
+    let w = ferrum_indexer::win::wide(path);
+    let ok = unsafe {
+        SetFileSecurityW(
+            w.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            sd.0,
+        )
+    };
+    assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+}
+
+/// `X:\` opened as the `OpenFileById` volume hint (attributes only).
+fn open_volume(letter: u8) -> ferrum_indexer::win::OwnedHandle {
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let w = ferrum_indexer::win::wide(format!("{}:\\", letter as char));
+    let h = unsafe {
+        CreateFileW(
+            w.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(
+        !h.is_null() && h as isize != -1,
+        "volume {}",
+        letter as char
+    );
+    ferrum_indexer::win::OwnedHandle(h)
+}
+
 /// A synthetic index that mirrors REAL directories (real file references
 /// from the volume root down to a temp tree), so the shared-mode filter
 /// runs the real `OpenFileById` + `AccessCheck` with the client's token:
@@ -436,21 +480,30 @@ fn search_and_subtree_over_the_pipe_with_real_access_checks() {
     let hidden_frn = frn_of(&closed.join("hidden.txt"));
     let user =
         ferrum_indexer::win::sid_string(&ferrum_indexer::win::current_user_sid().unwrap()).unwrap();
-    // Traverse + read attributes + read control only (no list), as owner.
-    let out = std::process::Command::new("icacls")
-        .arg(&closed)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            &format!("*{user}:(X,RA,RC,D,WDAC)"),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    // Traverse + read attributes + read control + delete/write-DAC only
+    // (no list). The WHOLE DACL is replaced by an explicit, protected one —
+    // not edited with `icacls /inheritance:r /grant:r`, which only drops
+    // inherited ACEs and replaces this user's: any other explicit ACE (on an
+    // elevated CI runner a new folder can carry the creator's default DACL,
+    // `BUILTIN\Administrators` full, as explicit ACEs) survived and let the
+    // elevated token list `closed`. Nothing here grants Administrators.
+    set_dacl(
+        &closed,
+        &format!("D:P(A;;0x1200a0;;;{user})(A;;SDWD;;;{user})(A;;FA;;;SY)"),
     );
+    // The fixture really is closed for this client — elevated or not —
+    // before the service is asked (tells a fixture problem from a filter
+    // problem).
+    {
+        let letter = closed.to_string_lossy().as_bytes()[0].to_ascii_uppercase();
+        let vol = open_volume(letter);
+        let tok = ferrum_indexer::access::own_identification_token().unwrap();
+        assert_eq!(
+            ferrum_indexer::access::token_check(&tok, &vol, frn_of(&closed)),
+            ferrum_indexer::query::Access::No,
+            "fixture: this token must not be able to list `closed`"
+        );
+    }
 
     let tmp_s = tmp.to_string_lossy().into_owned();
     let letter = tmp_s.as_bytes()[0].to_ascii_uppercase();

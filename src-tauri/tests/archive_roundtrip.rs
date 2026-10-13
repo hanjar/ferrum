@@ -872,7 +872,7 @@ fn sevenzip_cross_tool_compatibility() {
     let out = Command::new(&sevenz)
         .args(["a", "-y"])
         .arg(&sevenz_archive)
-        .arg(src.join("payload"))
+        .arg(&src)
         .output()
         .unwrap();
     assert!(
