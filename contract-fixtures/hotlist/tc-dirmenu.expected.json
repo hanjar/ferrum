@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "source": "Total Commander [DirMenu] — wincmd.ini",
+  "items": [
+    {
+      "type": "submenu",
+      "title": "&1. Drive",
+      "items": [
+        { "type": "dir", "title": "&1. Drive", "path": "C:\\Users\\you\\Drive\\" },
+        { "type": "dir", "title": "2. Project", "path": "C:\\Users\\you\\Drive\\projects\\" },
+        { "type": "dir", "title": "&3. Work Root", "path": "C:\\Users\\you\\Drive\\projects\\work\\" },
+        { "type": "dir", "title": "4. Work &Program", "path": "C:\\Users\\you\\Drive\\projects\\work\\program\\" },
+        { "type": "dir", "title": "5. Work &Invoice", "path": "C:\\Users\\you\\Drive\\projects\\work\\invoice\\" },
+        {
+          "type": "submenu",
+          "title": "&6. personal",
+          "items": [
+            { "type": "dir", "title": "1. &Root", "path": "C:\\Users\\you\\Drive\\personal\\" },
+            { "type": "dir", "title": "2. &Alice", "path": "C:\\Users\\you\\Drive\\personal\\alice\\" },
+            { "type": "dir", "title": "3. &Bob", "path": "C:\\Users\\you\\Drive\\personal\\bob\\" },
+            { "type": "dir", "title": "4. &Charlie", "path": "C:\\Users\\you\\Drive\\personal\\charlie\\" },
+            { "type": "dir", "title": "5. &David", "path": "C:\\Users\\you\\Drive\\personal\\david\\" },
+            { "type": "dir", "title": "6. Eve", "path": "C:\\Users\\you\\Drive\\personal\\eve@example.com\\" },
+            { "type": "dir", "title": "7. &Self", "path": "C:\\Users\\you\\Drive\\personal\\self\\" }
+          ]
+        },
+        { "type": "dir", "title": "7. &Resources", "path": "C:\\Users\\you\\Drive\\resources" }
+      ]
+    },
+    { "type": "dir", "title": "&Telegram", "path": "C:\\Users\\you\\Downloads\\Telegram Desktop\\" },
+    { "type": "submenu", "title": "Dummy", "items": [] },
+    { "type": "dir", "title": "&Docs", "path": "C:\\Users\\you\\Drive\\docs" },
+    { "type": "dir", "title": "&Downloads", "path": "C:\\Users\\you\\Downloads" },
+    { "type": "command", "title": "kando", "command": "C:\\Users\\you\\Drive\\resources\\ahk\\forward to kando.exe", "args": [] }
+  ]
+}

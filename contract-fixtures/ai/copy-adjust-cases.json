@@ -1,0 +1,449 @@
+[
+  {
+    "name": "increase default step",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase"
+      }
+    }
+  },
+  {
+    "name": "increase by 3",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": 3
+      }
+    }
+  },
+  {
+    "name": "increase by 8",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": 8
+      }
+    }
+  },
+  {
+    "name": "decrease default step",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "decrease"
+      }
+    }
+  },
+  {
+    "name": "decrease by 2",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "decrease",
+        "by": 2
+      }
+    }
+  },
+  {
+    "name": "set 1",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": 1
+      }
+    }
+  },
+  {
+    "name": "set 16",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": 16
+      }
+    }
+  },
+  {
+    "name": "auto",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto"
+      }
+    }
+  },
+  {
+    "name": "priority background",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority",
+        "priority": "background"
+      }
+    }
+  },
+  {
+    "name": "priority normal",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority",
+        "priority": "normal"
+      }
+    }
+  },
+  {
+    "name": "increase by 0",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": 0
+      }
+    }
+  },
+  {
+    "name": "increase by 9",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": 9
+      }
+    }
+  },
+  {
+    "name": "increase by -1",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": -1
+      }
+    }
+  },
+  {
+    "name": "increase by 1.5",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": 1.5
+      }
+    }
+  },
+  {
+    "name": "increase by null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": null
+      }
+    }
+  },
+  {
+    "name": "increase by string",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "by": "2"
+      }
+    }
+  },
+  {
+    "name": "increase with threads",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "increase",
+        "threads": 4
+      }
+    }
+  },
+  {
+    "name": "decrease with priority",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "decrease",
+        "priority": "normal"
+      }
+    }
+  },
+  {
+    "name": "set 0",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": 0
+      }
+    }
+  },
+  {
+    "name": "set 17",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": 17
+      }
+    }
+  },
+  {
+    "name": "set without threads",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set"
+      }
+    }
+  },
+  {
+    "name": "set with by",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": 4,
+        "by": 1
+      }
+    }
+  },
+  {
+    "name": "set threads null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "set",
+        "threads": null
+      }
+    }
+  },
+  {
+    "name": "auto with threads",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto",
+        "threads": 4
+      }
+    }
+  },
+  {
+    "name": "priority without value",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority"
+      }
+    }
+  },
+  {
+    "name": "priority realtime",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority",
+        "priority": "realtime"
+      }
+    }
+  },
+  {
+    "name": "priority null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority",
+        "priority": null
+      }
+    }
+  },
+  {
+    "name": "priority with threads",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "priority",
+        "priority": "normal",
+        "threads": 2
+      }
+    }
+  },
+  {
+    "name": "unknown action",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "pause"
+      }
+    }
+  },
+  {
+    "name": "missing action",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust"
+      }
+    }
+  },
+  {
+    "name": "operation id is not accepted",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto",
+        "operationId": "op_1"
+      }
+    }
+  },
+  {
+    "name": "path is not accepted",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto",
+        "path": "C:/x"
+      }
+    }
+  },
+  {
+    "name": "wrong request id",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_2",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto"
+      }
+    }
+  },
+  {
+    "name": "unsupported version",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto"
+      }
+    }
+  },
+  {
+    "name": "extra envelope field",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "copy.adjust",
+        "action": "auto"
+      },
+      "approved": true
+    }
+  }
+]

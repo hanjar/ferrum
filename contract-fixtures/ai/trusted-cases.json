@@ -1,0 +1,500 @@
+[
+  {
+    "name": "pane snapshot",
+    "kind": "snapshot",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "activePaneAtSubmit": "left",
+      "panes": [
+        {
+          "paneId": "left",
+          "tabId": "tab_left",
+          "location": {
+            "kind": "disk",
+            "path": "C:\\left"
+          },
+          "contextRevision": 2,
+          "selectionRevision": 3,
+          "selectionHandle": "sel_left",
+          "filter": "",
+          "showHidden": false,
+          "sort": {
+            "key": "name",
+            "dir": 1
+          }
+        },
+        {
+          "paneId": "right",
+          "tabId": "tab_right",
+          "location": {
+            "kind": "disk",
+            "path": "C:\\right"
+          },
+          "contextRevision": 4,
+          "selectionRevision": 1,
+          "selectionHandle": "sel_right",
+          "filter": "",
+          "showHidden": false,
+          "sort": {
+            "key": "name",
+            "dir": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "plan",
+    "kind": "plan",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "capability": "directories.sync",
+      "sourceSnapshot": {
+        "schemaVersion": 1,
+        "requestId": "req_1",
+        "activePaneAtSubmit": "left",
+        "panes": [
+          {
+            "paneId": "left",
+            "tabId": "tab_left",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\left"
+            },
+            "contextRevision": 2,
+            "selectionRevision": 3,
+            "selectionHandle": "sel_left",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          },
+          {
+            "paneId": "right",
+            "tabId": "tab_right",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\right"
+            },
+            "contextRevision": 4,
+            "selectionRevision": 1,
+            "selectionHandle": "sel_right",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          }
+        ]
+      },
+      "previewDigest": "digest_1",
+      "risk": "mutating",
+      "requiresApproval": true,
+      "stepCount": 2,
+      "operation": {
+        "kind": "directories.sync",
+        "leftRoot": "C:\\left",
+        "rightRoot": "C:\\right",
+        "leftManifest": "manifest_left",
+        "rightManifest": "manifest_right"
+      },
+      "preview": {
+        "itemCount": 2,
+        "conflictCount": 0,
+        "totalBytes": 1024
+      },
+      "steps": [
+        {
+          "id": "step_1",
+          "capability": "directories.sync",
+          "dependsOn": []
+        },
+        {
+          "id": "step_2",
+          "capability": "directories.sync",
+          "dependsOn": [
+            "step_1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "prepared handle",
+    "kind": "handle",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "handleId": "handle_1",
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "planDigest": "digest_1",
+      "expiresAtMs": 2000000000000
+    }
+  },
+  {
+    "name": "queued receipt",
+    "kind": "receipt",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "executionId": "exec_1",
+      "planId": "plan_1",
+      "jobIds": [
+        "job_1"
+      ],
+      "state": "queued",
+      "completed": 0,
+      "failed": 0,
+      "errors": []
+    }
+  },
+  {
+    "name": "rejected plan authority",
+    "kind": "plan",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "capability": "directories.sync",
+      "sourceSnapshot": {
+        "schemaVersion": 1,
+        "requestId": "req_1",
+        "activePaneAtSubmit": "left",
+        "panes": [
+          {
+            "paneId": "left",
+            "tabId": "tab_left",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\left"
+            },
+            "contextRevision": 2,
+            "selectionRevision": 3,
+            "selectionHandle": "sel_left",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          },
+          {
+            "paneId": "right",
+            "tabId": "tab_right",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\right"
+            },
+            "contextRevision": 4,
+            "selectionRevision": 1,
+            "selectionHandle": "sel_right",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          }
+        ]
+      },
+      "previewDigest": "digest_1",
+      "risk": "safe",
+      "requiresApproval": true,
+      "stepCount": 2,
+      "operation": {
+        "kind": "directories.sync",
+        "leftRoot": "C:\\left",
+        "rightRoot": "C:\\right",
+        "leftManifest": "manifest_left",
+        "rightManifest": "manifest_right"
+      },
+      "preview": {
+        "itemCount": 2,
+        "conflictCount": 0,
+        "totalBytes": 1024
+      },
+      "steps": [
+        {
+          "id": "step_1",
+          "capability": "directories.sync",
+          "dependsOn": []
+        },
+        {
+          "id": "step_2",
+          "capability": "directories.sync",
+          "dependsOn": [
+            "step_1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "rejected handle approval injection",
+    "kind": "handle",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "handleId": "handle_1",
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "planDigest": "digest_1",
+      "expiresAtMs": 2000000000000,
+      "approved": true
+    }
+  },
+  {
+    "name": "rejected receipt state",
+    "kind": "receipt",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "executionId": "exec_1",
+      "planId": "plan_1",
+      "jobIds": [
+        "job_1"
+      ],
+      "state": "succeeded",
+      "completed": 0,
+      "failed": 0,
+      "errors": []
+    }
+  },
+  {
+    "name": "rejected null item reference",
+    "kind": "receipt",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "executionId": "exec_1",
+      "planId": "plan_1",
+      "jobIds": [
+        "job_1"
+      ],
+      "state": "partial",
+      "completed": 0,
+      "failed": 1,
+      "errors": [
+        {
+          "code": "invalid_payload",
+          "message": "failed",
+          "itemRef": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "plan with 100k items",
+    "kind": "plan",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "capability": "directories.sync",
+      "sourceSnapshot": {
+        "schemaVersion": 1,
+        "requestId": "req_1",
+        "activePaneAtSubmit": "left",
+        "panes": [
+          {
+            "paneId": "left",
+            "tabId": "tab_left",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\left"
+            },
+            "contextRevision": 2,
+            "selectionRevision": 3,
+            "selectionHandle": "sel_left",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          },
+          {
+            "paneId": "right",
+            "tabId": "tab_right",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\right"
+            },
+            "contextRevision": 4,
+            "selectionRevision": 1,
+            "selectionHandle": "sel_right",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          }
+        ]
+      },
+      "previewDigest": "digest_1",
+      "risk": "mutating",
+      "requiresApproval": true,
+      "stepCount": 2,
+      "operation": {
+        "kind": "directories.sync",
+        "leftRoot": "C:\\left",
+        "rightRoot": "C:\\right",
+        "leftManifest": "manifest_left",
+        "rightManifest": "manifest_right"
+      },
+      "preview": {
+        "itemCount": 100000,
+        "conflictCount": 0,
+        "totalBytes": 1024
+      },
+      "steps": [
+        {
+          "id": "step_1",
+          "capability": "directories.sync",
+          "dependsOn": []
+        },
+        {
+          "id": "step_2",
+          "capability": "directories.sync",
+          "dependsOn": [
+            "step_1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "plan over the item limit",
+    "kind": "plan",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "planId": "plan_1",
+      "requestId": "req_1",
+      "revision": 1,
+      "capability": "directories.sync",
+      "sourceSnapshot": {
+        "schemaVersion": 1,
+        "requestId": "req_1",
+        "activePaneAtSubmit": "left",
+        "panes": [
+          {
+            "paneId": "left",
+            "tabId": "tab_left",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\left"
+            },
+            "contextRevision": 2,
+            "selectionRevision": 3,
+            "selectionHandle": "sel_left",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          },
+          {
+            "paneId": "right",
+            "tabId": "tab_right",
+            "location": {
+              "kind": "disk",
+              "path": "C:\\right"
+            },
+            "contextRevision": 4,
+            "selectionRevision": 1,
+            "selectionHandle": "sel_right",
+            "filter": "",
+            "showHidden": false,
+            "sort": {
+              "key": "name",
+              "dir": 1
+            }
+          }
+        ]
+      },
+      "previewDigest": "digest_1",
+      "risk": "mutating",
+      "requiresApproval": true,
+      "stepCount": 2,
+      "operation": {
+        "kind": "directories.sync",
+        "leftRoot": "C:\\left",
+        "rightRoot": "C:\\right",
+        "leftManifest": "manifest_left",
+        "rightManifest": "manifest_right"
+      },
+      "preview": {
+        "itemCount": 1000001,
+        "conflictCount": 0,
+        "totalBytes": 1024
+      },
+      "steps": [
+        {
+          "id": "step_1",
+          "capability": "directories.sync",
+          "dependsOn": []
+        },
+        {
+          "id": "step_2",
+          "capability": "directories.sync",
+          "dependsOn": [
+            "step_1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "receipt with 100k completed",
+    "kind": "receipt",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "executionId": "exec_1",
+      "planId": "plan_1",
+      "jobIds": [
+        "job_1"
+      ],
+      "state": "completed",
+      "completed": 100000,
+      "failed": 0,
+      "errors": []
+    }
+  },
+  {
+    "name": "receipt over the item limit",
+    "kind": "receipt",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "executionId": "exec_1",
+      "planId": "plan_1",
+      "jobIds": [
+        "job_1"
+      ],
+      "state": "completed",
+      "completed": 1000001,
+      "failed": 0,
+      "errors": []
+    }
+  }
+]

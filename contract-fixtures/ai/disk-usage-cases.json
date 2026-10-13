@@ -1,0 +1,487 @@
+[
+  {
+    "name": "largestFiles minimal",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles"
+        }
+      }
+    }
+  },
+  {
+    "name": "largestFiles full",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "scope": "root",
+          "category": "video",
+          "limit": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "largestFiles view limit 1",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "scope": "view",
+          "limit": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "largestFiles archive category",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "category": "archive",
+          "limit": 5
+        }
+      }
+    }
+  },
+  {
+    "name": "largestFolders minimal",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFolders"
+        }
+      }
+    }
+  },
+  {
+    "name": "largestFolders full",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFolders",
+          "scope": "root",
+          "limit": 7
+        }
+      }
+    }
+  },
+  {
+    "name": "summary",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        }
+      }
+    }
+  },
+  {
+    "name": "limit 0",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "limit": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "limit 21",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFolders",
+          "limit": 21
+        }
+      }
+    }
+  },
+  {
+    "name": "limit negative",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "limit": -1
+        }
+      }
+    }
+  },
+  {
+    "name": "limit fractional",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "limit": 2.5
+        }
+      }
+    }
+  },
+  {
+    "name": "limit string",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "limit": "5"
+        }
+      }
+    }
+  },
+  {
+    "name": "limit null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "limit": null
+        }
+      }
+    }
+  },
+  {
+    "name": "scope null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "scope": null
+        }
+      }
+    }
+  },
+  {
+    "name": "category null",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "category": null
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown scope",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "scope": "drive"
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown category",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "category": "exe"
+        }
+      }
+    }
+  },
+  {
+    "name": "category on folders",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFolders",
+          "category": "video"
+        }
+      }
+    }
+  },
+  {
+    "name": "limit on summary",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary",
+          "limit": 5
+        }
+      }
+    }
+  },
+  {
+    "name": "scope on summary",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary",
+          "scope": "root"
+        }
+      }
+    }
+  },
+  {
+    "name": "path on files",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "path": "C:/Users"
+        }
+      }
+    }
+  },
+  {
+    "name": "path on folders",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFolders",
+          "root": "D:\\"
+        }
+      }
+    }
+  },
+  {
+    "name": "name on files",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "largestFiles",
+          "name": "secret"
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown kind",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "delete"
+        }
+      }
+    }
+  },
+  {
+    "name": "missing kind",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "limit": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "missing query",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query"
+      }
+    }
+  },
+  {
+    "name": "query not object",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": "largestFiles"
+      }
+    }
+  },
+  {
+    "name": "top-level limit",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        },
+        "limit": 3
+      }
+    }
+  },
+  {
+    "name": "top-level extra",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        },
+        "confirmed": true
+      }
+    }
+  },
+  {
+    "name": "wrong case capability",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskusage.query",
+        "query": {
+          "kind": "summary"
+        }
+      }
+    }
+  },
+  {
+    "name": "extra envelope field",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        }
+      },
+      "extra": 1
+    }
+  },
+  {
+    "name": "schema version 2",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        }
+      }
+    }
+  },
+  {
+    "name": "request id mismatch",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_2",
+      "intent": {
+        "capability": "diskUsage.query",
+        "query": {
+          "kind": "summary"
+        }
+      }
+    }
+  }
+]

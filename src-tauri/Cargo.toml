@@ -1,0 +1,88 @@
+[package]
+name = "ferrum"
+version = "0.2.0"
+description = "Ferrum — dual-pane file manager"
+authors = ["hanjar and Ferrum contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hanjar/ferrum"
+edition = "2024"
+rust-version = "1.90"
+# Three binaries ship: the app, the elevated scan helper (FER-460), and the
+# FerrumIndexer service (FER-474).
+default-run = "ferrum"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "ferrum_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.0", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+regex = "1.11"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+tauri = { version = "2.12.0", features = [] }
+getrandom = "0.3"
+tauri-plugin-log = "2"
+trash = "5"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1"
+hex = "0.4"
+ureq = "3"
+notify = "7"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Wdk_Storage_FileSystem",
+    "Wdk_Foundation",
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    # FER-460 fast-scan launcher: pipe server, DACL, UAC ShellExecuteEx.
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_Ioctl",
+    "Win32_Globalization",
+    "Win32_System_Registry",
+    "Win32_Security_Authorization",
+    # FER-474 I2: SetDefaultDllDirectories in the elevated/SYSTEM binaries.
+    "Win32_System_LibraryLoader",
+    # FER-490 agent CLI runner: kill-on-close job object + resume of a suspended start.
+    "Win32_System_JobObjects",
+    "Win32_System_Diagnostics_ToolHelp",
+    # FER-462 R1 (review S1): is the window station interactive before showing a message box.
+    "Win32_System_StationsAndDesktops",
+] }
+# FER-464: deflate for the Disk usage scan cache (already in the lock via zip).
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+zip = { version = "=4.6.1", default-features = false, features = ["deflate", "aes-crypto"] }
+sevenz-rust2 = { version = "=0.20.2", default-features = false, features = ["compress", "aes256"] }
+unrar = "=0.5.8"
+ferrum-activity-contract = { path = "src/activity" }
+ferrum-activity-store = { path = "src/activity/store" }
+# FER-460: MFT parser + pipe protocol shared with ferrum-scan-helper.exe.
+ferrum-ntfs-scan = { path = "crates/ntfs-scan" }
+# FER-474: FerrumIndexer service (bin ferrum-indexer) + its pipe client.
+ferrum-indexer = { path = "crates/indexer" }
+unicode-normalization = "0.1"
+# FER-493: streaming XML for Office text extraction (already in the lock via plist; no DTD support).
+quick-xml = { version = "=0.42.0", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+png = "0.18"

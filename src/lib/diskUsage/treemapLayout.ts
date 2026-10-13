@@ -1,0 +1,291 @@
+/**
+ * DSK-05 — squarified treemap layout. Pure, deterministic, DOM-free.
+ *
+ * Contract bindings (docs/disk-usage-contract.md):
+ * - §2.2 allocated bytes `null` = unavailable: its area is 0 and logical
+ *   bytes are NEVER substituted; the item stays visible as a member of the
+ *   virtual Other group (nothing is dropped).
+ * - §3.8 stable tie-break: equal values order by id ascending, so the same
+ *   dataset always yields the same rects (progressive scans included).
+ * - §2.6 plain numbers only; integer rect rounding overflows the canvas by
+ *   at most 1px (see `rect()`).
+ */
+
+import type { DiskUsageChildItem, DiskUsageSizeMetric } from '../ipc/types';
+
+/** Reserved id of the virtual "Other" group tile. */
+export const OTHER_ID = '__other__';
+
+/**
+ * DSK-10 (FER-408) — responsive tree column template. The counts columns may
+ * shrink in a narrow half-window panel, but the NAME column never goes below
+ * 140px and a row never below its track minimum — below that the tree
+ * container scrolls horizontally (a visible scrollbar), so no column is ever
+ * silently clipped. Shared by the tree component and its tests.
+ */
+export const DU_TREE_ROW_COLUMNS =
+  '20px minmax(140px, 1fr) minmax(48px, 64px) minmax(64px, 84px) minmax(40px, 52px) minmax(52px, 72px)';
+/** Tracks 20+140+48+64+40+52 + 5×8 gaps + 2×10 row padding. */
+export const DU_TREE_ROW_MIN_WIDTH = 424;
+
+export interface TreemapOptions {
+  /** Byte metric driving the areas — the SAME metric the caller displays. */
+  metric: DiskUsageSizeMetric;
+  /** Items outside the top N by value are grouped into Other (default 12). */
+  maxTiles?: number;
+  /** Items below this fraction of the total area are grouped (default 0.015). */
+  smallFraction?: number;
+}
+
+/** Aggregated small tiles — members stay addressable for tooltip/detail. */
+export interface OtherGroup {
+  id: typeof OTHER_ID;
+  /** "Other · N item" */
+  label: string;
+  count: number;
+  /** Sum of member logicalBytes (complete for the logical metric). */
+  logicalBytes: number;
+  /** Sum of member allocatedBytes; null when ANY member is null (partial —
+   *  never padded with logical bytes, contract §2.2). */
+  allocatedBytes: number | null;
+  /** Sum of the selected metric over members (null allocated → 0 area). */
+  value: number;
+  /** Original items, largest first — the tooltip/detail list. */
+  members: DiskUsageChildItem[];
+}
+
+export interface TreemapRect {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Item name, or "Other · N item". */
+  label: string;
+  /** Metric bytes driving the area (Other: sum of member metric values). */
+  value: number;
+  /** The original item — absent for the Other group tile. */
+  item?: DiskUsageChildItem;
+  /** Set exactly when id === OTHER_ID. */
+  otherGroup?: OtherGroup;
+}
+
+export interface SquarifyResult {
+  rects: TreemapRect[];
+  /** Sum of the selected metric over ALL input items (0 for empty input). */
+  totalValue: number;
+  /** How many items were folded into the Other group (0 = no group). */
+  otherCount: number;
+}
+
+/** Bytes of `item` under `metric`. Null allocated → 0, never logical (§2.2). */
+export function metricValue(item: DiskUsageChildItem, metric: DiskUsageSizeMetric): number {
+  return metric === 'allocated' ? (item.allocatedBytes ?? 0) : item.logicalBytes;
+}
+
+/** Largest-first with the §3.8 stable id tie-break. */
+function byValueDesc(
+  items: DiskUsageChildItem[],
+  metric: DiskUsageSizeMetric,
+): DiskUsageChildItem[] {
+  return [...items].sort((a, b) => {
+    const d = metricValue(b, metric) - metricValue(a, metric);
+    if (d !== 0) return d;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/**
+ * Split into regular tiles and (optionally) one virtual Other group.
+ * A tile is "small" — and joins Other — when it sits outside the top
+ * `maxTiles` OR its value is below `smallFraction` of the total. Zero-value
+ * items (null allocated) always end up in Other, so they stay listed without
+ * stealing area. The regular set is never left empty while total > 0.
+ */
+function groupOther(
+  items: DiskUsageChildItem[],
+  opts: TreemapOptions,
+): { tiles: DiskUsageChildItem[]; other: OtherGroup | null; totalValue: number } {
+  const maxTiles = Math.max(1, opts.maxTiles ?? 12);
+  const smallFraction = opts.smallFraction ?? 0.015;
+  const sorted = byValueDesc(items, opts.metric);
+  const totalValue = sorted.reduce((s, it) => s + metricValue(it, opts.metric), 0);
+
+  const smallIdx = new Set<number>();
+  for (let i = 0; i < sorted.length; i++) {
+    if (
+      i >= maxTiles ||
+      (totalValue > 0 && metricValue(sorted[i], opts.metric) / totalValue < smallFraction)
+    ) {
+      smallIdx.add(i);
+    }
+  }
+  if (smallIdx.size === sorted.length && totalValue > 0) {
+    smallIdx.delete(0); // keep the largest tile out of Other
+  }
+
+  const tiles = sorted.filter((_, i) => !smallIdx.has(i));
+  const members = sorted.filter((_, i) => smallIdx.has(i));
+  let other: OtherGroup | null = null;
+  if (members.length > 0) {
+    let logicalBytes = 0;
+    let allocatedBytes = 0;
+    let allocatedNull = false;
+    let value = 0;
+    for (const m of members) {
+      logicalBytes += m.logicalBytes;
+      if (m.allocatedBytes === null) allocatedNull = true;
+      else allocatedBytes += m.allocatedBytes;
+      value += metricValue(m, opts.metric);
+    }
+    other = {
+      id: OTHER_ID,
+      label: `Other · ${members.length} item`,
+      count: members.length,
+      logicalBytes,
+      allocatedBytes: allocatedNull ? null : allocatedBytes,
+      value,
+      members,
+    };
+  }
+  return { tiles, other, totalValue };
+}
+
+/**
+ * Squarified layout (Bruls et al.), the prototype algorithm from
+ * design/disk-usage/index.html. Input order does not matter — items are
+ * sorted internally, so the same dataset always produces the same rects.
+ *
+ * Returns no rects when: input empty, canvas degenerate (≤ 0), or totalValue
+ * is 0 (caller shows an empty state; drawing zero-precision rects would
+ * pretend knowledge the scan does not have).
+ */
+export function squarify(
+  items: DiskUsageChildItem[],
+  width: number,
+  height: number,
+  opts: TreemapOptions,
+): SquarifyResult {
+  const { tiles, other, totalValue } = groupOther(items, opts);
+  const otherCount = other ? other.count : 0;
+  const empty: SquarifyResult = { rects: [], totalValue, otherCount };
+
+  if (
+    items.length === 0 ||
+    totalValue <= 0 ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return empty;
+  }
+
+  type Entry = {
+    item: DiskUsageChildItem | null;
+    other: OtherGroup | null;
+    value: number;
+    area: number;
+  };
+  const canvas = width * height;
+  const entries: Entry[] = tiles.map((item) => {
+    const value = metricValue(item, opts.metric);
+    return { item, other: null, value, area: (value / totalValue) * canvas };
+  });
+  if (other) {
+    // The group keeps a rect even when its value is 0 (all-null allocated):
+    // zero-area, but the members remain attached and visible in the legend.
+    entries.push({
+      item: null,
+      other,
+      value: other.value,
+      area: (other.value / totalValue) * canvas,
+    });
+  }
+
+  const rects: TreemapRect[] = [];
+
+  // Integer rounding with ≤ 1px overflow: edges round outward at most 0.5px
+  // and are clamped to the canvas, so a rect never exceeds the bounds by
+  // more than 1px (contract brief: overflow rounding ≤ 1px).
+  function rect(e: Entry, x: number, y: number, w: number, h: number): TreemapRect {
+    const rx = Math.max(0, Math.round(x));
+    const ry = Math.max(0, Math.round(y));
+    const rw = Math.max(0, Math.min(Math.round(x + w) - rx, Math.round(width) - rx));
+    const rh = Math.max(0, Math.min(Math.round(y + h) - ry, Math.round(height) - ry));
+    if (e.other) {
+      return {
+        id: e.other.id,
+        x: rx,
+        y: ry,
+        w: rw,
+        h: rh,
+        label: e.other.label,
+        value: e.other.value,
+        otherGroup: e.other,
+      };
+    }
+    const item = e.item as DiskUsageChildItem;
+    return { id: item.id, x: rx, y: ry, w: rw, h: rh, label: item.name, value: e.value, item };
+  }
+
+  let cx = 0;
+  let cy = 0;
+  let cw = width;
+  let ch = height;
+  let row: Entry[] = [];
+
+  const worst = (r: Entry[], side: number): number => {
+    const s = r.reduce((a, q) => a + q.area, 0);
+    let worstRatio = 0;
+    for (const q of r) {
+      const ratio = Math.max((side * side * q.area) / (s * s), (s * s) / (side * side * q.area));
+      if (ratio > worstRatio) worstRatio = ratio;
+    }
+    return worstRatio;
+  };
+
+  const layRow = (r: Entry[]): void => {
+    const s = r.reduce((a, q) => a + q.area, 0);
+    if (s <= 0 || cw <= 0 || ch <= 0) return;
+    if (cw >= ch) {
+      // vertical strip on the left
+      const stripW = s / ch;
+      let yy = cy;
+      for (const q of r) {
+        const qh = q.area / stripW;
+        rects.push(rect(q, cx, yy, stripW, qh));
+        yy += qh;
+      }
+      cx += stripW;
+      cw -= stripW;
+    } else {
+      // horizontal strip on top
+      const stripH = s / cw;
+      let xx = cx;
+      for (const q of r) {
+        const qw = q.area / stripH;
+        rects.push(rect(q, xx, cy, qw, stripH));
+        xx += qw;
+      }
+      cy += stripH;
+      ch -= stripH;
+    }
+  };
+
+  for (const e of entries) {
+    if (e.area <= 0) {
+      rects.push(rect(e, 0, 0, 0, 0)); // zero-area group stays in the output
+      continue;
+    }
+    if (row.length === 0 || worst([...row, e], Math.min(cw, ch)) <= worst(row, Math.min(cw, ch))) {
+      row.push(e);
+    } else {
+      layRow(row);
+      row = [e];
+    }
+  }
+  if (row.length > 0) layRow(row);
+
+  return { rects, totalValue, otherCount };
+}

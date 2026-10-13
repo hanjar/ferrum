@@ -1,0 +1,99 @@
+{
+  "diskLocation": { "kind": "disk", "path": "C:\\Work" },
+  "location": {
+    "kind": "archive",
+    "archivePath": "C:\\Work\\photos.zip",
+    "memberPath": "albums/été"
+  },
+  "entry": {
+    "memberPath": "albums/été/photo.jpg",
+    "name": "photo.jpg",
+    "isDir": false,
+    "size": 2048,
+    "modifiedMs": 1790512000000
+  },
+  "capabilities": {
+    "format": "zip",
+    "list": false,
+    "read": false,
+    "extract": false,
+    "create": false,
+    "test": false,
+    "encryptedRead": false,
+    "encryptedCreate": false,
+    "multiVolume": false
+  },
+  "listRequest": {
+    "location": {
+      "kind": "archive",
+      "archivePath": "C:\\Work\\photos.zip",
+      "memberPath": "albums/été"
+    },
+    "requestToken": 42
+  },
+  "listResponse": {
+    "location": {
+      "kind": "archive",
+      "archivePath": "C:\\Work\\photos.zip",
+      "memberPath": "albums/été"
+    },
+    "requestToken": 42,
+    "entries": [
+      {
+        "memberPath": "albums/été/photo.jpg",
+        "name": "photo.jpg",
+        "isDir": false,
+        "size": 2048,
+        "modifiedMs": 1790512000000
+      }
+    ]
+  },
+  "readRequest": {
+    "location": {
+      "kind": "archive",
+      "archivePath": "C:\\Work\\photos.zip",
+      "memberPath": "albums/été/photo.jpg"
+    },
+    "maxBytes": 4096
+  },
+  "extractRequest": {
+    "archivePath": "C:\\Work\\photos.zip",
+    "memberPaths": ["albums/été/photo.jpg"],
+    "destinationPath": "C:\\Output",
+    "conflict": "skip",
+    "limits": {
+      "maxEntries": 10000,
+      "maxTotalBytes": 1073741824,
+      "maxEntryBytes": 268435456,
+      "maxDepth": 32
+    }
+  },
+  "createRequest": {
+    "format": "zip",
+    "sourcePaths": ["C:\\Work\\photo.jpg"],
+    "destinationPath": "C:\\Output\\photos.zip",
+    "conflict": "skip"
+  },
+  "testRequest": { "archivePath": "C:\\Work\\photos.zip" },
+  "readResponse": { "bytes": [72, 105], "truncated": false },
+  "operationResponse": { "operationId": "op_archive42" },
+  "testResponse": {
+    "archivePath": "C:\\Work\\photos.zip",
+    "entries": [{ "memberPath": "albums/été/photo.jpg", "status": "passed" }]
+  },
+  "progress": {
+    "operationId": "op_archive42",
+    "kind": "extract",
+    "processedBytes": 2048,
+    "totalBytes": 4096,
+    "processedEntries": 1,
+    "totalEntries": 2,
+    "currentMemberPath": "albums/été/photo.jpg"
+  },
+  "error": {
+    "code": "unsafeEntry",
+    "message": "Archive member escapes destination",
+    "archivePath": "C:\\Work\\photos.zip",
+    "memberPath": "../escape.txt"
+  }
+}

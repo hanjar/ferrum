@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "requestId": "query-001",
+  "privacyEpoch": 7,
+  "view": "history",
+  "query": "invoce",
+  "kind": "folder",
+  "bounds": { "fromUtcMs": 1780012800000, "untilUtcMs": 1780099200000 },
+  "limit": 20,
+  "cursor": null,
+  "workspaceId": null
+}

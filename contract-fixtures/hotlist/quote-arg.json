@@ -1,0 +1,11 @@
+[
+  { "arg": "plain", "quoted": "plain" },
+  { "arg": "", "quoted": "\"\"" },
+  { "arg": "a b", "quoted": "\"a b\"" },
+  { "arg": "say \"hi\"", "quoted": "\"say \\\"hi\\\"\"" },
+  { "arg": "C:\\dir with space\\", "quoted": "\"C:\\dir with space\\\\\"" },
+  { "arg": "C:\\nospace\\", "quoted": "C:\\nospace\\" },
+  { "arg": "a\\\"b", "quoted": "\"a\\\\\\\"b\"" },
+  { "arg": "tab\there", "quoted": "\"tab\there\"" },
+  { "arg": "-x=1", "quoted": "-x=1" }
+]

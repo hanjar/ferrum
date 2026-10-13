@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "requestId": "query-001",
+  "privacyEpoch": 7,
+  "rankingVersion": 1,
+  "complete": true,
+  "nextCursor": null,
+  "coverage": { "fromUtcMs": 1780012800000, "untilUtcMs": 1780099200000, "oldestRetainedUtcMs": 1772236800000, "truncated": false },
+  "entries": [{
+    "entity": {
+      "id": "entity-001",
+      "kind": "folder",
+      "provider": "local",
+      "volumeId": "volume-001",
+      "locator": "C:\\Work\\invoice",
+      "displayName": "invoice",
+      "parentPath": "C:\\Work",
+      "availability": "available"
+    },
+    "lastAccessUtcMs": 1780050000000,
+    "episodeCount": 3,
+    "activeDays": 2,
+    "frequentScore": 2.45,
+    "matchKind": "fuzzy",
+    "reasonCodes": ["similarName", "visitedInFerrum"]
+  }]
+}

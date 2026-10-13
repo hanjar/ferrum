@@ -1,0 +1,195 @@
+# F2-01 archive backend spike (Windows host, 2026-09-28)
+
+Scope: standalone `src-tauri/examples/archive_spike.rs`; **not connected to Tauri IPC/UI and not safe extraction code**. Run from `src-tauri` with `cargo run --locked --example archive_spike` (fresh process-specific OS temp directory), or provide a **new empty** output directory as first argument. Probe refuses nonempty directories to prevent clobbering files; generate committed fixtures into `contract-fixtures/archive-spike` only after moving/removing the prior generated corpus deliberately. Optional second argument is a lawfully generated RAR fixture; then probe lists and calls `test()` on every member, with no output extraction. Do not pass someone else's copyrighted payload. AES fixtures use random IV/salt, so names, plaintext and behavior reproduce, but encrypted archive bytes do not.
+
+## Measured capability (exact versions/features in Cargo.toml)
+
+| Format/backend                                                   | List without extracting                                                      | Create / read stream                                                                                                                                             | Integrity                                                                                     | Password                                                                     | Cancel/progress                                                                                                                                             | Unproven                                                                                                                              |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| ZIP, `zip` 4.6.1 (`deflate`, `aes-crypto`; default features off) | PASS: normal Unicode nested, empty                                           | PASS: Deflate; `Read` streamed into file with 8 KiB buffer; 1 MiB repeated synthetic member created/read without megabyte buffer                                 | PASS: full stream read rejected flipped compressed byte; truncated central directory rejected | PASS: created/read AES-256; no/wrong password rejected                       | Own read-copy loop checks atomic flag per 8 KiB read and counts bytes; active ZIP read interrupted after 8,192 bytes; writer cancellation/staging not built | ZIP64 boundaries, ZipCrypto, other codecs, symlinks, multivolume, progress/cancel during active codec, interop with external archiver |
+| 7z, `sevenz-rust2` 0.20.2 (`compress`, `aes256`; defaults off)   | PASS: normal Unicode nested, empty, `.7zip` alias with 7z signature          | PASS: non-solid LZMA2 via `push_archive_entry`, callback streams decoded bytes; 1 MiB repeat created/read with 8 KiB decode buffer and no full member allocation | PASS: full decode rejects flipped packed payload; flipped start-header byte rejected          | PASS: created/read AES-256 with encrypted header; no/wrong password rejected | Own callback counts bytes/checks atomic flag per 8 KiB; active 7z read interrupted after 8,192 bytes; writer/staging and solid cancel granularity unproven  | Solid, alternate codec, multipart, 7z external interop, memory ceilings                                                               |
+| RAR/RAR5, `unrar` 0.5.8 + vendored UnRAR C++                     | Compiles and links on host, but **NO legal RAR fixture here: list untested** | Read/extract **untested**; writer unsupported by design                                                                                                          | `test()` API exists; optional supplied fixture path tests real streams; **untested on host**  | API `Archive::with_password` exists; **untested**                            | Streaming/file APIs, callback cancellation and progress **unproven**; `read()` returns whole `Vec<u8>`                                                      | RAR/RAR5, encrypted, multipart, corruption, cross-platform binaries; **RAR creation prohibited by chosen engine**                     |
+
+`zip`'s `by_index_decrypt` distinguishes absent/bad password on probed AES data, but do not generalize error mapping to every ZIP variant. `sevenz-rust2` header encryption blocks even metadata listing without password on this fixture. Listing or matching a checksum in header **is not** integrity testing; full decoded streams must be consumed. Probe outputs test one member at a time into a sibling `.out`, compares bytes, then deletes it; this is deliberately **not** a general-purpose extractor. Malicious `../outside.txt` member names remain visible in ZIP/7z readers: never concatenate them into output paths. F2-03 must add containment, Windows ADS/reserved names/case collisions, symlink/junction policy, quotas, staging, cleanup, and robust cancellation before any UI extraction.
+
+### Fixture corpus generated at `contract-fixtures/archive-spike/`
+
+`empty.zip`, `empty.7z`; `owned.zip`, `owned.7z` (35-byte project-authored UTF-8 nested Unicode payload); `alias.7zip` (same 7z signature as `owned.7z`); `encrypted.zip` (AES-256), `encrypted.7z` (AES-256/encrypted header, known demo password inside example); `repeat.zip`, `repeat.7z` (1 MiB repetitive payload, streamed creation/8 KiB decode buffer); `traversal.zip`, `traversal.7z` (`../outside.txt`; **not safe to extract**); `damaged-payload.zip`, `damaged-payload.7z` (flipped packed data); `truncated.zip`; `corrupt.7z` (flipped start-header CRC area). No RAR, solid/multipart/ZIP64 fixture; no external copyrighted content. AES salt/IV random by libraries; don't compare fixture byte hashes between runs. `.7zip` is nonstandard extension accepted only when six-byte signature is `37 7A BC AF 27 1C`. ZIP entry magic alone likewise does not certify a valid archive.
+
+### Host evidence
+
+Windows 11 x64 (`rustc 1.98.1`), `cargo run --locked --example archive_spike -- ../contract-fixtures/archive-spike`: exit 0; reported empty ZIP/7z (zero entries); nested Unicode ZIP 35 bytes and 7z 35 bytes; AES-256 ZIP/7z password-required/wrong-password detection; 7z `.7zip` signature; 1,048,576 bytes each created and decoded by ZIP and 7z with bounded 8 KiB decode buffer; altered packed data rejected during full read for both ZIP and 7z; active ZIP and 7z copy cancelled after 8,192 bytes each; traversal names remained present; corrupt 7z header and truncated ZIP rejected. Final executable `src-tauri/target/debug/examples/archive_spike.exe`: `stat -c %s` = **3,470,848 bytes** (debug, platform- and build-dependent; not application or incremental overhead). Initial dependency resolution/compile attempt took 55.89 s but failed one source type error; next link attempt failed missing `Advapi32` in `unrar_sys`; successful warm unchanged run took 0.89 s including execution; last source-change run took 2.72 s including execution. **No clean successful build-time baseline, release binary, incremental app size, Linux/macOS runtime, or RAR-content result measured.** Windows fix in example links `Advapi32`; app integration must link it too if using UnRAR. `where.exe 7z`, `where.exe 7za`, `where.exe rar`, and `where.exe WinRAR` found no executable on PATH. `C:/Program Files/WinRAR/Rar.exe` does exist outside PATH; installation files date ~31 months ago, and no registration file appeared in install directory or common per-user locations. Since a current license cannot be established and [RARLAB EULA](https://www.rarlab.com/license.htm) limits unlicensed evaluation to 40 days, **the installed RAR writer was not invoked**. No download/bundling performed.
+
+### Licenses and distribution
+
+- [`zip` 4.6.1 manifest](https://github.com/zip-rs/zip2/blob/v4.6.1/Cargo.toml): MIT; default feature set contains `lzma-static` native dependency, avoided here. Narrow selected Deflate + AES still requires reviewing transitive dependencies before release. ZIP64 and optional codecs require separate tests.
+- [`sevenz-rust2` 0.20.2 manifest](https://github.com/hasenbanck/sevenz-rust2/blob/v0.20.2/Cargo.toml): Apache-2.0, pure Rust crate, MSRV 1.85; selected features `compress`, `aes256`. [Codec table](https://docs.rs/sevenz-rust2/0.20.2/sevenz_rust2/) distinguishes core COPY/LZMA/LZMA2 and feature-gated codecs. Only LZMA2 + AES actually exercised; do not advertise untested codecs or feature-disabled variants.
+- [`unrar` 0.5.8 manifest](https://github.com/muja/unrar.rs/blob/master/Cargo.toml): wrapper MIT OR Apache-2.0; vendored UnRAR C++ has **different, restrictive license**. [RARLAB's UnRAR license](https://github.com/muja/unrar.rs/blob/master/unrar_sys/vendor/unrar/license.txt) permits use to handle RAR, prohibits re-creating RAR compression, and requires specified paragraph in resulting license/documentation **and source comments** for modified UnRAR source. Need legal review and notice packaging before shipping; not an MIT-only dependency. Its [build script](https://github.com/muja/unrar.rs/blob/master/unrar_sys/build.rs) compiles vendored C++14 through `cc`, requiring working native C++ compiler/toolchain on each target. Windows MSVC link additionally needed `Advapi32` in this probe. Linux/macOS compile/run and redistributable packaging **untested**. No WinRAR/RAR sidecar included; [RARLAB WinRAR EULA](https://www.rarlab.com/license.htm) does not grant bundling arbitrary WinRAR trial binaries.
+- [`unrar` API](https://docs.rs/unrar/0.5.8/unrar/) exposes listing, processing, encrypted and multipart handling, `test()` and `read()` (allocates full member); **none implies verified content support without fixture**. No RAR writer. RAR create should not be offered.
+
+Decision: ZIP + sevenz Rust for their proven host write/read streams; RAR reader candidate remains conditional on legal notice/distribution review and legal content fixture. Do not claim phase-2 format support until F2-03–F2-12 safely integrate and verify it. `libarchive` native/sidecar alternative was not compiled or benchmarked; avoid an extra dependency without evidence. Cross-platform verification remains separate work, not a pass inferred from crate documentation.
+
+## F2-02 — kontrak lokasi virtual, belum terhubung ke aplikasi
+
+`src-tauri/src/archive_contract.rs` dan `src/lib/ipc/types.ts` mendefinisikan lokasi disk `{kind:"disk",path}` versus lokasi arsip `{kind:"archive",archivePath,memberPath}`. `memberPath` relatif, separator `/`, kosong berarti root; bukan path OS. Entry hanya anggota langsung dari direktori yang diminta, selection memakai `(archivePath, memberPath)`; sort/filter lokal bekerja pada metadata listing, tanpa ekstraksi atau transfer seluruh isi. Archive root naik ke direktori disk pembungkus; child di dalam arsip naik ke member parent; nested archive tidak dibuka pada F2-02. Riwayat tab menyimpan `Location` utuh, bukan string path; token permintaan monoton per tab menolak listing lama setelah perubahan lokasi/tab, termasuk respons lama yang rusak. `ArchiveListingGate` baru kontrak tersendiri; `PaneStore` disk lama belum dimigrasikan.
+
+Kontrak `ArchiveProvider` menetapkan `capabilities`, `list`, `read` bounded dengan callback, `extract`, `create`, `test`, progress dan kebijakan konflik. Payload perintah bernama `archive_list`, `archive_read`, `archive_extract`, `archive_create`, `archive_test` dengan contoh JSON bersama `contract-fixtures/archive-contract.json`. Error khusus meliputi `unsupportedCodec`, `passwordRequired`, `badPassword`, `corruptArchive`, `unsafeEntry`, `limitExceeded`; capability fixture menyatakan fitur backend secara konseptual, **bukan** kemampuan aplikasi yang sudah tersedia. Semua command masih **belum didaftarkan di Tauri** dan tidak ada tombol/aksi browsing arsip. `src-tauri/src/lib.rs`, `ipc.rs`, frontend bridge dan pane adalah milik jalur integrasi lain menurut board; F2-02 belum memenuhi acceptance end-to-end sampai owner itu menyambungkan handler nyata, typed invokes dan state tab. Jangan mengaktifkan Pack/Unpack/Test atau klaim dukungan arsip sebelum F2-03–F2-12 dan E2E. Runtime extraction policy (symlink, collisions, quotas, staging) belum diimplementasikan.
+
+## F2-03 — pipeline ekstraksi aman (selesai di tingkat engine)
+
+`src-tauri/src/archive_extract.rs` menyediakan pipeline ekstraksi penuh yang dipakai semua format:
+
+- **preflight** menolak nama member berbahaya sebelum satu byte pun ditulis: separator lintas OS, absolut/drive/UNC, traversal, NUL, ADS, reserved Windows (CON/PRN/COM¹/LPT1), collision tanpa kapital, file-sebagai-parent, symlink/special entry, depth limit.
+- **quota**: jumlah entry, depth, besar per-entry, total expanded bytes, peringatan rasio >=100:1; ceiling tepercaya (10k entry / 2 GB total / 512 MB per entry / depth 32) membatasi permintaan, tak bisa dinaikkan caller.
+- **stream_checked**: streaming byte terdekode dengan cancel + limit runtime; sink dipasok pemanggil.
+- **publikasi no-follow**: `archive_publish.rs` membuka destination root via `CreateFileW` (ditolak bila reparse point), lalu semua child dibuat/dibuka melalui `NtCreateFile` dengan `RootDirectory` = handle parent (Unix: `openat` + `O_NOFOLLOW`) dan `FILE_OPEN_REPARSE_POINT`; komponen yang ditukar menjadi junction/symlink ditolak (terbukti oleh test junction Windows tanpa privilege).
+- **staging + commit**: byte ditulis ke `<final>.ferrum-partial-<pid>-<seq>` (no-clobber, no-follow); commit = close handle lalu rename ke nama final di dalam destination yang sama, dengan symlink-check terakhir. Gagal/cancel: staging dihapus (cek symlink sebelum remove), nama final tidak pernah memuat byte parsial.
+- **konflik**: Skip / Overwrite / Rename `name (2).ext` / OverwriteOlder (mtime source dari format bila tersedia).
+
+**Residual risk terdokumentasi:** commit rename memakai full path di dalam destination root yang sudah divalidasi non-reparse pada open time; penyerang dengan write access ke destination dapat menukar root pada jendela terakhir. Hardening penuh butuh rename handle-relative (NtSetInformationFile/FileRenameInformationEx dengan RootDirectory) — dicatat untuk hardening F2-12. POSIX disposition pada handle buatan NtCreateFile terbukti no-op pada host Windows ini (sukses API tapi tidak diterapkan) sehingga rollback memakai unlink path staging yang jelas bernama partial. Symlink file individual ditolak (D07). Linux/macOS belum diuji.
+
+## F2-07+F2-08 — create ZIP + test integritas
+
+**Create ZIP:** `create_zip` di `archive_create_test.rs` mengumpulkan file secara rekursif (skip symlink per D07, tolak traversal `.`/`..`, tolak source hilang), tulis ke sibling temp `.<nama>.<pid>-<n>.ferrum-tmp` yang dibuat eksklusif (tidak pernah memotong file pengguna) lalu dipublikasikan menurut kebijakan konflik (FER-411): `skip` tidak pernah mengganti dan mengembalikan `alreadyExists`, `rename` memakai `nama (n).ext` pertama yang bebas, `overwrite` mengganti secara eksplisit — kegagalan tidak pernah meninggalkan archive parsial di path final maupun file sementara. Entri di dalam ZIP memakai nama final (bukan staging) karena staging hanya diperlukan untuk ekstraksi, bukan untuk pembuatan (zip crate melakukan CRC di write).
+
+**Create 7z:** sevenz-rust2 crate tersedia sebagai optional dep (feature `archive-spike`). Wiring create 7z menunggu aktivasi feature di build rilis. RAR create tidak akan pernah didukung (lisensi UnRAR).
+
+**Test integritas:** `test_zip` mendekode setiap member sampai EOF (zip crate memverifikasi CRC saat decode), `test_rar` memakai per-member unrar `test()` (validasi decode + CRC tanpa ekstrak). Kedua fungsi mengembalikan `ArchiveTestReport` dengan status per-member: `Passed` atau `Failed` + error.
+
+**Progress + cancel:** trait `ArchiveProvider::extract` dan `create` menerima callback `progress` yang dapat mengembalikan `false` untuk cancel; pipeline F2-03 mengeksekusi cancel di antara member dan menghapus staging.
+
+## F2-28 — verifikasi host Windows (29 September 2026)
+
+Bukti lengkap: `docs/verification-matrix.md` (bagian phase-2). Ringkasan perubahan pada dukungan arsip yang lahir dari audit ini:
+
+- **Password ZIP kini dipakai engine, bukan diabaikan.** `read`/`extract`/`test` ZIP mendekripsi member AES via `by_index_decrypt`; tanpa password → `PasswordRequired`, salah → `BadPassword` (sebelumnya keduanya keluar sebagai `CorruptArchive` generik). `test_zip`/`test_rar` menerima parameter password; command `archive_test` meneruskannya.
+- **Listing/ekstrak tahan member terenkripsi:** metadata terdegradasi ke nama central-directory (ukuran/mtime tidak diketahui) alih-alih gagal seluruh operasi — `zip` 4.6.1 menolak `by_index` pada member terenkripsi bahkan hanya untuk metadata.
+- **Benchmark** (`src-tauri/tests/phase2_bench.rs`, release, host ini): list ZIP 10k = 0.07 s, 100k = 0.97 s; pack ZIP 5k×1KiB = 0.95 s / extract = 5.53 s (publish no-follow ~1 ms/entry); pack ZIP 200 MiB = 4.3 s / extract = 1.28 s; pack 7z 200 MiB = 47 s (LZMA2 single-thread); search 5k file = 0.2 s; branch view 5k = 0.15 s. RAR tidak di-benchmark: tidak ada fixture legal di host.
+- **Bug UI gabungan ditemukan & diperbaiki:** `FilePane` tidak pernah mendaftarkan archive yang dibuka ke `knownArchives` (callback `onNewArchive` tidak diteruskan) sehingga navigasi SUBDIRECTORY di dalam archive memanggil `list_dir` pada path virtual. Diperbaiki; dikunci oleh E2E Playwright (masuk ZIP → navigasi → member nested tampil, 4/4 pass).
+- Batas tetap: Linux/macOS untested; `cargo audit` belum dijalankan (tool tidak ada); RAR password/test untested tanpa fixture; 3 advisory npm moderat di rantai dev-only.
+
+## P2 — hardening arsip (FER-437/438/439/434, Oktober 2026)
+
+Berasal dari review keamanan FER-104 (N2, F3, N3, N5). Perilaku yang berlaku sekarang:
+
+- **Extract 7z solid O(n) (FER-437).** Ekstraksi men-decode setiap blok paling banyak satu kali, berurutan. Satu thread worker men-decode; member yang dipilih dikirim per potongan 64 KiB ke pipeline ekstraksi aman yang sama (staging, rename atomik, validasi path, kuota). Member yang tidak dipilih hanya di-drain bila mendahului member terpilih di blok yang sama; blok tanpa member terpilih tidak di-decode, dan decode berhenti setelah member terpilih terakhir. Tes: 60 member dalam satu blok solid, `decoded == total ukuran` (tiap byte tepat sekali), seleksi, conflict skip, payload rusak.
+- **Baca satu member 7z (preview, `archive_read`, compare) tetap harus men-decode member sebelumnya di blok solid yang sama.** Biayanya dibatasi anggaran **256 MiB dan 5 detik** (`ReadGuard::PREVIEW`) dan memori codec 256 MiB per blok. Anggaran ini berlaku juga untuk **compare dan `archive_read` 7z**, bukan hanya Quick View: blok solid di atas batas, atau dictionary di atas 256 MiB (mis. `-md=512m`), ditolak dengan "solid block/codec memory too large".
+- **`archive_read` RAR mengembalikan galat `LimitExceeded`, tidak memotong,** bila ukuran deklarasi member (`unpacked_size`) lebih besar dari `max_bytes`. Alasannya: unrar membaca member utuh ke memori dan tidak bisa dihentikan di tengah, jadi pemotongan tidak menghemat apa pun. Provider lain (zip, 7z) tetap memotong dan menandai `truncated`. Kontrak "bounded read = truncate" karena itu berbeda per provider.
+- **Decode 7z single-thread** (`DECODE_THREADS = 1`). Decoder LZMA2 multi-thread men-decode seluruh work unit ke `Vec` tanpa batas (terukur 1235 MB untuk arsip 156 KB); satu thread memakai memori konstan (13 MB). Semua jalur membuka reader lewat `open_reader`.
+- **Pemetaan "corrupt" dipersempit (FER-439).** Galat io saat decode 7z menjadi `CorruptArchive` hanya bila kind `InvalidData`/`UnexpectedEof`, teks checksum/CRC, atau kind `InvalidInput` dengan teks "corrupted input" (laporan reader LZMA2 single-thread). Teks "corrupt" lain (mis. `ERROR_FILE_CORRUPT` dari disk) tetap `Io`.
+- **Pembatalan kooperatif (FER-438).** `read_archive_member_preview` dan `archive_read` menerima `requestId` opsional; command `archive_cancel_request(requestId)` membatalkannya. Token dicek per potongan 64 KiB (loop drain dan loop baca 7z), antar member (RAR), dan di collector preview. Cancel yang tiba sebelum request mulai diingat (daftar terbatas 256) sehingga request langsung berhenti. Hasil: galat `Cancelled`. Frontend (`previewStore`) memberi id `pv-N` dan membatalkan request lama saat seleksi berganti, target dikosongkan, atau batas teks berubah. Batas: satu `skip()`/`read()` tunggal di unrar tidak bisa diinterupsi, jadi RAR berhenti paling cepat di batas member; extract (`archive_extract`) memakai mekanisme cancel progress yang lama.
+- **Checksum anggota RAR tetap Unsupported (keputusan FER-434).** UnRAR membaca member utuh ke memori dan tidak ada pembaca streaming, sehingga checksum member besar tidak aman. UI menampilkan alasan ("RAR members cannot be hashed in place yet ...: extract it first, then use Create Checksum File(s)") dan backend menolaknya juga. Tidak akan diimplementasikan selama API unrar tidak mendukung streaming.
+
+- **Cancel + progress untuk extract dan Test Archive (FER-79).** `archive_extract` dan `archive_test` menerima `requestId` dari klien, terdaftar di registry yang sama dengan `archive_cancel_request`. Progres keluar sebagai event `archive://progress` (throttle 100 ms): byte, anggota, anggota berjalan; tanpa password dan tanpa isi arsip. Tombol Batal dan Esc memanggil cancel. `test_zip`/`test_7z` mengecek cancel per potongan 64 KiB; `test_rar` antar member (satu `test()` unrar tidak bisa diinterupsi). Cancel mengembalikan `FsError { code: cancelled, archiveCode: cancelled }`; pipeline extract menghapus berkas staging dan folder yang dibuatnya, jadi tidak ada berkas setengah jadi. Member yang sudah selesai ditulis tetap ada (utuh). Laporan Test Archive menandai arsip yang terputus dan yang belum mulai sebagai "Dibatalkan".
+- **Kode galat terstruktur (FER-73).** `FsError.archiveCode` membawa `ArchiveErrorCode` (`passwordRequired`, `badPassword`, `corruptArchive`, `cancelled`, `multipartNotFirst`, `multipartMissing`, ...). UI membedakan password hilang, password salah, dan arsip rusak lewat kode ini, bukan teks pesan. Test Archive meminta password lewat dialog bertopeng dan mengulang bila salah; password hanya hidup selama panggilan itu. Batas: pada 7z terenkripsi, kegagalan decode isi AES dengan password terisi dilaporkan `badPassword` (decoder tidak bisa membedakan password salah dari data terenkripsi yang rusak); pada isi tidak terenkripsi tetap `corruptArchive`.
+- **Multipart (FER-75).** Nama volume dikenali dari nama (`.partN.rar`, `.rar` + `.rNN`, `.7z.NNN`). Membuka, mengekstrak, atau menguji bagian bukan pertama ditolak dengan `multipartNotFirst` dan UI menawarkan membuka bagian pertama. Bagian pertama dengan volume yang hilang di tengah ditolak dengan `multipartMissing` dan daftar volume yang hilang. Command `archive_multipart_check(path)` memberi detail untuk dialog. Batas: volume yang hilang di ujung (setelah volume tertinggi yang ada) tidak bisa diketahui dari nama; set lengkap tetap tunduk pada batas backend (RAR menolak member yang terbelah antar volume; 7z split tidak digabung).
+
+## P3 — Opsi kompresi dan mtime saat membuat arsip (FER-58, FER-59, FER-66, Oktober 2026)
+
+- **Preservasi mtime ZIP (FER-58):** Pembuatan ZIP menuliskan waktu modifikasi file sumber ke setiap entry ZIP menggunakan DOS local time (resolusi 2 detik) dan extended timestamp header 0x5455 (presisi 1 detik, UTC). Listing ZIP membaca header 0x5455 terlebih dahulu jika tersedia, dan fallback ke DOS local time.
+- **Preservasi mtime 7z (FER-66):** Pembuatan 7z menyimpan waktu modifikasi file sumber sebagai `NtTime` (`ArchiveEntry.last_modified_date`). Listing dan ekstraksi 7z mengekspos timestamp tersebut dalam milidetik unix epoch.
+- **Tingkat kompresi ZIP (FER-59):** Parameter opsional `level` (`ArchiveCompressionLevel`) memetakan:
+  - `store`: Metode `Stored` (tanpa kompresi).
+  - `fast`: `Deflated` level 1.
+  - `normal` (default): `Deflated` level 6.
+  - `max`: `Deflated` level 9.
+- **Tingkat kompresi & batas memori 7z (FER-66):**
+  - `store`: `EncoderMethod::COPY` (tanpa kompresi).
+  - `fast`: LZMA2 level 1.
+  - `normal` (default): LZMA2 level 6.
+  - `max`: LZMA2 level 9 dengan batas dictionary size 16 MiB dan single thread (`threads: 1`). Ini menjaga estimasi penggunaan RAM encoder tetap di bawah batas ~256 MiB (sekitar 184 MiB RAM).
+- **Dialog Pack:** Menyediakan kontrol radio "Kompresi" dengan 4 pilihan: Simpan (`store`), Cepat (`fast`), Normal (`normal`, default), dan Maksimal (`max`). Pemanggil tanpa opsi `level` (seperti adapter AI) tetap berjalan tanpa perubahan (default normal).
+
+## P4 — Fixture RAR legal, notice lisensi UnRAR, dan penutupan KI-02 (FER-72, FER-76, FER-38, FER-70, FER-69, FER-37, Oktober 2026)
+
+- **Kebijakan fixture RAR dan lisensi WinRAR (FER-72 / FER-76):** Berkas arsip `.rar` **tidak di-commit ke dalam repositori**. WinRAR merupakan perangkat lunak komersial berpemilik (proprietary). Arsip RAR hasil pembuatannya tidak boleh disertakan dalam repositori sumber terbuka Ferrum jika dibuat tanpa lisensi komersial/redistribusi. Ferrum juga tidak boleh menyertakan maupun mewajibkan WinRAR bagi pengguna; pengguna yang ingin memakai WinRAR memasangnya sendiri.
+- **Pembuatan fixture sintetis saat tes:** Pengujian RAR tidak lagi bergantung pada berkas pribadi (fixture RAR lokal) maupun environment variable `FERRUM_ALLOW_MISSING_RAR_FIXTURES`. Fixture dibuat saat tes berjalan dari sumber sintetis menggunakan `Rar.exe` milik penguji sendiri:
+  - Pencarian `Rar.exe`: berurutan memeriksa `FERRUM_RAR_EXE`, `C:\Program Files\WinRAR\Rar.exe`, `C:\Program Files (x86)\WinRAR\Rar.exe`, dan PATH. Jika `FERRUM_RAR_EXE` disetel ke path tidak valid, pencarian langsung berhenti (skip) tanpa fallback.
+  - Jika `Rar.exe` tidak ditemukan, seluruh tes yang membutuhkan fixture RAR di-skip dengan pesan yang jelas (`SKIP: Rar.exe not found`).
+  - Jika `Rar.exe` ditemukan, fixture dibuat sekali per proses tes (`OnceLock`) di direktori sementara unik (`ferrum-rartest-*`) yang dibersihkan oleh guard `Drop`:
+    - `basic-rar5.rar`: folder bertingkat, `readme.txt`, `data/angka.csv`, `data/kosong.txt` (0 byte), `docs/catatan.txt`, `docs/deep/a/b/dalam.txt`, `folder-kosong/juga-kosong/`.
+    - `solid-rar5.rar`: arsip solid RAR5 dengan isi identik dengan basic (`-s`).
+    - `unicode-rar5.rar`: entri Unicode (spasi, Jepang, emoji, aksen).
+    - `pw-data-rar5.rar`: data terenkripsi (`-pFerrumTest123`), header/listing dapat dibaca tanpa password, ekstraksi/baca memerlukan password `FerrumTest123`.
+    - `pw-header-rar5.rar`: header terenkripsi (`-hpFerrumTest123`), listing pun memerlukan password `FerrumTest123`.
+    - `stored-big-rar5.rar`: berkas acak 4 MiB (`acak-4m.bin`) tanpa kompresi (`-m0`), untuk uji batas baca (`LimitExceeded`) dan pembatalan di tengah ekstraksi.
+    - `multivol-rar5.part1.rar`: arsip multi-volume pecahan 200 KB (`-v200k`) dari payload 512 KiB pseudo-acak.
+    - `corrupt-rar5.rar`: salinan basic dengan 16 byte rusak sintetis di tengah.
+- **Notice lisensi pihak ketiga (FER-37/FER-69):**
+  - Teks lisensi UnRAR disalin persis dari vendor crate `unrar_sys` ke `licenses/UnRAR-license.txt`.
+  - Dokumen pemberitahuan lisensi pihak ketiga `THIRD-PARTY-NOTICES.md` mencantumkan klausul yang diwajibkan UnRAR, lisensi MIT untuk `zip`, dan Apache-2.0 untuk `sevenz-rust2`.
+  - File-file lisensi ikut dibundel di installer via `bundle.resources` di `src-tauri/tauri.conf.json`.
+- **Keterbatasan terdokumentasi:**
+  - Tanpa RAR4: WinRAR 7.00 tidak lagi mendukung pembuatan arsip format RAR4 lama.
+  - Tanpa traversal: WinRAR menyaring pembuatan entri traversal direktori (`../`).
+  - Pembuatan arsip RAR bawaan engine internal tetap tidak tersedia (lisensi UnRAR melarang pembuatan kompresi RAR). Namun, pembuatan RAR kini didukung secara opsional melalui integrasi aman dengan utilitas eksternal `Rar.exe` milik pengguna (FER-505, lihat bagian P6 di bawah).
+  - Pembacaan streaming / checksum in-place anggota RAR tidak didukung (keterbatasan unrar).
+  - Multi-volume RAR ditolak terstruktur (`UnsupportedCodec`) tanpa kepanikan (panic) atau berkas sisa.
+
+## P5 — Dedup listing peka tipe dan password untuk listing RAR header-encrypted (FER-504, Oktober 2026)
+
+- **Password pada listing (RAR `-hp` dan 7z header-encrypted).** `ArchiveListRequest` kini membawa field opsional `password`; command `archive_list` dan `archive_extract_preflight` meneruskannya. Tanpa password, perilaku persis seperti sebelumnya: arsip header-terenkripsi menjawab `PasswordRequired`. Dengan password: RAR memakai `Archive::with_password` (`list_with_password`), 7z membuka reader dengan password yang sama. `preflight_extract` menerima password sehingga alur Unpack/Pack-ekstrak bisa menghitung konflik arsip terkunci sebelum dialog konflik. Password salah menjawab `BadPassword` agar UI menampilkan prompt ulang dengan pesan "password salah".
+  - Aturan memori-saja: password hanya hidup di memori pane selama arsip itu dibuka (fetcher arsip per pane), diulang untuk listing subfolder di dalam arsip yang sama, dan hilang begitu pane pindah ke lokasi disk. Tidak pernah masuk prefs, snapshot session/tab, log, maupun event; prompt memakai dialog `password` yang sama dengan ekstrak/Test Archive (FER-73).
+  - Batas: Quick View/preview dan Compare member pada arsip header-terenkripsi tetap di luar FER-504 (menjawab `PasswordRequired` seperti member terenkripsi); Test Archive sudah punya alur passwordnya sendiri.
+- **Dedup listing peka tipe (RAR).** Sebelumnya satu `seen`-set menggabungkan folder implisit dan entry pada level yang sama dengan "entry pertama menang", sehingga file `x` dan folder `x/` (atau dua file `x`) tampil sebagai satu baris padahal ekstrak menolaknya sebagai `Conflict`. Sekarang (`dedup_level`): folder + folder (entry eksplisit dan/atau implisit dari path anak) tetap digabung satu baris; nama yang dipakai dua file, atau oleh file dan folder, menghasilkan galat `Conflict` "Duplicate archive member" dengan `member_path` lengkap. Perbandingan nama peka kapital seperti pipeline ekstrak (`normalize()` melipat ke huruf kecil; Windows case-insensitive).
+  - Perbandingan provider: **ZIP** menampilkan baris duplikat level-sama apa adanya (tidak ada dedup dan tidak ada deteksi konflik pada listing); **7z** menggabungkan diam-diam (entry pertama menang, satu seen-set tanpa memandang jenis). Keduanya berbeda satu sama lain dan dari pipeline ekstrak, yang menolak SEMUA nama ternormalisasi ganda dengan `Conflict`. RAR kini satu-satunya provider yang listing-nya sepenuhnya konsisten dengan ekstrak; menyatukan ZIP/7z dengan perilaku `Conflict` ini adalah keputusan lanjutan (menyentuh kontrak listing dua format lain, di luar lingkup FER-504).
+  - Tes: unit `dedup_level` (gabung folder dua arah, konflik file-file dan file-folder dua arah, konflik peka kapital, `member_path` bertingkat); integrasi `pw_header_matrix` kini menguji listing via field `password` request (subfolder juga), tanpa password → `PasswordRequired`, salah → `BadPassword`; 7z `encrypted_header_needs_password_even_to_list` menambah listing dengan password benar/salah; preflight 7z header-terenkripsi dengan dan tanpa password; vitest alur prompt fetcher (prompt muncul, list diulang dengan password, salah → prompt lagi, batal → galat apa adanya, pindah ke disk melupakan password) dan guard "payload prefs tidak pernah memuat password".
+
+## P6 — Pembuatan Arsip RAR Opsional via WinRAR Eksternal (FER-505, Oktober 2026)
+
+- **Cara kerja & konfigurasi:**
+  - Ferrum tidak mendistribusikan maupun membundel WinRAR (`Rar.exe`).
+  - Pengguna yang memiliki WinRAR berlisensi dapat mengonfigurasi path `Rar.exe` melalui menu **Settings → Arsip**.
+  - Tombol "Cari otomatis" memanggil IPC `archive_rar_tool_detect()` untuk memeriksa lokasi default `Program Files` tanpa otomatis menyimpannya.
+  - Tombol "Tes" menyimpan prefs dulu (flush, tanpa debounce) lalu memanggil IPC `archive_rar_tool_probe()`, yang membaca path dari prefs di disk, memvalidasi, dan mengambil versi banner `Rar.exe`.
+  - Preferensi disimpan pada `prefs.rar_exe_path` (`Option<String>`).
+
+- **Sumber path `Rar.exe`:** hanya `prefs.rar_exe_path` di disk (`create_rar_progress_with_level` → `create_rar_from_prefs_dir`). Tidak ada override lewat env, IPC, maupun AI. Tes integrasi memanggil inti `create_rar_with_tool(&RarTool, ...)` dengan `RarTool` hasil `validate_rar_exe` (struct ini hanya bisa dibuat oleh fungsi validasi).
+
+- **Validasi Keamanan (`validate_rar_exe`):**
+  - Path harus berupa path drive Windows lokal mutlak (`^[A-Za-z]:[\\/]`).
+  - Path UNC (`\\...`), device (`\\?\`) dan komponen traversal (`..`) ditolak.
+  - Nama file persis `Rar.exe` (case-insensitive). Binary lain seperti `WinRAR.exe` atau `UnRAR.exe` ditolak.
+  - File harus berwujud berkas reguler yang ada di disk, dan bukan berupa symlink maupun reparse point/junction.
+  - Probe tanpa argumen (timeout 5 detik) harus mengeluarkan baris versi `RAR x.yy`.
+  - Pemeriksaan file statis (path, nama, berkas reguler non-link) diulang tepat sebelum setiap spawn untuk mempersempit jendela TOCTOU.
+
+- **Daftar entri (sama dengan ZIP/7z):**
+  - Entri berasal dari `collect_sources` (pipeline yang sama dengan ZIP/7z): symlink/junction dilewati (D07), file staging `.ferrum-tmp` dan tujuan arsip itu sendiri dikecualikan, folder kosong ikut sebagai entri eksplisit (FER-502).
+  - Listfile hanya berisi entri tersebut, satu nama per baris, relatif terhadap folder dasar seleksi (contoh `src\sub\x.txt`), dalam **UTF-16LE** (inilah arti `-scul`).
+  - Rar dijalankan dengan working directory = folder dasar seleksi, sehingga nama member di arsip identik dengan ZIP tanpa `-ep*`. (`-ep4<path>` di Rar 7.00 ternyata menambah prefiks alih-alih membuangnya, jadi tidak dipakai.) Sumber dari beberapa folder berbeda menghasilkan satu proses Rar per folder dasar, semuanya menambah ke arsip job yang sama.
+
+- **Argumen Whitelist Tetap:**
+  - Perintah dieksekusi langsung melalui `std::process::Command` tanpa shell:
+    ```
+    a -cfg- -idc -ma5 -m<level> -r- -y -o- -scul -- <job>\archive.rar @<job>\list-<n>.txt
+    ```
+  - `-cfg-`: Wajib. Mengabaikan konfigurasi `rar.ini` (yang dibaca dari folder `Rar.exe`) dan variabel lingkungan `RAR`.
+  - `-idc`: Menyembunyikan pesan copyright.
+  - `-ma5`: Memaksa format RAR5.
+  - `-m<level>`: Pemetaan level kompresi (`-m0` Simpan/store, `-m1` Cepat/fast, `-m3` Normal, `-m5` Maksimal/max).
+  - `-r-`: Rekursi dimatikan total. Rar hanya mengarsipkan entri yang tertulis di listfile; folder di listfile ditambahkan sebagai entri folder saja, tanpa isinya. (Dengan `-r`, memilih `src\x.txt` ikut menarik `src\sub\x.txt`, dan junction di dalam folder diikuti.)
+  - `-y`: Otomatis setuju (yes) pada pertanyaan interaktif.
+  - `-o-`: Mencegah penimpaan file tanpa sengaja.
+  - `-scul`: Listfile dibaca sebagai Unicode **UTF-16** (little endian), bukan UTF-8.
+  - `--`: Pemisah penanda switch dan nama arsip untuk mencegah nama arsip yang diawali karakter `-` dianggap sebagai switch perintah.
+  - `@<listfile>`: Membaca entri sumber dari file daftar di folder job. Nama di dalam listfile tidak dibaca sebagai switch (diuji dengan `-df.txt`, `@list.txt`, ` lead.txt`).
+  - Switch terlarang: `-df` (delete files), `-dr`, `-ac`, `-ow`, `-sfx`, `-k`, `-av`, `-p`/`-hp`, `-ilog`, `-ep*`, `-r`/`-r0`, dan switch lain yang memodifikasi sumber dilarang keras.
+
+- **Isolasi Proses dan Pencegahan Deadlock:**
+  - `env_remove("RAR")` menghapus variabel lingkungan `RAR`; stdin = null.
+  - Working directory = folder dasar seleksi (diperlukan agar nama member sama dengan ZIP). `Command::new` memakai path absolut tervalidasi, jadi working directory tidak memengaruhi program yang dijalankan.
+  - Flag `CREATE_NO_WINDOW` (0x08000000) mencegah kemunculan jendela konsol di Windows.
+  - Pembacaan stdout dan stderr dilakukan di thread terpisah untuk mencegah deadlock buffer pipe proses. Output stderr dipotong hingga maksimum 2 KiB pada pesan galat.
+
+- **Folder Job, Pembatalan & Publikasi:**
+  - Setiap job membuat folder eksklusif di samping tujuan: `.<nama tujuan>.<pid>-<acak>.ferrum-tmp` dengan `create_dir` (bukan `create_dir_all`; gagal kalau sudah ada). Nama ini termasuk pola staging, sehingga job lain melewatinya. Listfile dan `archive.rar` hasil Rar berada di dalamnya.
+  - Registrasi `requestId` di registry cancel Ferrum.
+  - Pembatalan mematikan child process milik job (`Child::kill` berdasarkan handle) dan menunggu sampai selesai; exit code 255 juga dipetakan ke `Cancelled`.
+  - Setelah exit code 0, `archive.rar` dipindah ke tujuan lewat `publish_created` (rename atomik di volume yang sama) dengan kebijakan konflik yang sama seperti ZIP/7z (Skip, Overwrite, Rename).
+  - Guard `Drop` menghapus folder job di semua jalur (sukses, galat, cancel, panic), jadi tidak ada `.rar` sementara maupun listfile yang tertinggal.
+
+- **UI dan Pembatasan AI Guard:**
+  - Dialog Pack hanya menampilkan opsi radio format RAR jika probe `archive_rar_tool_probe()` sukses.
+  - Kontrak AI (`ProposedIntent`) dan adapter `archive.create` mengunci format ke `zip` dan menolak format `rar`.
+  - AI policy dan tools tidak memiliki jalur maupun properti untuk mengubah `rarExePath` atau preferensi pengguna.

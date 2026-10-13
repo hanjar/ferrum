@@ -1,0 +1,31 @@
+[package]
+name = "ferrum-ntfs-scan"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "FER-460: read-only NTFS MFT scanner + pipe protocol for ferrum-scan-helper"
+
+# Deliberately dependency-light: this crate runs ELEVATED inside
+# ferrum-scan-helper.exe, so its whole surface must stay reviewable. Only
+# windows-sys (Microsoft, MIT/Apache-2.0) for the Win32 calls.
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
+[features]
+# FER-475: export `mft::fixture` (synthetic MFT images) to other crates'
+# tests. NOTE: ferrum-indexer enables it in a NORMAL dependency (it is not a
+# workspace member, so it cannot use dev-dependencies), and feature
+# unification turns it on for Ferrum and the scan helper too. It only adds
+# pure byte-assembly code that nothing outside tests calls (dead code).
+fixture = []

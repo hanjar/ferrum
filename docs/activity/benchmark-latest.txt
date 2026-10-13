@@ -1,0 +1,132 @@
+Ferrum activity store benchmark
+date (UTC):   2026-10-04T07:11:37.023Z
+git SHA:      a0073f6226bd4aa15441e7c09fc6302b3bab9d84 (feature/activity-local)
+dirty tree:   yes (uncommitted activity changes)
+host:         Windows_NT 10.0.26200 x64, 20 logical CPUs (13th Gen Intel(R) Core(TM) i5-13600K), 63.8 GiB RAM
+toolchain:    rustc 1.98.1 (48a229cea 2026-09-01); cargo 1.98.1 (797e8a9bc 2026-08-05)
+build:        cargo test --release --offline -j 2 (rusqlite bundled SQLite, on-disk temp DB, warm page cache)
+
+##### store query benchmark (tests/store.rs)
+running 1 test
+test benchmark_100k_entities_1m_episodes_query_p95 ... probe: entities=100000 grams=1849421
+seed 100k entities / 1000000 episodes: 11.4171121s; warm p50/p95 ms — recent 0/0 frequent 4/5 exact-search 0/0 typo-search 0/0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 11.80s
+(wall 12.0 s, exit 0)
+
+##### startup + record() baseline 1k entities / 2k episodes (tests/qa.rs)
+running 1 test
+test bench::bench_startup_and_record_1k_entities_baseline ... === DB-1k (baseline): 1000 entities x 2 episodes = 2000 episodes ===
+seed time 48.5ms; db file 3.1 MiB
+startup (warm cache, 25 open+drop cycles):
+  open()                             n=25     p50=    0.350 ms  p95=    0.611 ms  p99=    0.693 ms  max=    0.693 ms
+          <0.5 ms | ################################## 21
+            <1 ms | ####### 4
+  first recent(limit 20) after open  n=25     p50=    0.137 ms  p95=    0.243 ms  p99=    0.261 ms  max=    0.261 ms
+         <0.25 ms | ####################################### 24
+          <0.5 ms | ## 1
+disk floor (raw rusqlite 1-row autocommit insert, same dir):
+  raw commit                         n=400    p50=    2.748 ms  p95=    3.856 ms  p99=    4.693 ms  max=   41.745 ms
+          <2.5 ms | ############### 142
+            <5 ms | ########################## 255
+           <50 ms | # 3
+record() overhead per call (navigation hook cost on this DB; on-disk, default journal, fsync per commit):
+  new entity + new episode           n=400    p50=    3.987 ms  p95=    6.063 ms  p99=    7.771 ms  max=    9.908 ms
+            <5 ms | ################################## 331
+           <10 ms | ####### 69
+  existing entity + new episode      n=400    p50=    5.705 ms  p95=    8.357 ms  p99=   12.590 ms  max=   72.986 ms
+            <5 ms | ######## 71
+           <10 ms | ################################ 320
+           <50 ms | # 8
+          >=50 ms | # 1
+  continued episode (<30 s)          n=400    p50=    5.095 ms  p95=    7.206 ms  p99=    9.242 ms  max=   53.019 ms
+            <5 ms | ################## 174
+           <10 ms | ####################### 222
+           <50 ms | # 3
+          >=50 ms | # 1
+  duplicate event id                 n=400    p50=    0.041 ms  p95=    0.067 ms  p99=    0.081 ms  max=    0.106 ms
+       <0.1 ms ms | ######################################## 399
+         <0.25 ms | # 1
+  ignored (operation receipt)        n=400    p50=    0.000 ms  p95=    0.000 ms  p99=    0.000 ms  max=    0.000 ms
+       <0.1 ms ms | ######################################## 400
+migration simulation skipped: written for v9 -> v10, current schema is v11
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 7.66s
+(wall 7.9 s, exit 0)
+
+##### startup + record() 100k entities / 1M episodes (tests/qa.rs)
+running 1 test
+test bench::bench_startup_and_record_100k_entities_1m_episodes ... === DB-100k: 100000 entities x 10 episodes = 1000000 episodes ===
+seed time 13.4s; db file 541.6 MiB
+startup (warm cache, 25 open+drop cycles):
+  open()                             n=25     p50=    0.258 ms  p95=    0.382 ms  p99=    1.443 ms  max=    1.443 ms
+         <0.25 ms | #################### 12
+          <0.5 ms | #################### 12
+          <2.5 ms | ## 1
+  first recent(limit 20) after open  n=25     p50=    0.128 ms  p95=    0.172 ms  p99=    0.179 ms  max=    0.179 ms
+         <0.25 ms | ######################################## 25
+disk floor (raw rusqlite 1-row autocommit insert, same dir):
+  raw commit                         n=400    p50=    2.617 ms  p95=    3.550 ms  p99=    4.864 ms  max=    6.248 ms
+          <2.5 ms | ############ 120
+            <5 ms | ############################ 276
+           <10 ms | # 4
+record() overhead per call (navigation hook cost on this DB; on-disk, default journal, fsync per commit):
+  new entity + new episode           n=400    p50=  135.140 ms  p95=  233.699 ms  p99=  378.265 ms  max=  776.881 ms
+          >=50 ms | ######################################## 400
+  existing entity + new episode      n=400    p50=  134.668 ms  p95=  173.525 ms  p99=  214.714 ms  max=  325.682 ms
+          >=50 ms | ######################################## 400
+  continued episode (<30 s)          n=400    p50=  132.896 ms  p95=  175.843 ms  p99=  233.887 ms  max=  334.968 ms
+          >=50 ms | ######################################## 400
+  duplicate event id                 n=400    p50=    0.036 ms  p95=    0.109 ms  p99=    0.147 ms  max=    0.224 ms
+       <0.1 ms ms | ###################################### 372
+         <0.25 ms | ### 28
+  ignored (operation receipt)        n=400    p50=    0.000 ms  p95=    0.000 ms  p99=    0.000 ms  max=    0.000 ms
+       <0.1 ms ms | ######################################## 400
+migration simulation skipped: written for v9 -> v10, current schema is v11
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 178.15s
+(wall 178.5 s, exit 0)
+
+##### startup + record() 1M entities / 2M episodes (tests/qa.rs)
+running 1 test
+test bench::bench_startup_and_record_1m_entities_2m_episodes ... === DB-1M: 1000000 entities x 2 episodes = 2000000 episodes ===
+seed time 115.4s; db file 3140.7 MiB
+startup (warm cache, 25 open+drop cycles):
+  open()                             n=25     p50=    0.360 ms  p95=    0.797 ms  p99=    1.123 ms  max=    1.123 ms
+         <0.25 ms | #### 2
+          <0.5 ms | ########################## 16
+            <1 ms | ########## 6
+          <2.5 ms | ## 1
+  first recent(limit 20) after open  n=25     p50=    0.188 ms  p95=    0.386 ms  p99=    0.490 ms  max=    0.490 ms
+         <0.25 ms | ########################## 16
+          <0.5 ms | ############### 9
+disk floor (raw rusqlite 1-row autocommit insert, same dir):
+  raw commit                         n=400    p50=    3.134 ms  p95=    4.521 ms  p99=    5.873 ms  max=   18.082 ms
+          <2.5 ms | ### 26
+            <5 ms | ##################################### 366
+           <10 ms | # 7
+           <50 ms | # 1
+record() overhead per call (navigation hook cost on this DB; on-disk, default journal, fsync per commit):
+  new entity + new episode           n=400    p50=  200.003 ms  p95=  247.919 ms  p99=  271.231 ms  max=  540.053 ms
+          >=50 ms | ######################################## 400
+  existing entity + new episode      n=400    p50=  174.709 ms  p95=  215.623 ms  p99=  232.016 ms  max=  238.934 ms
+          >=50 ms | ######################################## 400
+  continued episode (<30 s)          n=400    p50=  174.915 ms  p95=  215.607 ms  p99=  224.846 ms  max=  253.455 ms
+          >=50 ms | ######################################## 400
+  duplicate event id                 n=400    p50=    0.039 ms  p95=    0.066 ms  p99=    0.098 ms  max=    0.225 ms
+       <0.1 ms ms | ######################################## 397
+         <0.25 ms | # 3
+  ignored (operation receipt)        n=400    p50=    0.000 ms  p95=    0.000 ms  p99=    0.000 ms  max=    0.000 ms
+       <0.1 ms ms | ######################################## 400
+migration simulation skipped: written for v9 -> v10, current schema is v11
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 340.72s
+(wall 341.0 s, exit 0)
+

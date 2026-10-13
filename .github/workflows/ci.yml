@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  gate:
+    name: Windows Gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            src-tauri/crates/indexer
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Check code formatting (Prettier)
+        run: npx prettier --check .
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Svelte type check
+        run: npx svelte-check --threshold error
+
+      - name: Run Vitest
+        run: npx vitest run
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo fmt check
+        working-directory: src-tauri
+        run: cargo fmt -- --check
+
+      - name: Cargo clippy (workspace)
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo test (workspace)
+        working-directory: src-tauri
+        run: cargo test --workspace
+
+      - name: Cargo clippy (indexer crate)
+        working-directory: src-tauri/crates/indexer
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test (indexer crate)
+        working-directory: src-tauri/crates/indexer
+        run: cargo test
+
+  e2e:
+    name: Playwright E2E (Optional)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: npx playwright test

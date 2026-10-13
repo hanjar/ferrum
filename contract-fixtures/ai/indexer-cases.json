@@ -1,0 +1,335 @@
+[
+  {
+    "name": "status",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.status"
+      }
+    }
+  },
+  {
+    "name": "setMode high_performance",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "high_performance"
+      }
+    }
+  },
+  {
+    "name": "setMode shared",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "status with mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.status",
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "status with path",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.status",
+        "path": "C:/"
+      }
+    }
+  },
+  {
+    "name": "status with confirmed",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.status",
+        "confirmed": true
+      }
+    }
+  },
+  {
+    "name": "setMode missing mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode"
+      }
+    }
+  },
+  {
+    "name": "setMode unknown mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "turbo"
+      }
+    }
+  },
+  {
+    "name": "setMode uppercase mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "Shared"
+      }
+    }
+  },
+  {
+    "name": "setMode camelCase mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "highPerformance"
+      }
+    }
+  },
+  {
+    "name": "setMode null mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": null
+      }
+    }
+  },
+  {
+    "name": "setMode numeric mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": 1
+      }
+    }
+  },
+  {
+    "name": "setMode array mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": [
+          "shared"
+        ]
+      }
+    }
+  },
+  {
+    "name": "setMode empty mode",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": ""
+      }
+    }
+  },
+  {
+    "name": "setMode with confirmed",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared",
+        "confirmed": true
+      }
+    }
+  },
+  {
+    "name": "setMode with path",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared",
+        "path": "C:/Users"
+      }
+    }
+  },
+  {
+    "name": "setMode with volume",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared",
+        "volume": "C"
+      }
+    }
+  },
+  {
+    "name": "setMode wrong capability case",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setmode",
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "unknown indexer capability",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.delete"
+      }
+    }
+  },
+  {
+    "name": "setMode wrong request id",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_2",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "setMode unsupported version",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "status wrong request id",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_2",
+      "intent": {
+        "capability": "indexer.status"
+      }
+    }
+  },
+  {
+    "name": "status unsupported version",
+    "valid": false,
+    "value": {
+      "schemaVersion": 2,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.status"
+      }
+    }
+  },
+  {
+    "name": "envelope extra field",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode",
+        "mode": "shared"
+      },
+      "note": "x"
+    }
+  },
+  {
+    "name": "intent is a string",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": "indexer.status"
+    }
+  },
+  {
+    "name": "intent is an array",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": [
+        {
+          "capability": "indexer.status"
+        }
+      ]
+    }
+  },
+  {
+    "name": "no capability",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "mode": "shared"
+      }
+    }
+  },
+  {
+    "name": "capability with suffix",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "intent": {
+        "capability": "indexer.setMode.shared"
+      }
+    }
+  }
+]

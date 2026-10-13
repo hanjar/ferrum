@@ -1,0 +1,493 @@
+/* ── Ferrum design tokens ───────────────────────────────────────────────
+   Extracted 1:1 from the Claude Design prototypes. v2 base
+   (../design/Ferrum File Manager v2.dc.html), migrated to v3
+   (../../scratch/disk-usage-theme/Ferrum File Manager v3.dc.html) by the
+   Appearance topic (FER-370): six palettes × light/dark, semantic ink/soft
+   tokens, per-palette file-type colors. Contract:
+   docs/design/appearance/TOKEN-CONTRACT.md. Do not eyeball new values:
+   change them here only with a decision in docs/decisions.md. */
+
+:root {
+  --titlebar: var(--win);
+  --side: var(--titlebar);
+  --onAccent: #fff;
+  --hover: rgba(255, 255, 255, 0.04);
+  --hover2: rgba(255, 255, 255, 0.075);
+  --line: rgba(255, 255, 255, 0.065);
+  --line2: rgba(255, 255, 255, 0.12);
+  --kbd: rgba(255, 255, 255, 0.07);
+  --scrim: rgba(4, 4, 8, 0.55);
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --tabShadow: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --row: 26px;
+  --r: 4px;
+  --rl: 6px;
+  --selDim: rgba(255, 255, 255, 0.08);
+  --bar: #8f93a6;
+  --sel: color-mix(in oklch, var(--accent) 40%, transparent);
+  --accentSoft: color-mix(in oklch, var(--accent) 22%, transparent);
+  --accentLine: color-mix(in oklch, var(--accentInk) 85%, transparent);
+  --folder: var(--accentInk);
+  --flash: color-mix(in oklch, var(--green) 24%, transparent);
+  --greenInk: var(--green);
+  --amberInk: var(--amber);
+  --redInk: var(--red);
+  --greenSoft: color-mix(in oklch, var(--green) 16%, transparent);
+  --amberSoft: color-mix(in oklch, var(--amber) 16%, transparent);
+  --redSoft: color-mix(in oklch, var(--red) 14%, transparent);
+  --uiStep: 0px;
+}
+html[data-density='comfortable'] {
+  --row: 30px;
+}
+html[data-ui='s'] {
+  --uiStep: -1px;
+}
+html[data-ui='l'] {
+  --uiStep: 2px;
+}
+html[data-ui='xl'] {
+  --uiStep: 4px;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  --titlebar: #ffffff;
+  --hover: rgba(15, 15, 30, 0.035);
+  --hover2: rgba(15, 15, 30, 0.065);
+  --line: rgba(15, 15, 30, 0.075);
+  --line2: rgba(15, 15, 30, 0.13);
+  --kbd: rgba(15, 15, 30, 0.055);
+  --scrim: rgba(20, 20, 35, 0.22);
+  --shadow: 0 16px 48px rgba(20, 20, 40, 0.16), 0 0 0 1px rgba(15, 15, 30, 0.09);
+  --tabShadow: 0 1px 2px rgba(15, 15, 30, 0.08), inset 0 0 0 1px rgba(15, 15, 30, 0.07);
+  --selDim: rgba(15, 15, 30, 0.07);
+  --bar: #6e7285;
+  --sel: color-mix(in oklch, var(--accent) 26%, transparent);
+  --accentSoft: color-mix(in oklch, var(--accent) 14%, transparent);
+  --folder: var(--accent);
+}
+
+/* Palettes — violet is the default (decision D03); six-palette registry
+   (v3): violet/electric/aqua/green/yellow/orange. */
+:root,
+html[data-palette='violet'] {
+  --pop: #ff3da5;
+  --popInk: #ff6bbe;
+  --popOn: #fff;
+  --popSoft: color-mix(in oklch, #ff3da5 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #7b3fff 0%, #ff3da5 100%);
+  --accentGrad: linear-gradient(135deg, #7b3fff 0%, #b43cff 100%);
+  --bg: #0a0a11;
+  --win: #0e0d16;
+  --pane: #12121b;
+  --paneActive: #16151f;
+  --elev: #1e1c2a;
+  --elev2: #272536;
+  --text: #f6f5fb;
+  --text2: #a6a2ba;
+  --text3: #6f6b84;
+  --accent: #7b3fff;
+  --accentInk: #a07bff;
+  --green: #2ed67a;
+  --amber: #ff9500;
+  --red: #ff3355;
+}
+html[data-palette='violet'][data-theme='light'] {
+  --side: #f6f2ff;
+  --popInk: #e0137f;
+  --popSoft: color-mix(in oklch, #ff3da5 14%, transparent);
+  --bg: #e9e7f2;
+  --win: #efedf6;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #f1eff8;
+  --text: #0f0e16;
+  --text2: #565269;
+  --text3: #8a8699; /* v3; old v2 value #6e6a7c */
+  --accent: #7b3fff;
+  --accentInk: #6629f0;
+  --green: #00b85c; /* v3; old v2 value #0e9f4e lives on as --greenInk */
+  --amber: #ff9500;
+  --red: #ff2d55; /* v3; old v2 value #e0203f lives on as --redInk */
+  --greenInk: #0e9f4e;
+  --amberInk: #c06a00;
+  --redInk: #e0203f;
+}
+html[data-palette='electric'] {
+  --pop: #a8e600;
+  --popInk: #c2f53a;
+  --popOn: #0d1015;
+  --popSoft: color-mix(in oklch, #a8e600 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #2563ff 0%, #a8e600 100%);
+  --accentGrad: linear-gradient(135deg, #2563ff 0%, #00a3ff 100%);
+  --bg: #090b0f;
+  --win: #0d1016;
+  --pane: #10131a;
+  --paneActive: #141821;
+  --elev: #1b202a;
+  --elev2: #242a36;
+  --text: #f5f7fb;
+  --text2: #98a2b3;
+  --text3: #667085;
+  --accent: #2563ff;
+  --accentInk: #5b8cff;
+  --green: #1fc75a;
+  --amber: #ff8a00;
+  --red: #ff3b30;
+}
+html[data-palette='electric'][data-theme='light'] {
+  --side: #f1f5ff;
+  --popInk: #4e8f00;
+  --popSoft: color-mix(in oklch, #a8e600 14%, transparent);
+  --bg: #e7eaf0;
+  --win: #edf0f5;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #eff2f7;
+  --text: #0d1015;
+  --text2: #525b6a;
+  --text3: #858e9c;
+  --accent: #2563ff;
+  --accentInk: #1a4fe0;
+  --green: #00b34a; /* v3; old v2 value #0e8a3e lives on as --greenInk */
+  --amber: #ff8a00;
+  --red: #ff3b30;
+  --greenInk: #0e8a3e;
+  --amberInk: #b35a00;
+  --redInk: #d92d20;
+}
+html[data-palette='aqua'] {
+  --pop: #ff6b57;
+  --popInk: #ff8a7a;
+  --popOn: #fff;
+  --popSoft: color-mix(in oklch, #ff6b57 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #0096e6 0%, #ff6b57 100%);
+  --accentGrad: linear-gradient(135deg, #0096e6 0%, #00c2c7 100%);
+  --bg: #080b0e;
+  --win: #0c1115;
+  --pane: #0f1418;
+  --paneActive: #13191e;
+  --elev: #1a2128;
+  --elev2: #232c34;
+  --text: #f3f7fa;
+  --text2: #96a3ae;
+  --text3: #64717c;
+  --accent: #0096e6;
+  --accentInk: #3db8ff;
+  --green: #8bd42a;
+  --amber: #ff9f0a;
+  --red: #ff3b47;
+}
+html[data-palette='aqua'][data-theme='light'] {
+  --side: #eef8fb;
+  --popInk: #e04a33;
+  --popSoft: color-mix(in oklch, #ff6b57 14%, transparent);
+  --bg: #e5ebef;
+  --win: #ecf1f4;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #edf2f5;
+  --text: #0b1115;
+  --text2: #4e5b66;
+  --text3: #83909a;
+  --accent: #0096e6;
+  --accentInk: #007fc4;
+  --green: #5cb800; /* v3; old v2 value #3f8f00 lives on as --greenInk */
+  --amber: #ff9f0a;
+  --red: #ff3347;
+  --greenInk: #3f8f00;
+  --amberInk: #b86e00;
+  --redInk: #d81f2e;
+}
+html[data-palette='green'] {
+  --onAccent: #fff;
+  --pop: #ff4f8b;
+  --popInk: #ff7aa8;
+  --popOn: #fff;
+  --popSoft: color-mix(in oklch, #ff4f8b 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #00a85f 0%, #ff4f8b 100%);
+  --accentGrad: linear-gradient(135deg, #00b86b 0%, #00d6a4 100%);
+  --bg: #080d0b;
+  --win: #0b120f;
+  --pane: #0e1512;
+  --paneActive: #121a16;
+  --elev: #18221d;
+  --elev2: #212d27;
+  --text: #f3f8f5;
+  --text2: #98a89f;
+  --text3: #66756c;
+  --accent: #00b86b;
+  --accentInk: #3be39a;
+  --green: #2ed67a;
+  --amber: #ffa41b;
+  --red: #ff3b5c;
+}
+html[data-palette='green'][data-theme='light'] {
+  --side: #f8faf8;
+  --popInk: #e0226a;
+  --popSoft: color-mix(in oklch, #ff4f8b 14%, transparent);
+  --bg: #e6eee9;
+  --win: #edf3ef;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #eef4f0;
+  --text: #0c130f;
+  --text2: #4f5e55;
+  --text3: #85938a;
+  --accent: #00a85f;
+  --accentInk: #00804a;
+  --green: #00b85c;
+  --amber: #ff9500;
+  --red: #ff2d55;
+  --greenInk: #0e8a48;
+  --amberInk: #b86400;
+  --redInk: #e0203f;
+}
+html[data-palette='yellow'] {
+  --onAccent: #1f1700;
+  --pop: #7b3fff;
+  --popInk: #a07bff;
+  --popOn: #fff;
+  --popSoft: color-mix(in oklch, #7b3fff 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #ffc400 0%, #7b3fff 100%);
+  --accentGrad: linear-gradient(135deg, #ffb300 0%, #ffd84d 100%);
+  --bg: #0c0c0a;
+  --win: #111110;
+  --pane: #151513;
+  --paneActive: #1a1a17;
+  --elev: #22221e;
+  --elev2: #2b2b26;
+  --text: #fafaf5;
+  --text2: #a6a69a;
+  --text3: #727266;
+  --accent: #ffc400;
+  --accentInk: #ffd54a;
+  --green: #2ed67a;
+  --amber: #ff9500;
+  --red: #ff3355;
+}
+html[data-palette='yellow'][data-theme='light'] {
+  --side: #fafaf6;
+  --popInk: #6629f0;
+  --popSoft: color-mix(in oklch, #7b3fff 14%, transparent);
+  --bg: #eeeee8;
+  --win: #f4f4ef;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #f3f3ec;
+  --text: #13130f;
+  --text2: #56564c;
+  --text3: #8c8c80;
+  --accent: #ffc400;
+  --accentInk: #8f6400;
+  --green: #00b85c;
+  --amber: #ff9500;
+  --red: #ff2d55;
+  --greenInk: #0e9f4e;
+  --amberInk: #c06a00;
+  --redInk: #e0203f;
+}
+html[data-palette='orange'] {
+  --onAccent: #fff;
+  --pop: #00bfb3;
+  --popInk: #3de0d5;
+  --popOn: #062b29;
+  --popSoft: color-mix(in oklch, #00bfb3 20%, transparent);
+  --duoGrad: linear-gradient(135deg, #ff6a00 0%, #00bfb3 100%);
+  --accentGrad: linear-gradient(135deg, #ff6a00 0%, #ff3d6e 100%);
+  --bg: #0d0b0b;
+  --win: #131111;
+  --pane: #171414;
+  --paneActive: #1c1818;
+  --elev: #242020;
+  --elev2: #2d2828;
+  --text: #fbf7f5;
+  --text2: #aba19d;
+  --text3: #766c68;
+  --accent: #ff6a00;
+  --accentInk: #ff9a4d;
+  --green: #2ed67a;
+  --amber: #ffc400;
+  --red: #ff3355;
+}
+html[data-palette='orange'][data-theme='light'] {
+  --side: #fbf9f8;
+  --popInk: #00877e;
+  --popSoft: color-mix(in oklch, #00bfb3 14%, transparent);
+  --bg: #f0ebe8;
+  --win: #f6f2ef;
+  --pane: #ffffff;
+  --paneActive: #ffffff;
+  --elev: #ffffff;
+  --elev2: #f6f0ec;
+  --text: #16110e;
+  --text2: #5e534d;
+  --text3: #948781;
+  --accent: #ff6a00;
+  --accentInk: #c94a00;
+  --green: #00b85c;
+  --amber: #ffb800;
+  --red: #ff2d55;
+  --greenInk: #0e9f4e;
+  --amberInk: #a87400;
+  --redInk: #e0203f;
+}
+
+/* File-type accent colors — per palette (dark values from v3 kindColor);
+   the shared light override below is kept from v2 for contrast on white
+   (documented deviation: the v3 mock has no per-mode file colors). */
+:root {
+  --ftCode: #3b82f6;
+  --ftImage: #00d1c1;
+  --ftMedia: #ff4fa3;
+  --ftArchive: #ffc928;
+  --ftData: #2ed67a;
+  --ftDocs: #ff6b3d;
+  --ftPdf: #ff3355;
+  --ftConfig: #7d8aa8;
+}
+html[data-palette='electric'] {
+  --ftCode: #2f80ff;
+  --ftImage: #00c2a8;
+  --ftMedia: #ff3d8b;
+  --ftArchive: #ffb400;
+  --ftData: #1fc75a;
+  --ftDocs: #8b5cf6;
+  --ftPdf: #ff3b30;
+}
+html[data-palette='aqua'] {
+  --ftCode: #4f5bff;
+  --ftImage: #00c9a7;
+  --ftMedia: #e040fb;
+  --ftArchive: #ffd60a;
+  --ftData: #8bd42a;
+  --ftDocs: #ff5c5c;
+  --ftPdf: #ff3b47;
+}
+html[data-palette='green'] {
+  --ftCode: #3b82f6;
+  --ftImage: #00c9d1;
+  --ftMedia: #ff4f8b;
+  --ftArchive: #ffc928;
+  --ftData: #00c875;
+  --ftDocs: #ff7a2f;
+  --ftPdf: #ff3355;
+}
+html[data-palette='yellow'] {
+  --ftCode: #3d7bff;
+  --ftImage: #00c2a8;
+  --ftMedia: #ff4fa3;
+  --ftArchive: #ffb000;
+  --ftData: #2ed67a;
+  --ftDocs: #8b5cf6;
+  --ftPdf: #ff3b30;
+}
+html[data-palette='orange'] {
+  --ftCode: #3b82f6;
+  --ftImage: #00bfb3;
+  --ftMedia: #e040fb;
+  --ftArchive: #ffc928;
+  --ftData: #2ed67a;
+  --ftDocs: #ff6a00;
+  --ftPdf: #ff3355;
+}
+html[data-theme='light'] {
+  --ftCode: #2f80ff;
+  --ftImage: #00c2a8;
+  --ftMedia: #ff3d8b;
+  --ftArchive: #ffb400;
+  --ftData: #1fc75a;
+  --ftDocs: #8b5cf6;
+  --ftPdf: var(--red);
+}
+
+/* ── Base ────────────────────────────────────────────────────────────── */
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  font-size: calc(13px + var(--uiStep, 0px));
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.mono {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line2);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* Keyboard focus is always visible (task 14). */
+:focus-visible {
+  outline: 2px solid var(--accentInk);
+  outline-offset: -2px;
+  border-radius: var(--r);
+}
+
+@keyframes fmList {
+  from {
+    opacity: 0.35;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fmFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

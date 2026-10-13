@@ -1,0 +1,63 @@
+[
+  {
+    "name": "counter with padding keeps extension",
+    "inputs": ["a.txt", "b.txt", "c.txt"],
+    "rule": { "pattern": "file_[C]", "counterStart": 1, "counterStep": 1, "counterPad": 3 },
+    "expectedTargets": ["file_001.txt", "file_002.txt", "file_003.txt"]
+  },
+  {
+    "name": "name + extension tokens with lowercase",
+    "inputs": ["Photo One.JPG", "Photo Two.JPG"],
+    "rule": { "pattern": "[N]-new.[E]", "caseMode": "lower" },
+    "expectedTargets": ["photo one-new.jpg", "photo two-new.jpg"]
+  },
+  {
+    "name": "literal search/replace",
+    "inputs": ["Season 01.mkv", "Season 02.mkv"],
+    "rule": { "find": "Season ", "replace": "S" },
+    "expectedTargets": ["S01.mkv", "S02.mkv"]
+  },
+  {
+    "name": "regex replace",
+    "inputs": ["img_0001.png", "img_0002.png"],
+    "rule": { "find": "img_0*", "replace": "pic", "regex": true },
+    "expectedTargets": ["pic1.png", "pic2.png"]
+  },
+  {
+    "name": "swap of two names via descending counter",
+    "inputs": ["1.txt", "2.txt"],
+    "rule": {
+      "pattern": "[C]",
+      "counterStart": 2,
+      "counterStep": -1,
+      "counterPad": 0,
+      "find": "",
+      "replace": ""
+    },
+    "expectedTargets": ["2.txt", "1.txt"]
+  },
+  {
+    "name": "unicode: accents, CJK and emoji survive the pipeline",
+    "inputs": ["café.txt", "日本語.md", "🎉party.png"],
+    "rule": { "pattern": "[N]_ok" },
+    "expectedTargets": ["café_ok.txt", "日本語_ok.md", "🎉party_ok.png"]
+  },
+  {
+    "name": "unicode: upper-casing sharp s expands like JS toUpperCase",
+    "inputs": ["straße.txt"],
+    "rule": { "pattern": "[N]", "caseMode": "upper" },
+    "expectedTargets": ["STRASSE.TXT"]
+  },
+  {
+    "name": "dotfile keeps its name as base",
+    "inputs": [".gitignore"],
+    "rule": { "pattern": "[N]_old" },
+    "expectedTargets": [".gitignore_old"]
+  },
+  {
+    "name": "first upper",
+    "inputs": ["track one.mp3"],
+    "rule": { "caseMode": "firstUpper" },
+    "expectedTargets": ["Track one.mp3"]
+  }
+]

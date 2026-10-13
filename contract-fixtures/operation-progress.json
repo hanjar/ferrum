@@ -1,0 +1,11 @@
+{
+  "operationId": "op_01HZX4T9WAB3CDQ7VH5G2K8NY6",
+  "kind": "copy",
+  "state": "running",
+  "processedBytes": 4529848320,
+  "totalBytes": 8589934592,
+  "processedFiles": 1204,
+  "totalFiles": 3482,
+  "currentPath": "D:\\Backup\\photos-2026\\IMG_0812.cr2",
+  "rateBytesPerSec": 184000000
+}

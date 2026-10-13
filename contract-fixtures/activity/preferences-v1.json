@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "privacyEpoch": 3,
+  "recordingEnabled": true,
+  "privateSession": false,
+  "retentionDays": 90,
+  "excludedRoots": ["C:\\Private"],
+  "hiddenEntityIds": ["entity-hidden"]
+}

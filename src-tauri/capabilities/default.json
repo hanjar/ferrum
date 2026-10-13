@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "main window (frameless, custom titlebar: minimize/toggle-maximize/close/start-dragging/is-maximized): core + path resolution (homeDir for the initial listing). F2-27 adds the separate search window (create + focus only).",
+  "windows": ["main", "search"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-focus",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized"
+  ]
+}

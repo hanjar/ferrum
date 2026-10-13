@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "privacyEpoch": 3,
+  "bounds": { "fromUtcMs": 1728000000, "untilUtcMs": 1814400000 },
+  "coverage": {
+    "fromUtcMs": 1728000000,
+    "untilUtcMs": 1814400000,
+    "oldestRetainedUtcMs": 1728000000,
+    "truncated": false
+  },
+  "episodeCount": 8,
+  "uniqueEntities": 2,
+  "daily": [
+    { "utcDay": "1970-01-21", "episodeCount": 3 },
+    { "utcDay": "1970-01-22", "episodeCount": 5 }
+  ]
+}

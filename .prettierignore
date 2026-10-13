@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+src-tauri/target/
+src-tauri/gen/
+app-icon.png
+package-lock.json
+contract-fixtures/
+src-tauri/windows/
+# FER-453: generated sandboxed PDF viewer bundle
+public/pdf-viewer.js

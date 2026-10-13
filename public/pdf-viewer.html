@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- FER-453: runs only inside the sandboxed iframe (sandbox="allow-scripts"), which has an
+         opaque origin. The pdf.js worker is bundled and runs in-thread, so no Worker, no blob:,
+         no fetch and no network. Tauri's header CSP is intersected with this one.
+         NEVER add connect-src (or any fetch source) for ipc:, ipc.localhost, or the app origin:
+         that would let the frame reach the Tauri IPC endpoint. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; img-src blob: data:; style-src 'self' 'unsafe-inline'"
+    />
+    <title>PDF</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #525659;
+        color: #eee;
+        font:
+          13px system-ui,
+          sans-serif;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #toolbar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        padding: 4px 8px;
+        background: #3a3d40;
+        flex: none;
+      }
+      #toolbar span {
+        margin: 0 8px;
+        white-space: nowrap;
+      }
+      #toolbar button {
+        font: inherit;
+        color: inherit;
+        background: #5b5f63;
+        border: 0;
+        border-radius: 3px;
+        padding: 3px 8px;
+        cursor: pointer;
+      }
+      #status {
+        padding: 8px;
+        color: #ffb4a8;
+        flex: none;
+      }
+      #status:empty,
+      #status[hidden] {
+        display: none;
+      }
+      #pages {
+        flex: 1;
+        overflow: auto;
+        padding: 12px 0;
+      }
+      .page {
+        margin: 0 auto 12px;
+        background: #fff;
+        box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
+      }
+      .page canvas {
+        display: block;
+      }
+      .page-error {
+        color: #333;
+        padding: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="toolbar" role="toolbar" aria-label="PDF navigation"></div>
+    <div id="status" role="status"></div>
+    <div id="pages" tabindex="0" aria-label="PDF pages"></div>
+    <!-- Classic (not module) script: a sandboxed frame has an opaque origin, and module
+         scripts are CORS-fetched, which an opaque origin cannot pass. Built by
+         vite.pdf-viewer.config.ts into dist/pdf-viewer.js. -->
+    <script src="./pdf-viewer.js"></script>
+  </body>
+</html>

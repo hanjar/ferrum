@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FER-474 (IDX-S1): FerrumIndexer service in the MSI (WiX v3 fragment, linked through
+  `bundle.windows.wix.componentGroupRefs = ["FerrumIndexerService"]`).
+
+  The service binary (ferrum-indexer.exe) is bundled by Tauri next to ferrum.exe as a second cargo
+  bin. Security rules (review H2/M1/L3, 2026-10-08):
+  - Stop and delete of the service use Windows Installer's own ServiceControl (StopServices /
+    DeleteServices), never an executable from the install folder.
+  - Registration (`install`) and data purge run ferrum-indexer.exe through WixQuietExec64
+    (WixUtilExtension, already linked by Tauri): deferred, as LocalSystem, with NO window, so a
+    repair started by a standard user (`msiexec /fa`) cannot get a SYSTEM console.
+  - Every action that executes ferrum-indexer.exe runs only when INSTALLDIR is under Program Files
+    (FerrumIndexerDirOk); a folder elsewhere may be writable by users, and anything placed there
+    would run as SYSTEM. Outside Program Files the service is not installed and Ferrum's
+    Settings > Indexer says why.
+  - A repair re-registers and restarts the service (StopServices stopped it) but never applies a
+    mode from the command line: only a fresh install may set the mode.
+  - Rollback removes the service only for a fresh install, never the one of a product being
+    upgraded.
+
+  Mode choice: a dialog after the install-folder page ("PC dipakai sendiri" -> high_performance,
+  recommended; "dipakai bersama" -> shared), applied only when no valid config exists yet
+  (`install - -mode-if-new`); afterwards the mode is changed in Ferrum > Settings > Indexer.
+  Silent installs: `msiexec /i Ferrum.msi /qn FERRUMINDEXERMODE=shared|high_performance`; without
+  the property a new install gets the privacy-safe default `shared`.
+  Uninstall keeps C:\ProgramData\Ferrum unless FERRUMINDEXERPURGE=1.
+
+  A failing service step never fails the Ferrum install (Return="ignore"): Ferrum works without
+  the service, and Settings > Indexer shows "Tidak terpasang".
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="FerrumIndexerServiceControl" Guid="7C2F3B9E-4A61-4E0B-9D3E-2F4A8C1B6E74">
+        <RegistryValue Root="HKLM" Key="Software\dev.ferrum.app\Indexer" Name="ServiceControl"
+                       Type="integer" Value="1" KeyPath="yes" />
+        <!-- Stop before files are replaced/removed (install, repair, upgrade, uninstall); delete
+             the service on uninstall. Missing service = no-op. -->
+        <ServiceControl Id="FerrumIndexerSvcCtl" Name="FerrumIndexer" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="FerrumIndexerService">
+      <ComponentRef Id="FerrumIndexerServiceControl" />
+    </ComponentGroup>
+
+    <!-- FERRUMINDEXERMODE: what a fresh install applies; empty in a silent install without the
+         property (new install then gets `shared`). FERRUMINDEXERUIMODE backs the dialog's radio
+         group: preselects the recommended choice, or the command-line value when one was given,
+         and is copied to FERRUMINDEXERMODE when the dialog's Next is pressed. -->
+    <Property Id="FERRUMINDEXERMODE" Secure="yes" />
+    <Property Id="FERRUMINDEXERUIMODE" Value="high_performance" />
+    <Property Id="FERRUMINDEXERPURGE" Secure="yes" />
+    <SetProperty Id="FERRUMINDEXERUIMODE" Value="[FERRUMINDEXERMODE]" Before="CostInitialize" Sequence="ui">FERRUMINDEXERMODE="shared" OR FERRUMINDEXERMODE="high_performance"</SetProperty>
+
+    <!-- M1: only execute ferrum-indexer.exe from under Program Files. FerrumIndexerDirOk is a
+         PRIVATE property (lowercase letters), so msiexec ignores it on the command line (review R1). -->
+    <SetProperty Id="FerrumIndexerDirOk" Value="1" After="CostFinalize" Sequence="execute"><![CDATA[(INSTALLDIR ~<< ProgramFiles64Folder OR INSTALLDIR ~<< ProgramFilesFolder) AND NOT (INSTALLDIR ~>< "\..\")]]></SetProperty>
+
+    <!-- Command lines for WixQuietExec64 (CustomActionData = property named like the action). -->
+    <SetProperty Id="FerrumIndexerInstallRollback" Before="FerrumIndexerInstallRollback" Sequence="execute"
+                 Value="&quot;[INSTALLDIR]ferrum-indexer.exe&quot; uninstall" />
+    <SetProperty Id="FerrumIndexerInstallChosen" Before="FerrumIndexerInstallChosen" Sequence="execute"
+                 Value="&quot;[INSTALLDIR]ferrum-indexer.exe&quot; install --mode-if-new [FERRUMINDEXERMODE]" />
+    <SetProperty Id="FerrumIndexerInstallKeep" Before="FerrumIndexerInstallKeep" Sequence="execute"
+                 Value="&quot;[INSTALLDIR]ferrum-indexer.exe&quot; install" />
+    <SetProperty Id="FerrumIndexerPurge" Before="FerrumIndexerPurge" Sequence="execute"
+                 Value="&quot;[INSTALLDIR]ferrum-indexer.exe&quot; uninstall --purge-data" />
+
+    <CustomAction Id="FerrumIndexerInstallRollback" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="FerrumIndexerInstallChosen" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="FerrumIndexerInstallKeep" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="FerrumIndexerPurge" BinaryKey="WixCA" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Uninstall with FERRUMINDEXERPURGE=1 (not during an upgrade): remove the service's
+           ProgramData files after DeleteServices removed the service. -->
+      <Custom Action="FerrumIndexerPurge" After="DeleteServices">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND FERRUMINDEXERPURGE="1" AND FerrumIndexerDirOk</Custom>
+      <!-- Rollback entry first (fresh installs only, L3), then register + start. -->
+      <Custom Action="FerrumIndexerInstallRollback" After="InstallFiles">NOT REMOVE~="ALL" AND NOT Installed AND NOT WIX_UPGRADE_DETECTED AND FerrumIndexerDirOk</Custom>
+      <Custom Action="FerrumIndexerInstallChosen" After="FerrumIndexerInstallRollback">NOT REMOVE~="ALL" AND NOT Installed AND FERRUMINDEXERMODE AND FerrumIndexerDirOk</Custom>
+      <Custom Action="FerrumIndexerInstallKeep" After="FerrumIndexerInstallChosen">NOT REMOVE~="ALL" AND (Installed OR NOT FERRUMINDEXERMODE) AND FerrumIndexerDirOk</Custom>
+    </InstallExecuteSequence>
+
+    <UI>
+      <Dialog Id="FerrumIndexerModeDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="300" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Ferrum Indexer" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="300" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Bagaimana PC ini dipakai?" />
+        <Control Id="Intro" Type="Text" X="20" Y="54" Width="330" Height="30" NoPrefix="yes"
+                 Text="Ferrum Indexer adalah service Windows yang menyiapkan indeks NTFS untuk search, Disk Usage, dan sync. Pilih mode privasinya:" />
+        <Control Id="ModeRadio" Type="RadioButtonGroup" X="20" Y="88" Width="330" Height="44" Property="FERRUMINDEXERUIMODE">
+          <RadioButtonGroup Property="FERRUMINDEXERUIMODE">
+            <RadioButton Value="high_performance" X="0" Y="0" Width="330" Height="18"
+                         Text="PC dipakai sendiri: High performance (disarankan)" />
+            <RadioButton Value="shared" X="0" Y="22" Width="330" Height="18"
+                         Text="PC dipakai bersama: Bersama (privasi per pengguna)" />
+          </RadioButtonGroup>
+        </Control>
+        <Control Id="Note" Type="Text" X="20" Y="138" Width="330" Height="90" NoPrefix="yes"
+                 Text="High performance mengindeks semua file tanpa filter per pengguna, termasuk nama file di akun lain. Bersama memfilter hasil sesuai hak akses tiap pengguna dan tidak mengindeks profil pengguna lain. Pilihan ini dipakai saat pertama kali dipasang; setelahnya ubah di Ferrum, Settings, Indexer. Service hanya dipasang bila Ferrum berada di Program Files." />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Property="FERRUMINDEXERMODE" Value="[FERRUMINDEXERUIMODE]">1</Publish>
+          <Publish Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- Insert the dialog between InstallDirDlg and VerifyReadyDlg (a later NewDialog wins). -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="FerrumIndexerModeDlg" Order="10">WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID="1"</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="FerrumIndexerModeDlg" Order="10">NOT Installed</Publish>
+    </UI>
+  </Fragment>
+</Wix>

@@ -1,0 +1,5 @@
+{
+  "code": "permissionDenied",
+  "message": "Access is denied. (os error 5)",
+  "path": "C:\\Windows\\CSC"
+}

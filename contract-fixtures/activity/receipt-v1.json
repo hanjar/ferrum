@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "eventId": "event-001",
+  "actionId": "action-001",
+  "privacyEpoch": 7,
+  "source": "navigationCommit",
+  "kind": "folderVisit",
+  "provenance": "manual",
+  "entity": {
+    "id": "entity-001",
+    "kind": "folder",
+    "provider": "local",
+    "volumeId": "volume-001",
+    "locator": "C:\\Work\\invoice",
+    "displayName": "invoice",
+    "parentPath": "C:\\Work",
+    "availability": "available"
+  },
+  "occurredUtcMs": 1780050000000
+}
