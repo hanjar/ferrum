@@ -1241,8 +1241,19 @@ mod tests {
             line.contains(&format!("held by pid {}", std::process::id())),
             "{line}"
         );
-        let me = sid_string(&current_user_sid().unwrap()).unwrap();
-        assert!(line.contains(&format!("owner {me}")), "{line}");
+        // The line names the pipe OBJECT's owner — the SID the client trust
+        // check (`open_owner_checked`) compares — not the server's user.
+        // The dev SDDL sets no owner, so it is the creating token's default
+        // owner: this user normally, BUILTIN\Administrators when elevated.
+        let owner = handle_owner(&srv).unwrap();
+        let me = current_user_sid().unwrap();
+        assert!(
+            owner == me || owner == SID_ADMINISTRATORS.to_vec(),
+            "unexpected default owner {}",
+            sid_string(&owner).unwrap()
+        );
+        let owner = sid_string(&owner).unwrap();
+        assert!(line.contains(&format!("owner {owner},")), "{line}");
         assert!(line.contains(r"\Device\"), "{line}");
         let mut avail = 0u32;
         let ok = unsafe {
