@@ -21,8 +21,8 @@ pub mod settle;
 pub mod versioning;
 
 pub use execute::{
-    Counts, EngineError, EngineOutcome, EngineReport, EngineRequest, EngineSink, InterruptReason,
-    NoSink, OpRecord, Phase, SettleState, run, sync_options,
+    Counts, EngineError, EngineOutcome, EngineReport, EngineRequest, EngineSink, GuardAck,
+    InterruptReason, NoSink, OpRecord, Phase, SettleState, run, sync_options,
 };
 pub use filters::{FilterError, Filters, ProfileFilter, is_builtin_exclude};
 pub use opset::{GuardVerdict, OpStatus};

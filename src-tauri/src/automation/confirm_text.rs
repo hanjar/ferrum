@@ -99,32 +99,62 @@ pub fn save_profile_prompt(
     }
 }
 
-/// Caption of the per-run confirmation of a manual run with permanent deletes (design §10.3).
+/// Caption of the per-run confirmation of a manual run (design §10.3).
 pub const RUN_CAPTION: &str = "Ferrum - run sync profile?";
 
-/// Prompt for a MANUAL run of a profile whose delete policy is `permanent` and whose plan
-/// deletes files: asked per run, built from stored data and the engine's own preview count
-/// (design §10.3 table: "Manual profile run with permanent deletes: Yes (per run)").
-pub fn run_permanent_prompt(name: &str, policy: &ProfilePolicy, deletes: u32) -> Prompt {
-    let lines = [
-        PERMANENT_WARNING.to_string(),
-        format!(
-            "Run sync profile \"{}\" now? {deletes} file{} will be deleted permanently.",
-            part(name),
-            if deletes == 1 { "" } else { "s" }
-        ),
-        format!(
-            "{} · {} → {} · {}",
-            part(&mode_label(&policy.mode)),
-            part(&policy.left.path),
-            part(&policy.right.path),
-            part(&delete_label(&policy.delete_policy)),
-        ),
-        "Cancel keeps every file.".to_string(),
-    ];
+/// A tripped delete guard, as the native dialog states it (design §14 Q4).
+pub struct GuardWarning<'a> {
+    pub deletes: u32,
+    pub percent: u32,
+    /// The profile's own root on the side that would lose the files.
+    pub root: &'a str,
+}
+
+/// Prompt for a MANUAL run that needs the user's native yes: a `permanent` policy that deletes
+/// files (asked per run) and/or a tripped delete guard (the only way past it). One dialog, built
+/// from stored data and the engine's own preview numbers; warnings first, Cancel is the default.
+pub fn run_prompt(
+    name: &str,
+    policy: &ProfilePolicy,
+    deletes: u32,
+    guard: Option<GuardWarning<'_>>,
+) -> Prompt {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(g) = &guard {
+        lines.push(format!(
+            "WARNING: this run deletes {} files ({} % of {}) - over the safety limit.",
+            g.deletes,
+            g.percent,
+            part(g.root)
+        ));
+    }
+    if matches!(
+        policy.delete_policy,
+        crate::automation::model::DeletePolicy::Permanent
+    ) && deletes > 0
+    {
+        lines.push(PERMANENT_WARNING.to_string());
+    }
+    lines.push(format!(
+        "Run sync profile \"{}\" now? {deletes} file{} will be deleted.",
+        part(name),
+        if deletes == 1 { "" } else { "s" }
+    ));
+    lines.push(format!(
+        "{} · {} → {} · {}",
+        part(&mode_label(&policy.mode)),
+        part(&policy.left.path),
+        part(&policy.right.path),
+        part(&delete_label(&policy.delete_policy)),
+    ));
+    lines.push("Cancel keeps every file.".to_string());
     Prompt {
         caption: RUN_CAPTION,
-        text: lines.join("\n\n"),
+        text: lines.join(
+            "
+
+",
+        ),
     }
 }
 

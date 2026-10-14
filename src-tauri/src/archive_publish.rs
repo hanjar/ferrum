@@ -432,7 +432,7 @@ pub fn remove_empty_dir(parent: &DirHandle, name: &OsStr) -> Result<bool, Publis
     #[cfg(windows)]
     {
         let handle = open_windows(name, OpenKind::ExistingDirRemove, Some(parent.handle))?;
-        if is_reparse(handle)? {
+        if is_link(handle)? {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(handle);
             }
@@ -486,6 +486,102 @@ pub fn final_path(dir: &DirHandle) -> Option<String> {
     }
 }
 
+/// The raw OS handle of an opened folder (identity checks read ids from it).
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn raw_handle(dir: &DirHandle) -> windows_sys::Win32::Foundation::HANDLE {
+    dir.handle
+}
+
+/// Open a folder to create children in (no DELETE access, so it can sit next to a read-only pin
+/// that shares no delete). Does not look at reparse points: callers prove the folder with
+/// [`final_path`] and its ids.
+#[allow(dead_code)]
+pub fn open_root_write(path: &Path) -> Result<DirHandle, PublishError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(PublishError::io(io::Error::last_os_error()));
+        }
+        Ok(DirHandle {
+            handle,
+            created_for_rollback: false,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(PublishError::Io("unsupported platform".into()))
+    }
+}
+
+/// Open a folder READ-ONLY (list + attributes) so a read-only source still works. Children can
+/// not be created through this handle. The folder cannot be renamed or replaced while it is
+/// held (no delete sharing). Does not look at reparse points: callers prove the folder with
+/// [`final_path`] and its ids.
+#[allow(dead_code)]
+pub fn open_root_read(path: &Path) -> Result<DirHandle, PublishError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, SYNCHRONIZE,
+        };
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(PublishError::io(io::Error::last_os_error()));
+        }
+        Ok(DirHandle {
+            handle,
+            created_for_rollback: false,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(PublishError::Io("unsupported platform".into()))
+    }
+}
+
 /// Is the object behind `dir` a directory? ([`open_root`] opens a plain file just as well.)
 #[allow(dead_code)]
 pub fn is_directory(dir: &DirHandle) -> bool {
@@ -503,6 +599,76 @@ pub fn is_directory(dir: &DirHandle) -> bool {
     {
         let _ = dir;
         false
+    }
+}
+
+/// A file held open for observation (facts and final path), sharing delete, so the same
+/// object can be asked where it ended up after something else moved or removed it.
+#[cfg(windows)]
+pub struct FileProbe {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for FileProbe {}
+
+#[cfg(windows)]
+impl Drop for FileProbe {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl FileProbe {
+    /// Size and last-write time (unix ms) of the object behind the handle.
+    pub fn facts(&self) -> io::Result<(u64, i64)> {
+        handle_facts(self.handle)
+    }
+
+    /// The path the OS reports for the object NOW (`None`: it has no path any more, for example
+    /// because it was deleted).
+    pub fn final_path(&self) -> Option<String> {
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let mut buf = vec![0u16; 1024];
+        loop {
+            // SAFETY: valid handle; `buf` is writable for `buf.len()` u16s.
+            let n = unsafe {
+                GetFinalPathNameByHandleW(self.handle, buf.as_mut_ptr(), buf.len() as u32, 0)
+            } as usize;
+            if n == 0 {
+                return None;
+            }
+            if n < buf.len() {
+                return Some(String::from_utf16_lossy(&buf[..n]));
+            }
+            buf.resize(n + 1, 0);
+        }
+    }
+}
+
+/// Open the file `name` below `parent` for observation (no-follow; a reparse point is
+/// `Err(Reparse)`, a directory is an error).
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn open_file_probe(parent: &DirHandle, name: &OsStr) -> Result<FileProbe, PublishError> {
+    let handle = open_windows(name, OpenKind::ExistingFileProbe, Some(parent.handle))?;
+    match is_link(handle) {
+        Ok(false) => Ok(FileProbe { handle }),
+        Ok(true) => {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            Err(PublishError::Reparse)
+        }
+        Err(e) => {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -532,7 +698,7 @@ pub fn delete_file_if(
         let close = |h| unsafe {
             windows_sys::Win32::Foundation::CloseHandle(h);
         };
-        match is_reparse(handle) {
+        match is_link(handle) {
             Ok(false) => {}
             Ok(true) => {
                 close(handle);
@@ -592,7 +758,7 @@ pub fn file_facts(parent: &DirHandle, name: &OsStr) -> Result<(u64, i64), Publis
     #[cfg(windows)]
     {
         let handle = open_windows(name, OpenKind::ExistingFileRead, Some(parent.handle))?;
-        let reparse = is_reparse(handle);
+        let reparse = is_link(handle);
         let facts = handle_facts(handle);
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(handle);
@@ -656,7 +822,7 @@ pub fn rename_file_into_if(
         let close = |h| unsafe {
             windows_sys::Win32::Foundation::CloseHandle(h);
         };
-        match is_reparse(handle) {
+        match is_link(handle) {
             Ok(false) => {}
             Ok(true) => {
                 close(handle);
@@ -802,6 +968,9 @@ enum OpenKind {
     /// Sync engine: existing file opened with DELETE (delete or rename through the handle),
     /// WITHOUT following a reparse point.
     ExistingFileRemove,
+    /// Sync engine: existing file held open only to read its facts and its final path, sharing
+    /// DELETE so the shell can move it meanwhile. No reparse point is followed.
+    ExistingFileProbe,
 }
 
 #[cfg(windows)]
@@ -942,6 +1111,19 @@ fn open_windows(
             FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT,
             FILE_ATTRIBUTE_NORMAL,
         ),
+        OpenKind::ExistingFileProbe => (
+            windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT,
+            FILE_ATTRIBUTE_NORMAL,
+        ),
+    };
+    let share = if kind == OpenKind::ExistingFileProbe {
+        FILE_SHARE_READ
+            | FILE_SHARE_WRITE
+            | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
     };
 
     let mut handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
@@ -954,7 +1136,7 @@ fn open_windows(
             &mut ios,
             std::ptr::null_mut(),
             attrs,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share,
             disposition,
             options,
             std::ptr::null(),
@@ -998,6 +1180,59 @@ fn is_reparse(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<bool, Pu
         tag.FileAttributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
             != 0,
     )
+}
+
+/// A reparse tag with the name-surrogate bit (symlink, junction/mount point) is a LINK; any other
+/// reparse data (cloud placeholders such as OneDrive, deduplication, ...) is an ordinary file or
+/// folder as far as the sync engine is concerned.
+pub fn tag_is_link(tag: u32) -> bool {
+    tag & 0x2000_0000 != 0
+}
+
+/// True when the handle points at a link (name-surrogate reparse point). Unlike `is_reparse` a
+/// cloud placeholder or deduplicated file is NOT a link; asking costs no hydration.
+#[cfg(windows)]
+fn is_link(handle: windows_sys::Win32::Foundation::HANDLE) -> Result<bool, PublishError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo,
+        GetFileInformationByHandleEx,
+    };
+    let mut tag: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            &mut tag as *const _ as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(PublishError::io(io::Error::last_os_error()));
+    }
+    Ok(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag_is_link(tag.ReparseTag))
+}
+
+/// [`child_dir`] that rejects only LINKS (see [`tag_is_link`]), not other reparse data.
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn child_dir_link_aware(parent: &DirHandle, name: &OsStr) -> Result<DirHandle, PublishError> {
+    let handle = open_windows(name, OpenKind::ExistingDir, Some(parent.handle))?;
+    if is_link(handle)? {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+        return Err(PublishError::Reparse);
+    }
+    Ok(DirHandle {
+        handle,
+        created_for_rollback: false,
+    })
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn child_dir_link_aware(parent: &DirHandle, name: &OsStr) -> Result<DirHandle, PublishError> {
+    child_dir(parent, name)
 }
 
 /// POSIX-delete an open handle (file or empty directory).

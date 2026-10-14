@@ -641,14 +641,14 @@ fn run_events_serialize_to_the_fixtures() {
 #[test]
 fn result_dto_keeps_paths_out_except_the_run_error_text() {
     let rig = Rig::new();
-    write(&rig.right.join("precious.txt"), b"p");
+    write(&rig.left.join("a.txt"), b"a");
     let p = save(
         &rig,
-        draft(&rig, WireMode::Mirror, WireDeletePolicy::Permanent),
+        draft(&rig, WireMode::OneWay, WireDeletePolicy::Permanent),
     );
     let board = PreviewBoard::default();
     let pv = preview(&rig, &board, &p.id, 10).unwrap();
-    assert!(matches!(pv.guard, GuardVerdict::EmptySource { .. }));
+    write(&rig.left.join("b.txt"), b"appeared after the preview");
     let asked = Cell::new(0);
     let run = start(
         &rig,
@@ -663,9 +663,263 @@ fn result_dto_keeps_paths_out_except_the_run_error_text() {
     .unwrap();
     let report = execute(&rig, run);
     let mut dto = serde_json::to_value(result_dto(&report)).unwrap();
-    assert_eq!(dto["errorCode"], "empty_source");
-    let text = dto.as_object_mut().unwrap().remove("errorText").unwrap();
-    assert_eq!(text, "Source folder is empty — nothing deleted");
+    assert_eq!(dto["errorCode"], "plan_changed");
+    dto.as_object_mut().unwrap().remove("errorText").unwrap();
     assert!(!dto.to_string().contains('\\'), "{dto}");
-    assert!(rig.right.join("precious.txt").exists());
+}
+
+fn seed_many_deletes(rig: &Rig) {
+    write(&rig.left.join("keep.txt"), b"k");
+    for i in 0..3 {
+        write(&rig.right.join(format!("x{i}.txt")), b"x");
+    }
+}
+
+fn guarded_draft(rig: &Rig, policy: WireDeletePolicy) -> Draft {
+    let mut d = draft(rig, WireMode::Mirror, policy);
+    d.policy.guard.max_count = 1;
+    d.policy.guard.max_percent = 1;
+    seed_many_deletes(rig);
+    d
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_with(
+    rig: &Rig,
+    board: &PreviewBoard,
+    id: &str,
+    preview_id: &str,
+    answer: ConfirmAnswer,
+    asked: &Cell<u32>,
+    text: &std::cell::RefCell<String>,
+    now: i64,
+) -> Result<PreparedRun, CommandError> {
+    start_run_in(
+        &rig.auto,
+        board,
+        &rig.lease_env,
+        &test_env(),
+        id,
+        preview_id,
+        true,
+        false,
+        |prompt| {
+            asked.set(asked.get() + 1);
+            *text.borrow_mut() = prompt.text.clone();
+            answer
+        },
+        now,
+    )
+}
+
+// Design section 14 Q4 (option A): past a tripped guard a manual run proceeds ONLY through a
+// native dialog that states the numbers; no (or busy) runs nothing, yes runs.
+#[test]
+fn a_tripped_guard_needs_the_native_yes_with_the_numbers() {
+    let rig = Rig::new();
+    let p = save(&rig, guarded_draft(&rig, WireDeletePolicy::Versioning));
+    let board = PreviewBoard::default();
+    let pv = preview(&rig, &board, &p.id, 10).unwrap();
+    assert!(matches!(pv.guard, GuardVerdict::Tripped { deletes: 3, .. }));
+    let asked = Cell::new(0);
+    let text = std::cell::RefCell::new(String::new());
+    let go = |answer| {
+        start_with(
+            &rig,
+            &board,
+            &p.id,
+            &pv.preview_id,
+            answer,
+            &asked,
+            &text,
+            20,
+        )
+    };
+    assert_eq!(go(ConfirmAnswer::No).err().unwrap().code, "canceled");
+    assert_eq!(go(ConfirmAnswer::Busy).err().unwrap().code, "busy");
+    assert!(rig.right.join("x0.txt").exists(), "nothing ran");
+    let run = go(ConfirmAnswer::Yes).unwrap();
+    assert!(
+        text.borrow()
+            .starts_with("WARNING: this run deletes 3 files (")
+    );
+    assert!(text.borrow().contains("over the safety limit"));
+    assert!(!text.borrow().contains(confirm_text::PERMANENT_WARNING));
+    let report = execute(&rig, run);
+    assert!(
+        matches!(report.outcome, EngineOutcome::Completed { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert!(!rig.right.join("x0.txt").exists());
+}
+
+// One dialog when the run is both permanent and over the guard.
+#[test]
+fn permanent_and_tripped_share_one_dialog() {
+    let rig = Rig::new();
+    let p = save(&rig, guarded_draft(&rig, WireDeletePolicy::Permanent));
+    let board = PreviewBoard::default();
+    let pv = preview(&rig, &board, &p.id, 10).unwrap();
+    let asked = Cell::new(0);
+    let text = std::cell::RefCell::new(String::new());
+    let run = start_with(
+        &rig,
+        &board,
+        &p.id,
+        &pv.preview_id,
+        ConfirmAnswer::Yes,
+        &asked,
+        &text,
+        20,
+    )
+    .unwrap();
+    assert_eq!(asked.get(), 1);
+    assert!(
+        text.borrow()
+            .starts_with("WARNING: this run deletes 3 files")
+    );
+    assert!(text.borrow().contains(confirm_text::PERMANENT_WARNING));
+    assert!(matches!(
+        execute(&rig, run).outcome,
+        EngineOutcome::Completed { .. }
+    ));
+}
+
+// A yes is for THAT plan: when the folders change afterwards the engine refuses, and the next
+// preview asks again.
+#[test]
+fn the_guard_yes_is_bound_to_the_previewed_plan() {
+    let rig = Rig::new();
+    let p = save(&rig, guarded_draft(&rig, WireDeletePolicy::Versioning));
+    let board = PreviewBoard::default();
+    let pv = preview(&rig, &board, &p.id, 10).unwrap();
+    let asked = Cell::new(0);
+    let text = std::cell::RefCell::new(String::new());
+    let run = start_with(
+        &rig,
+        &board,
+        &p.id,
+        &pv.preview_id,
+        ConfirmAnswer::Yes,
+        &asked,
+        &text,
+        20,
+    )
+    .unwrap();
+    write(
+        &rig.right.join("x-new.txt"),
+        b"one more delete after the yes",
+    );
+    let report = execute(&rig, run);
+    match report.outcome {
+        EngineOutcome::Failed { error } => {
+            assert!(
+                matches!(error.code, "guard_tripped" | "plan_changed"),
+                "{}",
+                error.code
+            )
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(rig.right.join("x0.txt").exists());
+    let pv2 = preview(&rig, &board, &p.id, 30).unwrap();
+    let again = start_with(
+        &rig,
+        &board,
+        &p.id,
+        &pv2.preview_id,
+        ConfirmAnswer::No,
+        &asked,
+        &text,
+        40,
+    );
+    assert_eq!(again.err().unwrap().code, "canceled");
+    assert_eq!(asked.get(), 2);
+}
+
+// SP-5.2: an empty source stops hard - no dialog, no run.
+#[test]
+fn an_empty_source_never_reaches_a_dialog() {
+    let rig = Rig::new();
+    write(&rig.right.join("precious.txt"), b"p");
+    let p = save(
+        &rig,
+        draft(&rig, WireMode::Mirror, WireDeletePolicy::Permanent),
+    );
+    let board = PreviewBoard::default();
+    let pv = preview(&rig, &board, &p.id, 10).unwrap();
+    assert!(matches!(pv.guard, GuardVerdict::EmptySource { .. }));
+    let asked = Cell::new(0);
+    let r = start(
+        &rig,
+        &board,
+        &p.id,
+        &pv.preview_id,
+        true,
+        ConfirmAnswer::Yes,
+        &asked,
+        20,
+    );
+    assert_eq!(r.err().unwrap().code, "held");
+    assert_eq!(asked.get(), 0);
+    assert_eq!(leases_held(&rig), 0);
+}
+
+// One run per profile at a time; at most two previews compute at once.
+#[test]
+fn one_run_per_profile_and_a_cap_on_concurrent_previews() {
+    let rig = Rig::new();
+    seed(&rig);
+    let p = save(
+        &rig,
+        draft(&rig, WireMode::OneWay, WireDeletePolicy::Permanent),
+    );
+    let board = PreviewBoard::default();
+    let pv = preview(&rig, &board, &p.id, 10).unwrap();
+    let asked = Cell::new(0);
+    let first = start(
+        &rig,
+        &board,
+        &p.id,
+        &pv.preview_id,
+        true,
+        ConfirmAnswer::Yes,
+        &asked,
+        20,
+    )
+    .unwrap();
+    let pv2 = preview(&rig, &board, &p.id, 11).unwrap();
+    let second = start(
+        &rig,
+        &board,
+        &p.id,
+        &pv2.preview_id,
+        true,
+        ConfirmAnswer::Yes,
+        &asked,
+        21,
+    );
+    assert_eq!(second.err().unwrap().code, "in_use");
+    drop(first);
+    assert!(
+        start(
+            &rig,
+            &board,
+            &p.id,
+            &pv2.preview_id,
+            true,
+            ConfirmAnswer::Yes,
+            &asked,
+            22
+        )
+        .is_ok()
+    );
+
+    let a = board.begin_preview().unwrap();
+    let b = board.begin_preview().unwrap();
+    assert!(board.begin_preview().is_none());
+    drop(a);
+    assert!(board.begin_preview().is_some());
+    drop(b);
 }

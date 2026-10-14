@@ -24,6 +24,9 @@ pub enum ChainError {
     ParentIsFile,
     /// A component does not exist (and creation was not asked for).
     NotFound,
+    /// The folder that was opened is not the one the profile recorded (volume serial / folder
+    /// id differ): the path now points at another folder.
+    Identity,
     Other(PublishError),
 }
 
@@ -41,6 +44,10 @@ impl ChainError {
             ChainError::NotFound => Classified {
                 class: ErrorClass::PerItem,
                 reason: Reason::NotFound,
+            },
+            ChainError::Identity => Classified {
+                class: ErrorClass::PerItem,
+                reason: Reason::Unknown,
             },
             ChainError::Other(e) => classify_publish(e),
         }
@@ -129,13 +136,13 @@ pub fn open_chain<'a>(
     for comp in comps {
         let name = std::ffi::OsStr::new(comp);
         let parent: &DirHandle = cur.as_ref().unwrap_or(root);
-        let next = match publish::child_dir(parent, name) {
+        let next = match publish::child_dir_link_aware(parent, name) {
             Ok(h) => h,
             Err(PublishError::NotFound) if create => match publish::create_dir_new(parent, name) {
                 Ok(h) => h,
                 // Created by someone between the two calls: open what is there now.
                 Err(PublishError::Exists) => {
-                    publish::child_dir(parent, name).map_err(map_open_error)?
+                    publish::child_dir_link_aware(parent, name).map_err(map_open_error)?
                 }
                 Err(e) => return Err(map_open_error(e)),
             },
@@ -194,6 +201,35 @@ fn is_the_folder(expected: &str, handle: &DirHandle) -> bool {
     publish::is_directory(handle)
         && publish::final_path(handle)
             .is_some_and(|actual| comparable(&actual) == comparable(expected))
+}
+
+/// Open a sync root and prove, ON THE HANDLE, that it is the folder the profile recorded: the
+/// final path equals the recorded one and volume serial + folder id equal the recorded identity
+/// (T8: a folder swapped in at the same path after the gate is refused). `writable = false`
+/// opens a read-only handle (list + attributes) so a read-only source keeps working; either
+/// way the folder cannot be renamed or replaced while the handle is held.
+pub fn open_verified_root(
+    path: &str,
+    identity: &crate::automation::model::RootIdentity,
+    writable: bool,
+) -> Result<DirHandle, ChainError> {
+    let p = Path::new(path);
+    let handle = if writable {
+        publish::open_root_write(p)
+    } else {
+        publish::open_root_read(p)
+    }
+    .map_err(map_open_error)?;
+    if !is_the_folder(path, &handle) {
+        return Err(ChainError::Link);
+    }
+    #[cfg(windows)]
+    if !crate::sync_engine::roots::handle_matches_identity(publish::raw_handle(&handle), identity) {
+        return Err(ChainError::Identity);
+    }
+    #[cfg(not(windows))]
+    let _ = identity;
+    Ok(handle)
 }
 
 /// Open a root folder for the engine: an existing folder, never a redirection of the recorded

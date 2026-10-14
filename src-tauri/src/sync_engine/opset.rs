@@ -175,6 +175,16 @@ pub fn side_entries(report: &CompareDirsReport, side: Side) -> u32 {
     report.entries.iter().filter(|e| present(e, side)).count() as u32
 }
 
+/// FILE entries of `side` (the guard counts files on both sides of its fraction: deleting files
+/// is what it limits, so folders do not dilute the denominator).
+pub fn side_files(report: &CompareDirsReport, side: Side) -> u32 {
+    report
+        .entries
+        .iter()
+        .filter(|e| !e.is_dir && present(e, side))
+        .count() as u32
+}
+
 /// Evaluate the guard over the executable operations. Only FILE deletes count (the unit of data
 /// loss); removing an empty folder destroys nothing.
 pub fn evaluate_guard(guard: &DeleteGuard, report: &CompareDirsReport, ops: &[Op]) -> GuardVerdict {
@@ -203,7 +213,7 @@ pub fn evaluate_guard(guard: &DeleteGuard, report: &CompareDirsReport, ops: &[Op
         if deletes == 0 {
             continue;
         }
-        let entries = side_entries(report, side).max(1);
+        let entries = side_files(report, side).max(1);
         // deletes > max(count, percent% of entries), without floating point.
         let over_count = deletes > guard.max_count;
         let over_percent =

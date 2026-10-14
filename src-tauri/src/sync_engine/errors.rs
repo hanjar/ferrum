@@ -55,6 +55,8 @@ pub enum Reason {
     LinkUnsupported,
     VerifyFailed,
     TargetAppeared,
+    /// A file sent to the Recycle Bin did not end up there (the shell deleted it for good).
+    RecycleBypassed,
     Unknown,
 }
 
@@ -92,6 +94,7 @@ impl Reason {
             Reason::LinkUnsupported => "link_unsupported",
             Reason::VerifyFailed => "verify_failed",
             Reason::TargetAppeared => "target_appeared",
+            Reason::RecycleBypassed => "recycle_bypassed",
             Reason::Unknown => "unknown",
         }
     }
@@ -120,6 +123,7 @@ impl Reason {
             Reason::LinkUnsupported => "links are not synchronized",
             Reason::VerifyFailed => "the copy could not be verified",
             Reason::TargetAppeared => "the destination appeared during the run",
+            Reason::RecycleBypassed => "a file was removed without going to the Recycle Bin",
             Reason::Unknown => "an unexpected error occurred",
         }
     }
@@ -202,6 +206,11 @@ fn nt_status_in(text: &str) -> Option<u32> {
         .take_while(|ch| ch.is_ascii_hexdigit())
         .collect();
     let status = u32::from_str_radix(&hex, 16).ok()?;
+    // STATUS_DELETE_PENDING: another program is deleting this very file. That is a per-item
+    // event ("it is already going away"), not an access problem that should stop the run.
+    if status == 0xC000_0056 {
+        return Some(2);
+    }
     nt_status_to_win32(status)
 }
 
@@ -322,6 +331,13 @@ mod tests {
                     .all(|ch| ch.is_ascii_lowercase() || ch == '_')
             );
         }
+    }
+
+    #[test]
+    fn a_delete_pending_file_is_a_per_item_event_not_a_systemic_stop() {
+        let c = classify_text("NtCreateFile failed: 0xc0000056", None, false);
+        assert_eq!(c.class, ErrorClass::PerItem);
+        assert_eq!(c.reason, Reason::NotFound);
     }
 
     #[test]

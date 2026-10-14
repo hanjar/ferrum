@@ -209,6 +209,30 @@ impl EngineReport {
     }
 }
 
+/// The user's NATIVE answer "yes, run it" to a tripped delete guard, for ONE plan and ONE delete
+/// count. Only `automation::manual_run` creates it (after the native dialog); a source test keeps
+/// every other module - in particular the future host - from constructing one. Without it a
+/// tripped guard ends the run as `Failed("guard_tripped")` (SP-5.1, design §14 Q4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardAck {
+    fingerprint: String,
+    deletes: u32,
+}
+
+impl GuardAck {
+    pub(crate) fn from_native_yes(fingerprint: String, deletes: u32) -> Self {
+        GuardAck {
+            fingerprint,
+            deletes,
+        }
+    }
+
+    fn covers(&self, fingerprint: &str, verdict: &GuardVerdict) -> bool {
+        matches!(verdict, GuardVerdict::Tripped { deletes, .. }
+            if *deletes == self.deletes && self.fingerprint == fingerprint)
+    }
+}
+
 pub struct EngineRequest<'a> {
     pub profile: &'a ProfilePolicy,
     /// Baselines are read from, and (under the lease) written to, this store.
@@ -230,6 +254,9 @@ pub struct EngineRequest<'a> {
     /// A manual run: the fingerprint of the plan the user looked at. A different plan is
     /// refused before any operation.
     pub expect_plan: Option<&'a str>,
+    /// The native confirmation of a tripped guard (manual runs only). The empty-source rule
+    /// can never be acknowledged.
+    pub guard_ack: Option<GuardAck>,
     pub env: &'a EngineEnv,
 }
 
@@ -253,6 +280,7 @@ impl<'a> EngineRequest<'a> {
             incremental: false,
             lease: None,
             expect_plan: None,
+            guard_ack: None,
             env,
         }
     }
@@ -308,7 +336,7 @@ pub fn run(req: &EngineRequest<'_>) -> EngineReport {
 
     // Gate (design §10.4 step 7-8): roots exist and are the recorded folders, Recycle Bin and
     // versioning prerequisites. Nothing has been touched yet.
-    let roots = match check_gate(profile, &*req.env.probe) {
+    let roots = match check_gate(profile, req.env) {
         Ok(r) => r,
         Err(e) => return EngineReport::failed(e.code(), e.text(profile)),
     };
@@ -320,6 +348,27 @@ pub fn run(req: &EngineRequest<'_>) -> EngineReport {
             "The run's folder lease does not cover its folders. Nothing was changed.",
         );
     }
+
+    // T8: right after the gate (which looked at the roots by path) both roots are opened and
+    // proven by volume serial + folder id ON THE HANDLE, and held until the run ends. A folder
+    // swapped in at the same path from here on is refused, and one that is swapped later cannot
+    // be renamed or replaced while the pin is held.
+    req.env.hooks.after_gate();
+    let _pins = match pin_roots(profile, &roots) {
+        Ok(p) => p,
+        Err(ChainError::Identity) => {
+            return EngineReport::failed(
+                "identity_mismatch",
+                "A folder of this profile is not the folder it was created for. Nothing was changed.",
+            );
+        }
+        Err(_) => {
+            return EngineReport::failed(
+                "root_unavailable",
+                "A folder of this profile could not be opened. Nothing was changed.",
+            );
+        }
+    };
 
     let filter = match ProfileFilter::new(&profile.filters.include, &profile.filters.exclude) {
         Ok(f) => f,
@@ -401,6 +450,19 @@ pub fn run(req: &EngineRequest<'_>) -> EngineReport {
     }
 
     let ops = build_ops(&final_plan, &report);
+    // Defence in depth: files are deleted only on the side that RECEIVES in this mode (the
+    // Recycle Bin gate and the guard reason about exactly those sides).
+    let receiving = crate::automation::model::receiving_sides(&profile.mode);
+    if ops.iter().any(|o| {
+        !o.held
+            && matches!(o.kind, OpKind::DeleteFile | OpKind::RemoveEmptyDir)
+            && !receiving.contains(&o.target)
+    }) {
+        return EngineReport::failed(
+            "plan_invalid",
+            "The plan would delete on a side that does not receive in this mode. Nothing was changed.",
+        );
+    }
     let fingerprint = plan_fingerprint(&final_plan);
     let verdict = evaluate_guard(&profile.guard, &report, &ops);
     let held = ops.iter().filter(|o| o.held).count() as u32;
@@ -429,7 +491,11 @@ pub fn run(req: &EngineRequest<'_>) -> EngineReport {
         );
     }
 
-    if verdict.trips() {
+    let acknowledged = req
+        .guard_ack
+        .as_ref()
+        .is_some_and(|ack| ack.covers(&fingerprint, &verdict));
+    if verdict.trips() && !acknowledged {
         return finish(
             EngineOutcome::Failed {
                 error: EngineError {
@@ -481,14 +547,20 @@ pub fn run(req: &EngineRequest<'_>) -> EngineReport {
     req.env.hooks.after_plan();
     req.sink.phase(Phase::Syncing);
 
-    let handles = match open_handles(&roots, written_sides(&ops)) {
+    let handles = match open_handles(profile, &roots, written_sides(&ops)) {
         Ok(h) => h,
+        Err(ChainError::Identity) => {
+            return EngineReport::failed(
+                "identity_mismatch",
+                "A folder of this profile is not the folder it was created for. Nothing was changed.",
+            );
+        }
         Err(e) => {
             return EngineReport::failed(
                 "root_unavailable",
                 format!(
                     "A folder could not be opened ({}). Nothing was changed.",
-                    e.reason.text()
+                    e.classify().reason.text()
                 ),
             );
         }
@@ -722,6 +794,7 @@ fn clone_request<'a>(req: &EngineRequest<'a>) -> EngineRequest<'a> {
         incremental: req.incremental,
         lease: req.lease,
         expect_plan: req.expect_plan,
+        guard_ack: req.guard_ack.clone(),
         env: req.env,
     }
 }
@@ -812,16 +885,36 @@ fn written_sides(ops: &[Op]) -> [bool; 2] {
     sides
 }
 
-fn open_handles(roots: &RunRoots, sides: [bool; 2]) -> Result<Handles, Classified> {
-    let open = |p: &str| nofollow::open_root_folder(p, false).map_err(|e| e.classify());
+/// Read-only, identity-verified handles of both roots, held for the whole run.
+fn pin_roots(profile: &ProfilePolicy, roots: &RunRoots) -> Result<[DirHandle; 2], ChainError> {
+    Ok([
+        nofollow::open_verified_root(&roots.left, &profile.left.identity, false)?,
+        nofollow::open_verified_root(&roots.right, &profile.right.identity, false)?,
+    ])
+}
+
+/// Write-capable, identity-verified handles of the sides the run writes to.
+fn open_handles(
+    profile: &ProfilePolicy,
+    roots: &RunRoots,
+    sides: [bool; 2],
+) -> Result<Handles, ChainError> {
     Ok(Handles {
         left: if sides[0] {
-            Some(open(&roots.left)?)
+            Some(nofollow::open_verified_root(
+                &roots.left,
+                &profile.left.identity,
+                true,
+            )?)
         } else {
             None
         },
         right: if sides[1] {
-            Some(open(&roots.right)?)
+            Some(nofollow::open_verified_root(
+                &roots.right,
+                &profile.right.identity,
+                true,
+            )?)
         } else {
             None
         },
@@ -880,9 +973,9 @@ fn fact_of(path: &Path) -> Result<Option<Fact>, std::io::Error> {
 
 #[cfg(windows)]
 fn is_link(m: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || m.file_type().is_symlink()
+    // `FileType::is_symlink` is true for name-surrogate reparse tags only (symlink, junction):
+    // other reparse data (cloud placeholders, deduplication) is an ordinary file or folder here.
+    m.file_type().is_symlink()
 }
 
 #[cfg(not(windows))]
@@ -956,6 +1049,8 @@ struct Runner<'a> {
     copy_failed: bool,
     first_failure: Option<Reason>,
     last_counts: Instant,
+    /// Fired by the run's watcher on user cancel or lost lease.
+    child: CancelToken,
 }
 
 impl<'a> Runner<'a> {
@@ -993,6 +1088,7 @@ impl<'a> Runner<'a> {
             copy_failed: false,
             first_failure: None,
             last_counts: Instant::now() - COUNTS_EVERY,
+            child: CancelToken::default(),
         }
     }
 
@@ -1157,16 +1253,28 @@ impl<'a> Runner<'a> {
         }
     }
 
-    fn link_failure() -> Classified {
-        Classified {
-            class: ErrorClass::PerItem,
-            reason: Reason::LinkUnsupported,
-        }
-    }
-
     // ── phases ──
 
+    /// Run all operations. A single watcher thread lives for the whole run and fires the
+    /// run's token when the user cancels or the lease is lost.
     fn execute(&mut self) {
+        let done = AtomicBool::new(false);
+        let (user, lease, child) = (self.req.cancel.clone(), self.req.lease, self.child.clone());
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::SeqCst) {
+                    if user.is_cancelled() || lease.is_none_or(|l| l.is_lost()) {
+                        child.cancel();
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            });
+            self.execute_phases();
+            done.store(true, Ordering::SeqCst);
+        });
+    }
+
+    fn execute_phases(&mut self) {
         // 1. folders, shallow to deep
         let mut dirs: Vec<usize> = self
             .ops
@@ -1328,7 +1436,7 @@ impl<'a> Runner<'a> {
         match self.jit(op, comps) {
             Err(c) => return OpResult::Failed(c),
             Ok(Jit::Changed) => return OpResult::Changed,
-            Ok(Jit::Link) => return OpResult::Failed(Self::link_failure()),
+            Ok(Jit::Link) => return OpResult::Skipped(Some(Reason::LinkUnsupported)),
             Ok(Jit::Match) => {}
         }
         let (last, parents) = comps.split_last().expect("validated, non-empty");
@@ -1394,33 +1502,19 @@ impl<'a> Runner<'a> {
         }
     }
 
-    /// Run `f` with a token that fires when the user cancels OR the run's lease is lost: a
+    /// Run `f` with the run's token, which fires when the user cancels OR the lease is lost: a
     /// copy that is already in flight (a big batch, a cross-volume move) must stop as soon as
-    /// another holder may be working on the folders.
+    /// another holder may be working on the folders. One watcher per RUN feeds this token
+    /// (see `execute`); an operation costs no thread.
     fn guarded<T>(&self, f: impl FnOnce(&CancelToken) -> T) -> T {
-        let child = CancelToken::default();
-        let done = AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while !done.load(Ordering::SeqCst) {
-                    if self.req.cancel.is_cancelled() || self.req.lease.is_none_or(|l| l.is_lost())
-                    {
-                        child.cancel();
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            });
-            let result = f(&child);
-            done.store(true, Ordering::SeqCst);
-            result
-        })
+        f(&self.child)
     }
 
     fn attempt_delete(&mut self, op: &Op, comps: &[&str]) -> OpResult {
         match self.jit(op, comps) {
             Err(c) => return OpResult::Failed(c),
             Ok(Jit::Changed) => return OpResult::Changed,
-            Ok(Jit::Link) => return OpResult::Failed(Self::link_failure()),
+            Ok(Jit::Link) => return OpResult::Skipped(Some(Reason::LinkUnsupported)),
             Ok(Jit::Match) => {}
         }
         let (last, parents) = comps.split_last().expect("validated, non-empty");
@@ -1542,7 +1636,7 @@ impl<'a> Runner<'a> {
             match self.jit(&op, &refs) {
                 Err(c) => out.push((idx, OpResult::Failed(c))),
                 Ok(Jit::Changed) => out.push((idx, OpResult::Changed)),
-                Ok(Jit::Link) => out.push((idx, OpResult::Failed(Self::link_failure()))),
+                Ok(Jit::Link) => out.push((idx, OpResult::Skipped(Some(Reason::LinkUnsupported)))),
                 Ok(Jit::Match) => {
                     let src = self.abs_path(source, &refs).to_string_lossy().into_owned();
                     comps_of.insert(idx, comps);

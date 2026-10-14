@@ -284,15 +284,23 @@ pub struct FakeTrash {
     pub bin: PathBuf,
     pub trashed: Mutex<Vec<PathBuf>>,
     pub fail: Mutex<Option<FsError>>,
+    /// Behave like a shell that deletes for good instead of moving to the bin.
+    pub nuke: std::sync::atomic::AtomicBool,
 }
 
 impl FakeTrash {
     pub fn new(bin: PathBuf) -> Arc<FakeTrash> {
         fs::create_dir_all(&bin).unwrap();
         Arc::new(FakeTrash {
-            bin,
+            bin: fs::canonicalize(&bin)
+                .map(|p| {
+                    let s = p.to_string_lossy().into_owned();
+                    PathBuf::from(s.strip_prefix(r"\?\").unwrap_or(&s).to_string())
+                })
+                .unwrap(),
             trashed: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            nuke: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -302,6 +310,11 @@ impl Trash for FakeTrash {
         if let Some(e) = self.fail.lock().unwrap().clone() {
             return Err(e);
         }
+        if self.nuke.load(Ordering::SeqCst) {
+            fs::remove_file(path).map_err(FsError::from)?;
+            self.trashed.lock().unwrap().push(path.to_path_buf());
+            return Ok(());
+        }
         let n = self.trashed.lock().unwrap().len();
         let dest = self.bin.join(format!(
             "{n}-{}",
@@ -310,6 +323,20 @@ impl Trash for FakeTrash {
         fs::rename(path, dest).map_err(FsError::from)?;
         self.trashed.lock().unwrap().push(path.to_path_buf());
         Ok(())
+    }
+
+    fn is_in_bin(&self, final_path: &str) -> bool {
+        let p = final_path.trim_start_matches(r"\?\").to_lowercase();
+        p.starts_with(&self.bin.to_string_lossy().to_lowercase())
+    }
+}
+
+/// Recycle Bin configuration that answers one fixed state.
+pub struct FixedBin(pub crate::sync_engine::env::BinState);
+
+impl crate::sync_engine::env::BinConfig for FixedBin {
+    fn state(&self, _root: &str) -> crate::sync_engine::env::BinState {
+        self.0
     }
 }
 
@@ -362,6 +389,7 @@ type OpHook = Box<dyn Fn(usize, &str) + Send>;
 pub struct TestHooks {
     pub final_plan: Mutex<Option<PlanHook>>,
     pub after_plan: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub after_gate: Mutex<Option<Box<dyn Fn() + Send>>>,
     pub before_op: Mutex<Option<OpHook>>,
     pub after_jit: Mutex<Option<OpHook>>,
 }
@@ -370,6 +398,11 @@ impl Hooks for TestHooks {
     fn on_final_plan(&self, plan: &mut Vec<crate::sync_engine::plan::SyncPlanItem>) {
         if let Some(f) = self.final_plan.lock().unwrap().as_ref() {
             f(plan);
+        }
+    }
+    fn after_gate(&self) {
+        if let Some(f) = self.after_gate.lock().unwrap().as_ref() {
+            f();
         }
     }
     fn after_plan(&self) {
@@ -394,5 +427,6 @@ pub fn test_env() -> EngineEnv {
     let mut env = EngineEnv::production();
     env.clock = Arc::new(FixedClock("2026-01-02 030405"));
     env.sleeper = Arc::new(InstantSleeper::default());
+    env.bin = Arc::new(FixedBin(crate::sync_engine::env::BinState::Usable));
     env
 }

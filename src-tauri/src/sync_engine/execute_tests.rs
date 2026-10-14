@@ -741,7 +741,7 @@ fn hostile_names_fail_the_op_without_touching_anything() {
     let rig = Rig::new();
     write(&rig.base().join("victim.txt"), b"outside the roots");
     let profile = rig.profile(mirror(), DeletePolicy::Permanent);
-    let roots = check_gate(&profile, &*test_env().probe).unwrap();
+    let roots = check_gate(&profile, &test_env()).unwrap();
     for name in [
         "../victim.txt",
         "a/../../victim.txt",
@@ -773,7 +773,7 @@ fn hostile_names_fail_the_op_without_touching_anything() {
         let lease = rig.lease(&profile);
         let mut req = EngineRequest::new(&profile, &rig.baselines, &sink, &env);
         req.lease = Some(&lease);
-        let handles = open_handles(&roots, [true, true]).unwrap();
+        let handles = open_handles(&profile, &roots, [true, true]).unwrap();
         let records = initial_records(std::slice::from_ref(&op));
         let mut runner = Runner::new(&req, &roots, handles, None, vec![op], records);
         runner.execute();
@@ -793,7 +793,7 @@ fn a_delete_op_over_a_folder_never_removes_it() {
     let rig = Rig::new();
     write(&rig.right.join("dir").join("inner.txt"), b"inner");
     let profile = rig.profile(mirror(), DeletePolicy::Permanent);
-    let roots = check_gate(&profile, &*test_env().probe).unwrap();
+    let roots = check_gate(&profile, &test_env()).unwrap();
     let entry = DirDiffEntry {
         name: "dir".into(),
         is_dir: false, // forged: the plan claims a file
@@ -817,7 +817,7 @@ fn a_delete_op_over_a_folder_never_removes_it() {
     let lease = rig.lease(&profile);
     let mut req = EngineRequest::new(&profile, &rig.baselines, &sink, &env);
     req.lease = Some(&lease);
-    let handles = open_handles(&roots, [true, true]).unwrap();
+    let handles = open_handles(&profile, &roots, [true, true]).unwrap();
     let records = initial_records(std::slice::from_ref(&op));
     let mut runner = Runner::new(&req, &roots, handles, None, vec![op], records);
     runner.execute();

@@ -193,8 +193,15 @@ leaseLost`), `pendingRerun`, `settle` (`notAttempted | saved | unchanged | skipp
   and `problems` (at most 200 operations that did not end `done`/`skipped`: `{ index, name, action,
 status, reason? }`; `reason` is a closed code such as `sharing_violation`, `access_denied`,
   `disk_full`, `invalid_name`, `link_in_path`). `errorText` is the documented run error text (it
-  may name the profile's own folder, e.g. "Would delete 812 items (41 % of E:\Backups)"); no other
-  field and no error message of the commands ever carries a path or an operating-system message.
+  may name the profile's own folder, e.g. "Would delete 812 items (41 % of E:\Backups)"); `problems[].name` is a path RELATIVE to the profile's roots (what the user sees in the operation list); no other
+  field and no error message of the commands ever carries an absolute path or an operating-system message.
+- Delete guard (Q4): when the preview says `guard.verdict: 'tripped'`, `sync_profile_run` still starts, but
+  only after a NATIVE dialog that states the number and percent of deletes (one dialog together with the
+  permanent-delete prompt); `canceled` / `busy` as above. `emptySource` is refused with the error `held` before any
+  dialog. A profile that is already running, or a third concurrent preview, is `in_use`. Run error codes
+  (`errorCode`) added: `guard_tripped`, `empty_source`, `plan_changed`, `identity_mismatch`, `recycle_bypassed` (the
+  shell removed a file without moving it to the Recycle Bin; the run stops, at most that file is affected).
+  Links (symlink/junction entries) end `skipped` with reason `link_unsupported`.
 - Safety properties tested in the engine (design §5.4-§5.7): folders only get a non-recursive
   `mkdir` or an empty-folder `remove_dir`, parents are created and walked without following
   reparse points, every file is re-checked right before its operation, deletes wait when a copy

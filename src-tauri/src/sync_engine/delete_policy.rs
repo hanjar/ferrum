@@ -16,8 +16,8 @@ use crate::automation::model::{
     DeletePolicy, DriveKind, ProfilePolicy, RootIdentity, Side, receiving_sides,
 };
 use crate::ops::CancelToken;
-use crate::sync_engine::env::EngineEnv;
-use crate::sync_engine::errors::{Classified, classify_fs};
+use crate::sync_engine::env::{BinState, EngineEnv};
+use crate::sync_engine::errors::{Classified, ErrorClass, Reason, classify_fs, classify_io};
 use crate::sync_engine::nofollow::{classify_publish, open_chain};
 use crate::sync_engine::roots::{self, RootError, RootProbe};
 use crate::sync_engine::versioning::{Expect, Moved, VersionStore};
@@ -99,7 +99,8 @@ fn same_path(a: &str, b: &str) -> bool {
 
 /// Gate checks that need no operation yet: roots exist and are the recorded folders, the
 /// Recycle Bin is allowed on the receiving sides, the versioning root is usable.
-pub fn check_gate(profile: &ProfilePolicy, probe: &dyn RootProbe) -> Result<RunRoots, GateError> {
+pub fn check_gate(profile: &ProfilePolicy, env: &EngineEnv) -> Result<RunRoots, GateError> {
+    let probe: &dyn RootProbe = &*env.probe;
     let mut fresh: Vec<(Side, String, RootIdentity)> = Vec::new();
     for (side, spec) in [(Side::Left, &profile.left), (Side::Right, &profile.right)] {
         let canonical = match probe.canonical(&spec.path) {
@@ -136,6 +137,17 @@ pub fn check_gate(profile: &ProfilePolicy, probe: &dyn RootProbe) -> Result<RunR
                 })
             );
             if !fixed {
+                return Err(GateError::RecycleBinUnavailable(side));
+            }
+            // The volume's own Recycle Bin settings: "don't move files to the Recycle Bin", a
+            // bin size of 0 or the no-recycle policy turn a delete into a permanent one; an
+            // unreadable setting counts as unusable (SP-3.1, fail closed).
+            let root = match side {
+                Side::Left => &profile.left.path,
+                Side::Right => &profile.right.path,
+            };
+            let volume_root: String = root.chars().take(3).collect();
+            if env.bin.state(&volume_root) != BinState::Usable {
                 return Err(GateError::RecycleBinUnavailable(side));
             }
         }
@@ -231,12 +243,7 @@ impl Deleter<'_> {
         }
         path.push(name);
         match self.policy {
-            DeletePolicy::RecycleBin => self
-                .env
-                .trash
-                .trash_file(&path)
-                .map(|()| Removal::Done)
-                .map_err(|e| classify_fs(&e, false)),
+            DeletePolicy::RecycleBin => self.recycle(parent, name, &path, expect),
             DeletePolicy::Permanent => {
                 let check = |size, ms| expect.matches(size, ms);
                 match publish::delete_file_if(parent, OsStr::new(name), &check) {
@@ -272,6 +279,57 @@ impl Deleter<'_> {
         }
     }
 
+    /// One file to the Recycle Bin, observed through a handle opened BEFORE the shell is called:
+    /// it must be a plain file that still matches the plan (a name swapped for a folder or a link
+    /// never reaches the shell), and afterwards the same object must report a path inside the
+    /// Recycle Bin. Anything else - gone, or somewhere else - means the shell deleted it for good:
+    /// `recycle_bypassed` stops the run (at most this one file is affected).
+    fn recycle(
+        &self,
+        parent: &DirHandle,
+        name: &str,
+        path: &std::path::Path,
+        expect: Expect,
+    ) -> Result<Removal, Classified> {
+        #[cfg(windows)]
+        {
+            let probe = publish::open_file_probe(parent, OsStr::new(name))
+                .map_err(|e| classify_publish(&e))?;
+            match probe.facts() {
+                Ok((size, ms)) if expect.matches(size, ms) => {}
+                Ok(_) => return Ok(Removal::Changed),
+                Err(e) => return Err(classify_io(&e, false)),
+            }
+            self.env
+                .trash
+                .trash_file(path)
+                .map_err(|e| classify_fs(&e, false))?;
+            let original = path.to_string_lossy().to_lowercase();
+            match probe.final_path() {
+                Some(p) if self.env.trash.is_in_bin(&p) => Ok(Removal::Done),
+                // Still where it was: the shell did nothing.
+                Some(p) if p.trim_start_matches(r"\\?\").to_lowercase() == original => {
+                    Err(Classified {
+                        class: ErrorClass::PerItem,
+                        reason: Reason::Unknown,
+                    })
+                }
+                _ => Err(Classified {
+                    class: ErrorClass::Systemic,
+                    reason: Reason::RecycleBypassed,
+                }),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (parent, name, path, expect);
+            Err(Classified {
+                class: ErrorClass::Systemic,
+                reason: Reason::RecycleBypassed,
+            })
+        }
+    }
+
     /// Keep the previous version of an overwritten file (versioning only): move the existing
     /// target aside; the caller copies the new file afterwards.
     pub fn keep_overwritten(
@@ -285,5 +343,47 @@ impl Deleter<'_> {
     ) -> Result<Removal, Classified> {
         debug_assert!(matches!(self.policy, DeletePolicy::Versioning { .. }));
         self.delete_file(side, root, root_path, rel_parent, name, expect)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// The REAL shell and the REAL Recycle Bin on a temp file owned by this test: the file ends
+    /// up inside `\$Recycle.Bin\` and the engine's check says so. Ignored by default because it
+    /// leaves one entry in the current user's bin; run by hand:
+    /// `cargo test real_recycle_bin -- --ignored`.
+    #[test]
+    #[ignore = "puts one temp file into the real Recycle Bin"]
+    fn real_recycle_bin_is_verified_by_the_final_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("ferrum-p02-bin-check-{}.txt", std::process::id());
+        let file = dir.path().join(&name);
+        std::fs::write(&file, b"temp").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let root = publish::open_root(dir.path()).unwrap();
+        let env = EngineEnv::production();
+        let cancel = CancelToken::default();
+        let deleter = Deleter {
+            policy: &DeletePolicy::RecycleBin,
+            versions: None,
+            env: &env,
+            cancel: &cancel,
+        };
+        let expect = Expect {
+            size: meta.len(),
+            mtime_ms: crate::fs_service::modified_ms(&meta),
+        };
+        let out = deleter.delete_file(
+            Side::Left,
+            &root,
+            &dir.path().to_string_lossy(),
+            &[],
+            &name,
+            expect,
+        );
+        assert_eq!(out.unwrap(), Removal::Done);
+        assert!(!file.exists());
     }
 }

@@ -591,16 +591,21 @@ fn universal_name(path: &str) -> Option<String> {
 #[cfg(windows)]
 fn open_ids(path: &str) -> Result<FolderIds, RootError> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
-    };
     let handle = open_dir_following(path).map_err(io_root_error)?;
     let meta = handle.metadata().map_err(io_root_error)?;
     if !meta.is_dir() {
         return Err(RootError::Invalid);
     }
-    let raw = handle.as_raw_handle() as _;
+    ids_of_raw(handle.as_raw_handle() as _)
+}
+
+/// Volume serial, folder id and file system name of an open folder handle.
+#[cfg(windows)]
+fn ids_of_raw(raw: windows_sys::Win32::Foundation::HANDLE) -> Result<FolderIds, RootError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+    };
     let mut fs_name = [0u16; 64];
     let mut serial: u32 = 0;
     // SAFETY: valid handle; both out buffers are writable for their size.
@@ -648,6 +653,32 @@ fn open_ids(path: &str) -> Result<FolderIds, RootError> {
         file_id,
         fs_name,
     })
+}
+
+/// Does the folder behind this open handle carry the recorded identity (volume serial + folder
+/// id)? The check is made on the handle itself, so it speaks for the object that is held open,
+/// whatever the path points at now (T8). An UNVERIFIED network identity (no ids) never matches.
+#[cfg(windows)]
+pub fn handle_matches_identity(
+    raw: windows_sys::Win32::Foundation::HANDLE,
+    expect: &RootIdentity,
+) -> bool {
+    let Ok(ids) = ids_of_raw(raw) else {
+        return false;
+    };
+    match expect {
+        RootIdentity::Local {
+            volume_serial,
+            file_id,
+            ..
+        } => ids.volume_serial == *volume_serial && ids.file_id == *file_id,
+        RootIdentity::Network {
+            volume_serial: Some(v),
+            file_id: Some(f),
+            ..
+        } => ids.volume_serial == *v && ids.file_id == *f,
+        RootIdentity::Network { .. } => false,
+    }
 }
 
 #[cfg(windows)]

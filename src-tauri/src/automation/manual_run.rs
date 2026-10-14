@@ -26,7 +26,7 @@ use crate::sync_baseline::SyncBaselineStore;
 use crate::sync_engine::delete_policy::check_gate;
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::execute::{
-    EngineOutcome, EngineReport, EngineRequest, EngineSink, SettleState, run,
+    EngineOutcome, EngineReport, EngineRequest, EngineSink, GuardAck, SettleState, run,
 };
 use crate::sync_engine::opset::GuardVerdict;
 use crate::sync_engine::plan::PlanSummary;
@@ -71,6 +71,7 @@ struct PreviewEntry {
     fingerprint: String,
     deletes: u32,
     overwrites: u32,
+    guard: GuardVerdict,
     created_ms: i64,
 }
 
@@ -79,9 +80,57 @@ struct PreviewEntry {
 #[derive(Clone, Default)]
 pub struct PreviewBoard {
     entries: Arc<Mutex<Vec<PreviewEntry>>>,
+    /// Profiles with a manual run in flight (one run per profile at a time).
+    active: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Previews computing right now (each is a full compare).
+    previewing: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// At most this many previews compute at once; more is `in_use`.
+pub const MAX_CONCURRENT_PREVIEWS: usize = 2;
+
+/// Marks a profile as running; released on drop.
+pub struct ActiveRun {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for ActiveRun {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// A preview slot; released on drop.
+pub struct PreviewSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl PreviewBoard {
+    fn begin_run(&self, profile_id: &str) -> Option<ActiveRun> {
+        let mut set = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        set.insert(profile_id.to_string()).then(|| ActiveRun {
+            set: self.active.clone(),
+            id: profile_id.to_string(),
+        })
+    }
+
+    fn begin_preview(&self) -> Option<PreviewSlot> {
+        let n = self.previewing.fetch_add(1, Ordering::SeqCst);
+        if n >= MAX_CONCURRENT_PREVIEWS {
+            self.previewing.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(PreviewSlot(self.previewing.clone()))
+    }
+
     fn insert(&self, entry: PreviewEntry) {
         let mut all = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         all.retain(|e| e.profile_id != entry.profile_id || e.revision != entry.revision);
@@ -181,6 +230,12 @@ pub fn preview_in(
     now_ms: i64,
 ) -> Result<PreviewDto, CommandError> {
     require_id(id)?;
+    let _slot = board.begin_preview().ok_or_else(|| {
+        CommandError::new(
+            "in_use",
+            "Another preview is running - try again in a moment",
+        )
+    })?;
     let (rec, policy) = load(store, id)?;
     let mut req = EngineRequest::new(&policy, baselines, sink, env);
     req.dry_run = true;
@@ -202,6 +257,7 @@ pub fn preview_in(
                 fingerprint: report.fingerprint.clone().unwrap_or_default(),
                 deletes: plan.deletes as u32,
                 overwrites: plan.overwrites as u32,
+                guard,
                 created_ms: now_ms,
             });
             Ok(PreviewDto {
@@ -247,6 +303,9 @@ pub struct PreparedRun {
     fingerprint: String,
     incremental: bool,
     cancel: crate::ops::CancelToken,
+    guard_ack: Option<GuardAck>,
+    /// Keeps the profile marked as running until the run ends.
+    _active: ActiveRun,
 }
 
 impl PreparedRun {
@@ -263,6 +322,7 @@ impl PreparedRun {
         req.incremental = self.incremental;
         req.lease = Some(&self.guard);
         req.expect_plan = Some(&self.fingerprint);
+        req.guard_ack = self.guard_ack.clone();
         req.cancel = self.cancel.clone();
         run(&req)
     }
@@ -310,8 +370,18 @@ pub fn start_run_in<A: Into<ConfirmAnswer>>(
             "Overwrites must be confirmed before the run",
         ));
     }
+    let active = board
+        .begin_run(&rec.id)
+        .ok_or_else(|| CommandError::new("in_use", "This profile is already running"))?;
+    // An empty source is never run, not even with a yes (SP-5.2): refuse before any dialog.
+    if matches!(preview.guard, GuardVerdict::EmptySource { .. }) {
+        return Err(CommandError::new(
+            "held",
+            "The source folder is empty - nothing would be kept. Nothing was changed",
+        ));
+    }
     // Readiness now: roots are the recorded folders, Recycle Bin and versioning prerequisites.
-    let roots = check_gate(&policy, &*env.probe).map_err(|e| not_ready(e.code()))?;
+    let roots = check_gate(&policy, env).map_err(|e| not_ready(e.code()))?;
     let run_id = next_run_id(now_ms);
     let guard = match LeaseGuard::acquire(
         store,
@@ -329,10 +399,32 @@ pub fn start_run_in<A: Into<ConfirmAnswer>>(
             ));
         }
     };
-    // SE-1 / design §10.3: a permanent-delete run is confirmed natively, per run, with the
-    // number of deletes the engine itself previewed.
-    if matches!(policy.delete_policy, DeletePolicy::Permanent) && preview.deletes > 0 {
-        let prompt = confirm_text::run_permanent_prompt(&rec.name, &policy, preview.deletes);
+    // Only a run that nothing refuses reaches the dialog. SE-1 / design §10.3 / §14 Q4: a
+    // permanent-delete run and a run past a tripped guard are confirmed natively, per run, in ONE
+    // dialog with the numbers the engine itself previewed; the webview has no say.
+    let permanent = matches!(policy.delete_policy, DeletePolicy::Permanent) && preview.deletes > 0;
+    let tripped = match preview.guard {
+        GuardVerdict::Tripped {
+            side,
+            deletes,
+            percent,
+            ..
+        } => Some((side, deletes, percent)),
+        _ => None,
+    };
+    let mut guard_ack = None;
+    if permanent || tripped.is_some() {
+        let root = |side: model::Side| match side {
+            model::Side::Left => policy.left.path.clone(),
+            model::Side::Right => policy.right.path.clone(),
+        };
+        let root_path = tripped.map(|(side, _, _)| root(side)).unwrap_or_default();
+        let warning = tripped.map(|(_, deletes, percent)| confirm_text::GuardWarning {
+            deletes,
+            percent,
+            root: &root_path,
+        });
+        let prompt = confirm_text::run_prompt(&rec.name, &policy, preview.deletes, warning);
         match confirm(&prompt).into() {
             ConfirmAnswer::Yes => {}
             ConfirmAnswer::No => {
@@ -348,9 +440,17 @@ pub fn start_run_in<A: Into<ConfirmAnswer>>(
                 ));
             }
         }
+        if let Some((_, deletes, _)) = tripped {
+            guard_ack = Some(GuardAck::from_native_yes(
+                preview.fingerprint.clone(),
+                deletes,
+            ));
+        }
     }
     board.remove(preview_id);
     Ok(PreparedRun {
+        guard_ack,
+        _active: active,
         run_id,
         profile: policy,
         guard,
