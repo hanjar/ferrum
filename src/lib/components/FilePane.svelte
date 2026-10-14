@@ -26,7 +26,7 @@
   import { isInTauri } from '../ipc/tauri';
   import { activity } from '../stores/activityStore.svelte';
   import { shellOpen } from '../ipc/activity';
-  import { FsError } from '../ipc/types';
+  import { handleShellError } from '../ipc/shellOpen';
   import { formatSize, parentOf } from '../format';
   import { homeDir } from '@tauri-apps/api/path';
   import { registerPane } from '../stores/panesRegistry.svelte';
@@ -488,11 +488,7 @@
     try {
       await shellOpen(path, activity.recordingActive);
     } catch (err) {
-      dialogs.open({
-        kind: 'error',
-        title: 'Open',
-        message: err instanceof FsError ? err.message : String(err),
-      });
+      handleShellError('Open', err);
     }
   }
 

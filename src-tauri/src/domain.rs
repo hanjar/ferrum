@@ -45,6 +45,7 @@ pub enum ErrorCode {
     AlreadyExists,
     Cancelled,
     Unsupported,
+    Busy,
     Io,
 }
 
