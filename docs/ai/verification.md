@@ -177,16 +177,6 @@ removed by each script.
 
 WP3 changed no product code; vitest/cargo gates were not re-run by WP3 (scripts and docs only, `eslint` clean on the new scripts).
 
-## 8. Handover prompt for the next goal
-
-> Continue FER-382 (Ferrum AI assistant, Windows only) from `docs/ai/verification.md` on the current `main`. ZIP, chat sync and
-> plan follow-ups ship in assisted mode; BUG-1/2/3, the "0 completed" sync card, LIMIT-4 and LIMIT-5 are resolved, and every desktop
-> smoke passed on `189ca14`. Goals in order: (1) give Pack a queue job id with progress and cancel (LIMIT-6; a 100k ZIP runs 16.5 min
-> with no progress); (2) if the owner wants it, prove a full disk and an ACL denial on a real drive (row 19) and a follow-up during a
-> queued job; (3) FER-415 "AI Advance" (extra operations, chat-history suggestions) as a separate goal. Keep zero writes before
-> approval, one approval per plan, success only from engine results, no paths or names sent to the model, and never read the user's
-> credentials. Record actual results, including failures, in this document. Do not claim any OS other than Windows.
-
 ## 9. Update FER-168 (AI-11, chat sync) - rows 13-17
 
 Rows 13-17 are now exercised through the whole chat path by `src/lib/ai/adapters/syncChatFlow.test.ts` (real temp directories and real

@@ -1,4 +1,4 @@
-# Ekstraksi token v3 — `scratch/disk-usage-theme/Ferrum File Manager v3.dc.html`
+# Ekstraksi token v3 — prototipe desain Ferrum File Manager v3
 
 Provenance:
 
@@ -11,7 +11,7 @@ Provenance:
 
 - Dark: `:root` + `html[data-palette="X"]`; Light: `html[data-palette="X"][data-theme="light"]`.
 - Default dark = blok `:root` (violet). `data-theme` dan `data-palette` di-set pada `documentElement` (baris 941–944 `applyVars()`).
-- Green punya varian `[data-green="emerald"|"lime"]` (baris 30–33) — **TIDAK diadopsi fase ini** sesuai handover; default green = blok `html[data-palette="green"]` (baris 24–25).
+- Green punya varian `[data-green="emerald"|"lime"]` (baris 30–33) — **TIDAK diadopsi fase ini** sesuai kontrak produk; default green = blok `html[data-palette="green"]` (baris 24–25).
 - Density: `--row` di-set inline pada documentElement: comfortable = `30px`, compact = `26px` (baris 946).
 - `--r`/`--rl` per platform windows/linux/macos (baris 947–948) — app sudah default Windows (4px/6px), tidak berubah.
 
@@ -122,7 +122,7 @@ return r * d;
 
 ## 7. Hidden files (baris 1043, 1615)
 
-- Mock: filter dotfile frontend `(showHidden || name[0] !== '.')`, shortcut Ctrl+Shift+. — **mock saja**. APP-08 wajib policy provider nyata (dotfile Unix + atribut hidden/system Windows) sesuai handover; jangan ikuti pola dotfile-saja.
+- Mock: filter dotfile frontend `(showHidden || name[0] !== '.')`, shortcut Ctrl+Shift+. — **mock saja**. APP-08 wajib policy provider nyata (dotfile Unix + atribut hidden/system Windows) sesuai kontrak produk; jangan ikuti pola dotfile-saja.
 
 ## 8. Density
 
@@ -131,11 +131,11 @@ return r * d;
 
 ## 9. Label & ID resmi (baris 1619–1625)
 
-`Pop Violet=violet, Electric=electric, Aqua Signal=aqua, Fresh Mint=green, Sunshine=yellow, Tangerine=orange` — dipakai di command palette v3; sama dengan mapping kontrak produk handover. Density toggle: 'Comfortable Density' (compact↔comfortable).
+`Pop Violet=violet, Electric=electric, Aqua Signal=aqua, Fresh Mint=green, Sunshine=yellow, Tangerine=orange` — dipakai di command palette v3; sama dengan mapping kontrak produk. Density toggle: 'Comfortable Density' (compact↔comfortable).
 
 ## 10. MISSING / ambiguitas
 
 - Set warna file light per palet: MISSING di mock (deviasi terdokumentasi §4).
 - Mekanisme skala font 12/13/14: tidak ada di mock (ditetapkan kontrak §8).
-- `data-green` default mock = 'Emerald' dari props (baris 945) — TIDAK dipakai; default green aplikasi = blok green standar (keputusan handover).
-- Label chip settings modal mock tidak diekstrak per-kata (markup settings tidak dibaca penuh — hemat konteks); label resmi diambil dari command registry v3 §9 dan kontrak handover. Untuk APP-02 cukup; nilai token TIDAK ada yang berasal dari bagian ini.
+- `data-green` default mock = 'Emerald' dari props (baris 945) — TIDAK dipakai; default green aplikasi = blok green standar (keputusan desain).
+- Label chip settings modal mock tidak diekstrak per-kata (markup settings tidak dibaca penuh — hemat konteks); label resmi diambil dari command registry v3 §9 dan kontrak produk. Untuk APP-02 cukup; nilai token TIDAK ada yang berasal dari bagian ini.

@@ -11,7 +11,7 @@ Thank you for your interest in contributing to Ferrum!
 
 - **OS**: Windows 10 or 11 (x64)
 - **Node.js**: v20 or newer
-- **Rust**: stable toolchain (1.80+) with MSVC (`x86_64-pc-windows-msvc`)
+- **Rust**: 1.98.1 (pinned by `rust-toolchain.toml`; `rustup` installs it automatically) with MSVC (`x86_64-pc-windows-msvc`)
 - **Visual Studio Build Tools**: C++ build tools installed for MSVC and Windows SDK
 
 ## Getting Started

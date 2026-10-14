@@ -5,9 +5,8 @@ Status: **S1 terimplementasi** (skeleton service, install/uninstall MSI + NSIS, 
 `indexStatus` di IPC v2; lihat §8). **S3 terimplementasi** (FER-476): service SID `Restricted`, query `search` dan
 `subtree` di IPC v3 dengan filter AccessCheck di mode Bersama, search dan Disk Usage Ferrum memakai indeks, tool AI
 `indexer.status`/`indexer.setMode`; lihat §9. **S4 terimplementasi** (FER-477): IPC v4 dengan `folderSizes`
-(hanya High performance) dan `changes` (sync inkremental), kolom ukuran folder opsional; lihat §10. Desain dan
-keputusan induk:
-`scratch/diskusi-copy-sync-ntfs-2026-10-07.md` bagian 3–5.
+(hanya High performance) dan `changes` (sync inkremental), kolom ukuran folder opsional; lihat §10. Desain
+ada di bagian-bagian di bawah.
 
 ## 1. Bentuk
 

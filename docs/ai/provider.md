@@ -105,32 +105,7 @@ The non-secret setup used to live in webview localStorage, which is bound to the
 
 ### Mounted in Settings > AI (FER-429)
 
-The standalone `AiSettingsDialog` is gone. `AiSettingsSection.svelte` renders `AiSettings` inside `SettingsDialog` (one `AI` category entry plus one render line; additive, agreed with Dispatcher for the Appearance lane). Menu/palette action `view.aiSettings` and the chat "Open settings" banner call `aiChatHost.openSettings()`, which opens Settings and brings the AI section into view with focus on Endpoint.
-
-### Handoff: mount in SettingsDialog (not done here; the Appearance lane owns the file)
-
-`src/lib/components/ai/AiSettings.svelte`
-
-- Props: `onchange?: (state: { setupSaved: boolean; keyConfigured: boolean }) => void`, `transport?: BackendConnectionTransport` (default `backendConnectionTransport`; override only in tests).
-- No events beyond `onchange`. It renders its own `<section>` with two sibling `<form>`s and `role=status/alert` regions; it stops key propagation (except Escape) so file manager shortcuts do not fire.
-- Uses theme vars `--elev --text --text3 --line2 --r --accent --accentInk` (`--danger` falls back to `#c0392b`).
-
-Sketch for `SettingsDialog.svelte`:
-
-```svelte
-<script lang="ts">
-  import AiSettings from './ai/AiSettings.svelte';
-</script>
-
-<!-- inside the modal body, after the existing sections -->
-<AiSettings
-  onchange={() => {
-    /* optional: refresh AI badge */
-  }}
-/>
-```
-
-Consider an "AI" section/tab since the modal is 420 px wide; the component is a single column and wraps.
+The standalone `AiSettingsDialog` is gone. `AiSettingsSection.svelte` renders `AiSettings` inside `SettingsDialog` (one `AI` category entry plus one render line). Menu/palette action `view.aiSettings` and the chat "Open settings" banner call `aiChatHost.openSettings()`, which opens Settings and brings the AI section into view with focus on Endpoint.
 
 ### Test commands (FER-412)
 

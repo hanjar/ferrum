@@ -34,7 +34,7 @@ kali jalan. "Sesudah" = branch `feature/fer-471-copy-multithread`.
   dari sebelum), (2) pool paralel (auto ±1,5x di atas 1 thread untuk file kecil).
 - **Catatan large-20:** file 32 MB baru ditulis oleh generator dan masih di page cache, jadi angkanya mengukur overhead
   engine, bukan kecepatan disk. Jangan dibaca sebagai throughput disk. Untuk satu file besar yang benar-benar dibaca
-  dari disk, batasnya tetap kecepatan disk (±270 MB/s menurut catatan desain di scratch/diskusi-copy-sync-ntfs-2026-10-07.md).
+  dari disk, batasnya tetap kecepatan disk.
 - Mode auto di SSD satu volume mulai di 4 worker dan naik sampai batas 8 (satu volume = batas lebih rendah).
   8 thread tetap vs auto selisihnya masih dalam derau (Defender dan NTFS membatasi ±1.100 file/s di PC ini).
 - Smoke jendela nyata (`scripts/smoke-copy-threads.mjs`): 24.000 file + 4 x 48 MB (±520 MB) selesai dalam 22 s
