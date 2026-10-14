@@ -15,6 +15,7 @@ use tauri::State;
 
 use crate::automation::confirm_text::{self, Prompt};
 use crate::automation::lease::{LeaseEnv, LeaseRegistry, ManualAcquire};
+use crate::automation::manual_run;
 use crate::automation::model::{
     self, Draft, FieldError, PolicyDraft, ProfilePolicy, RootIdentity, WireCompare,
     WireDeletePolicy, WireMode, WireSide,
@@ -981,6 +982,144 @@ pub async fn sync_lease_release(
     tauri::async_runtime::spawn_blocking(move || lease_release_in(&registry, &lease_id))
         .await
         .map_err(|_| internal())?
+}
+
+/// Whether profile runs may skip content reads with the indexer journal (IX-1): the user's
+/// Settings flag, read here too so the webview alone can never turn it on.
+fn journal_skip_enabled<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    profile::config_dir(app)
+        .map(|d| crate::prefs::load_from(&d).sync_journal_skip)
+        .unwrap_or(false)
+}
+
+/// Read-only preview of a profile run (engine dry run): the plan summary, held conflicts and the
+/// delete guard verdict. Touches nothing and needs no lease. The answer carries a `previewId`
+/// that `sync_profile_run` requires.
+#[tauri::command]
+pub async fn sync_profile_preview<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AutomationState>,
+    baselines: State<'_, crate::sync_baseline::SyncBaselineStore>,
+    previews: State<'_, manual_run::PreviewBoard>,
+    id: String,
+) -> Result<manual_run::PreviewDto, CommandError> {
+    let store = state.store.clone();
+    let baselines = baselines.inner().clone();
+    let board = previews.inner().clone();
+    let incremental = journal_skip_enabled(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = crate::sync_engine::env::EngineEnv::production();
+        manual_run::preview_in(
+            &store,
+            &baselines,
+            &board,
+            &env,
+            &crate::sync_engine::NoSink,
+            &id,
+            incremental,
+            now_ms(),
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Forwards the engine's phase and (throttled) count changes to the webview.
+struct RunEvents<R: tauri::Runtime> {
+    app: tauri::AppHandle<R>,
+    run_id: i64,
+}
+
+impl<R: tauri::Runtime> RunEvents<R> {
+    fn send(&self, event: manual_run::RunEventDto) {
+        use tauri::Emitter;
+        let _ = self.app.emit(manual_run::RUN_EVENT, event);
+    }
+}
+
+impl<R: tauri::Runtime> crate::sync_engine::EngineSink for RunEvents<R> {
+    fn phase(&self, phase: crate::sync_engine::Phase) {
+        self.send(manual_run::RunEventDto {
+            run_id: self.run_id,
+            phase: Some(phase),
+            counts: None,
+            result: None,
+        });
+    }
+
+    fn counts(&self, counts: &crate::sync_engine::Counts) {
+        self.send(manual_run::RunEventDto {
+            run_id: self.run_id,
+            phase: None,
+            counts: Some(*counts),
+            result: None,
+        });
+    }
+}
+
+/// Start a manual run of a previewed profile. Returns as soon as the checks passed and the run
+/// holds its folder lease; the run itself continues on its own thread and reports through the
+/// `sync-profile://run` event (phase, counts, and a final result).
+///
+/// A run with `permanent` deletes is confirmed here, by a native dialog, per run (SE-1): the
+/// webview cannot say "already confirmed".
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_profile_run<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AutomationState>,
+    window: tauri::Window<R>,
+    baselines: State<'_, crate::sync_baseline::SyncBaselineStore>,
+    previews: State<'_, manual_run::PreviewBoard>,
+    id: String,
+    preview_id: String,
+    confirm_overwrite: bool,
+) -> Result<manual_run::RunStartedDto, CommandError> {
+    let store = state.store.clone();
+    let lease_env = state.leases.env().clone();
+    let baselines = baselines.inner().clone();
+    let board = previews.inner().clone();
+    let owner = owner_hwnd(&window);
+    let incremental = journal_skip_enabled(&app);
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        let env = crate::sync_engine::env::EngineEnv::production();
+        manual_run::start_run_in(
+            &store,
+            &board,
+            &lease_env,
+            &env,
+            &id,
+            &preview_id,
+            confirm_overwrite,
+            incremental,
+            |prompt| crate::native_dialog::confirm_or_busy(owner, prompt.caption, &prompt.text),
+            now_ms(),
+        )
+    })
+    .await
+    .map_err(|_| internal())??;
+
+    let run_id = prepared.run_id;
+    let events = RunEvents {
+        app: app.clone(),
+        run_id,
+    };
+    // The lease lives in `prepared` and is released when the run thread ends; if the thread
+    // cannot even start, the closure (and the lease) is dropped right here.
+    std::thread::Builder::new()
+        .name("ferrum-sync-run".into())
+        .spawn(move || {
+            let env = crate::sync_engine::env::EngineEnv::production();
+            let report = prepared.execute(&baselines, &env, &events);
+            events.send(manual_run::RunEventDto {
+                run_id,
+                phase: None,
+                counts: None,
+                result: Some(manual_run::result_dto(&report)),
+            });
+        })
+        .map_err(|_| CommandError::new("store_unavailable", "The run could not be started"))?;
+    Ok(manual_run::RunStartedDto { run_id })
 }
 
 #[cfg(test)]
@@ -2031,6 +2170,8 @@ mod tests {
                 ("sync_profile_save", "sync-profile-save.request.json"),
                 ("sync_profile_save", "sync-profile-save-update.request.json"),
                 ("sync_profile_delete", "sync-profile-delete.request.json"),
+                ("sync_profile_preview", "sync-profile-preview.request.json"),
+                ("sync_profile_run", "sync-profile-run.request.json"),
             ] {
                 assert_eq!(
                     wire_keys(command),
@@ -2076,6 +2217,28 @@ mod tests {
             let _: i64 = serde_json::from_value(del["expectedRevision"].clone()).unwrap();
             let validate = fixture("sync-profile-validate.request.json");
             let _: Draft = serde_json::from_value(validate["draft"].clone()).unwrap();
+            let preview = fixture("sync-profile-preview.request.json");
+            let id: String = serde_json::from_value(preview["id"].clone()).unwrap();
+            assert!(model::is_profile_id(&id));
+            let run = fixture("sync-profile-run.request.json");
+            let _: String = serde_json::from_value(run["id"].clone()).unwrap();
+            let pid: String = serde_json::from_value(run["previewId"].clone()).unwrap();
+            assert!(model::is_profile_id(&pid));
+            let _: bool = serde_json::from_value(run["confirmOverwrite"].clone()).unwrap();
+        }
+
+        /// SE-1: the run command's only boolean is the overwrite confirmation of the webview's
+        /// own dialog; nothing in its parameters can stand in for the native permanent-delete
+        /// confirmation.
+        #[test]
+        fn the_run_command_has_no_native_confirmation_parameter() {
+            let keys = wire_keys("sync_profile_run");
+            assert_eq!(keys, ["confirmOverwrite", "id", "previewId"]);
+            assert!(wire_keys("sync_profile_preview") == ["id"]);
+            for k in keys {
+                assert!(!k.to_lowercase().contains("permanent"));
+                assert!(!k.to_lowercase().contains("native"));
+            }
         }
 
         /// The create fixture drives the real core with real folders and saves; the update fixture

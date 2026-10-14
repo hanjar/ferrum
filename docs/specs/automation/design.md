@@ -559,6 +559,64 @@ cannot be opened is accepted at save time with an UNVERIFIED identity (no ids) a
 
 Overlap = equal or component-prefix, compared with `CompareStringOrdinal(..., bIgnoreCase=TRUE)`.
 
+### 5.9 P0.2 implementation notes (as built)
+
+Decisions taken while building `sync_engine::execute`, so that reviewers and later packages do not have to
+rediscover them:
+
+- **Entry points.** `sync_engine::run(&EngineRequest) -> EngineReport` (`report.outcome` is the `EngineOutcome` of
+  §5.1). The plan is built only through `build_profile_sync_plan(.., &ProfileFilter)` (the SAME `ProfileFilter`
+  object the compare used; built-in excludes apply to every profile, with or without include/exclude lists) and
+  `apply_decisions(.., PlanMode::Profile)`; `validate_profile_plan` runs on the final plan and a violation is
+  `Failed("plan_invalid")` before any operation, in release builds too. `EngineEnv` (`sync_engine/env.rs`) holds every
+  injection point: root probe, copier, Recycle Bin, versioning mover, sleeper, clock, root liveness, indexer
+  `ChangesSource`, and observation hooks.
+- **Operations and order.** Final plan items become operations: `CreateDir` (shallow to deep), copies/updates
+  (`toRight` first, grouped by destination folder, batches of at most 256 files or 64 MiB; an overwrite always runs
+  alone), file deletes, `RemoveEmptyDir` (deep to shallow). Deletes and folder removal are withheld (left
+  `notStarted`) when any copy or update failed (`runSyncPlan` rule). Conflicts are `held` and never executed.
+- **Folders.** Only a non-recursive `mkdir` through an opened parent handle and a non-recursive `remove_dir` through the
+  folder's own handle (`archive_publish::remove_empty_dir`: reparse point = skipped, not empty = skipped, gone = skipped).
+  Nothing in the engine calls `remove_dir_all`, `delete_permanent` or a path-based `remove_*` (a source test enforces it).
+- **Parents and roots.** Parents are walked/created component by component from an opened root handle with
+  `NtCreateFile` relative opens and `FILE_OPEN_REPARSE_POINT` (`sync_engine/nofollow.rs`). A name from a plan is checked
+  per component first (`validate_portable_name`: no `..`, separators, device names, trailing dot/space, `:`).
+  `archive_publish::open_root` checks the reparse attribute AFTER following the path, so the engine additionally proves
+  that the opened root's final path equals the recorded canonical path (a junction anywhere on the way fails the run).
+  Only sides that are written get a root handle (a read-only source keeps working).
+- **Just-in-time (RQ-7.5).** Before every operation `symlink_metadata` of both sides is compared with the plan's facts
+  (kind, size, mtime within 2 s, existence); a link anywhere in a copy/update/delete entry is a failed item
+  (`link_unsupported`, links are not synchronized). For `permanent` deletes and for every versioning move the size and
+  mtime are checked AGAIN on the file's own handle, atomically with the delete/rename (`delete_file_if`,
+  `rename_file_into_if`), so a file edited in the gap survives. The shell's Recycle Bin call has no such hook; there the
+  check made right before is all there is. An in-place overwrite (`recycleBin`/`permanent`, SP-3.4) replaces the target
+  when the copy commits; an edit of the TARGET during a long copy is not detected (existing copy-engine behaviour).
+- **Versioning.** `<root>\Left|Right\<yyyy-MM-dd HHmmss> #<run>\<rel>` (system time zone), folders created no-follow.
+  Same volume: rename by handle (`NtSetInformationFile(FileRenameInformation)` with the destination folder handle as
+  `RootDirectory`; the destination is never replaced). Another volume (`STATUS_NOT_SAME_DEVICE`): `copy_engine` into the
+  held destination folder, size verified by handle, source deleted by handle only if it is unchanged since the copy
+  started. Overwrites move the old target aside first, then copy without replacing. The versioning root is a folder
+  (a file is refused), is created on first use and is covered by the run's lease.
+- **Delete guard (SP-5).** Only FILE deletes count (removing an empty folder destroys nothing). A side trips when
+  `deletes > max_count` AND `deletes * 100 > max_percent * entries(side)`; the entries are everything the compare saw
+  on that side after filters. The empty-source rule (SP-5.2) is checked first and applies even when the guard is off.
+- **Errors (§5.6).** `sync_engine/errors.rs`. Raw OS text never leaves the engine: a Win32 code is read from the text
+  and mapped to a closed `Reason` vocabulary (`sharing_violation`, `access_denied`, `disk_full`, `link_in_path`, ...).
+  Transient errors retry `retries` times (2/10/30 s) after a new just-in-time check; systemic errors stop the run;
+  device loss, a root that vanished, or a lost lease end it as `Interrupted`; three unknown failures in a row stop it.
+- **Lease and settle.** The request carries the run's `LeaseGuard`; it is checked before every operation and a watcher
+  cancels an in-flight copy or move when it is lost (outcome `Interrupted(leaseLost)`). Settle (a fresh verifying compare
+  in the profile's compare mode, `reconcile_baseline`, empty-folder entries dropped) saves through
+  `sync_baseline::save_with_guard`, which requires THAT guard's own lease row to be alive and to cover both roots.
+  `SyncBaselineStore::save`/`clear` are crate-private; integration tests save through a real lease.
+- **Manual commands.** `sync_profile_preview` is a dry run; `sync_profile_run` needs the `previewId`, checks readiness,
+  takes its own `Manual` lease, asks the native dialog for a `permanent` run that deletes (per run), then returns
+  `{ runId }`; progress and the result arrive as `sync-profile://run` events. The engine refuses a plan whose names and
+  actions differ from the previewed one (`plan_changed`). The run id of a manual run is process-unique and based on
+  the clock (history assigns real ids from P1.2). Codes added to the closed set in use: `not_ready`, `canceled`.
+- **Not in P0.2.** A stop control for a manual run (the token exists in `PreparedRun`), the manual-run UI (P0.5), queue,
+  history, approval and host (P1.x).
+
 ## 6. Rust modules
 
 ### 6.1 New

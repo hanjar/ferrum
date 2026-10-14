@@ -1,0 +1,15 @@
+{
+  "previewId": "0b9a8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
+  "summary": {
+    "total": 52,
+    "toRight": 1,
+    "toLeft": 0,
+    "overwrites": 0,
+    "deletes": 51,
+    "conflicts": 0,
+    "skipped": 0,
+    "userSkipped": 0
+  },
+  "conflicts": 0,
+  "guard": { "verdict": "tripped", "side": "right", "deletes": 51, "entries": 100, "percent": 51 }
+}

@@ -152,6 +152,21 @@ impl LeaseGuard {
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::SeqCst)
     }
+
+    /// True while THIS guard's own lease is alive (not lost, heartbeat fresh) and covers every
+    /// one of `canonical_roots`. A run asks this before it starts and the baseline save asks it
+    /// again (design §5.7); any store problem answers `false` (fail closed).
+    pub fn covers(&self, canonical_roots: &[String]) -> bool {
+        if self.is_lost() {
+            return false;
+        }
+        let now = self.env.now();
+        self.store
+            .with_read(|c| -> Result<bool, StoreError> {
+                leases::covers_lease(c, &self.id, self.env.holder, canonical_roots, now)
+            })
+            .unwrap_or(false)
+    }
 }
 
 fn beat_loop(

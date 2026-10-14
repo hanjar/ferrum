@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::automation::commands::AutomationState;
-use crate::automation::lease::{LeaseEnv, require_cover};
+use crate::automation::lease::{LeaseEnv, LeaseGuard, require_cover};
 use crate::automation::store::Store as AutomationStore;
 use crate::compare::validate_sync_roots;
 use crate::domain::ErrorCode;
@@ -311,10 +311,14 @@ impl SyncBaselineStore {
 
     /// Simpan ATOMIK. Menolak root tak valid, baseline yang bukan milik pasangan ini, dan
     /// batas terlampaui (baseline lama dibiarkan).
-    /// UNGUARDED write. Production code must go through [`save_with_lease`] (design §5.7: only
-    /// the lease holder writes a baseline); this stays `pub` only because the integration test
-    /// `tests/sync_baseline_fs.rs` drives the store directly, outside the crate.
-    pub fn save(&self, pair: &RootPair, baseline: &BaselineDto) -> Result<(), BaselineError> {
+    /// UNGUARDED write, crate-private (a baseline is written only under a lease). Production code goes through
+    /// [`save_with_guard`] (a run) or [`save_with_lease`] (a command): only the lease holder writes
+    /// a baseline (design §5.7). Integration tests use the leased path too.
+    pub(crate) fn save(
+        &self,
+        pair: &RootPair,
+        baseline: &BaselineDto,
+    ) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {
@@ -355,8 +359,9 @@ impl SyncBaselineStore {
         write_atomic(dir, &target, &bytes).map_err(|_| err("io", "Could not write baseline"))
     }
 
-    /// Hapus baseline pasangan (kembali ke first-run). Idempotent.
-    pub fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
+    /// Hapus baseline pasangan (kembali ke first-run). Idempotent. Crate-private like `save`:
+    /// callers use [`clear_with_lease`].
+    pub(crate) fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {
@@ -446,6 +451,30 @@ pub fn save_with_lease(
     baseline: &BaselineDto,
 ) -> Result<(), BaselineError> {
     require_pair_lease(automation, env, canonical, pair)?;
+    baselines.save(pair, baseline)
+}
+
+/// Save a baseline from a run that HOLDS a [`LeaseGuard`] (engine path, design §5.7): the guard's
+/// own lease must be alive (not lost, heartbeat fresh) and cover both roots of the pair. A lost
+/// lease or a guard for other folders writes nothing (`lease_required`). The folders are
+/// canonicalized exactly as the lease was acquired.
+pub fn save_with_guard(
+    baselines: &SyncBaselineStore,
+    guard: &LeaseGuard,
+    canonical: &dyn Fn(&str) -> Result<String, crate::sync_engine::roots::RootError>,
+    pair: &RootPair,
+    baseline: &BaselineDto,
+) -> Result<(), BaselineError> {
+    const REQUIRED: BaselineError = err(
+        "lease_required",
+        "The baseline can only be changed while this sync holds its folder lease",
+    );
+    let (Ok(left), Ok(right)) = (canonical(&pair.left_root), canonical(&pair.right_root)) else {
+        return Err(REQUIRED);
+    };
+    if !guard.covers(&[left, right]) {
+        return Err(REQUIRED);
+    }
     baselines.save(pair, baseline)
 }
 
@@ -1191,5 +1220,89 @@ mod tests {
         ));
         assert!(registry.release(&id));
         assert_eq!(clear().unwrap_err().code, "lease_required");
+    }
+
+    fn guard_on(
+        store: &Arc<AutomationStore>,
+        env: &LeaseEnv,
+        l: &Path,
+        r: &Path,
+    ) -> crate::automation::lease::LeaseGuard {
+        let roots = [
+            real_canonical(&s(l)).unwrap(),
+            real_canonical(&s(r)).unwrap(),
+        ];
+        match crate::automation::lease::LeaseGuard::acquire(
+            store,
+            env,
+            crate::automation::store::leases::HolderKind::Manual,
+            Some(1),
+            &roots,
+            None,
+        )
+        .unwrap()
+        {
+            crate::automation::lease::GuardOutcome::Acquired(g) => g,
+            _ => panic!("lease acquired"),
+        }
+    }
+
+    /// Engine path (design §5.7): a run saves through the guard of ITS lease; a
+    /// guard for other folders, or one whose lease row is gone, saves nothing.
+    #[test]
+    fn baseline_save_with_guard_needs_the_guards_own_live_lease() {
+        let (b, l, r, baselines) = setup("guard-save");
+        let other = b.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let (auto, _registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        let save = |g: &crate::automation::lease::LeaseGuard| {
+            save_with_guard(&baselines, g, &real_canonical, &p, &bl)
+        };
+
+        // A guard over unrelated folders does not cover the pair.
+        let wrong = guard_on(&auto, &env, &other, &b.join("elsewhere-missing"));
+        assert_eq!(save(&wrong).unwrap_err().code, "lease_required");
+        assert!(matches!(
+            baselines.load(&p).unwrap(),
+            LoadResult::FirstRun { .. }
+        ));
+        drop(wrong);
+
+        // The guard of the pair's own lease saves.
+        let guard = guard_on(&auto, &env, &l, &r);
+        save(&guard).unwrap();
+        assert!(matches!(baselines.load(&p).unwrap(), LoadResult::Ok { .. }));
+        baselines.clear(&p).unwrap();
+
+        // The lease row disappears (reclaimed): the guard no longer covers anything.
+        auto.with_write(|c| crate::automation::store::leases::release(c, guard.id(), env.holder))
+            .unwrap();
+        assert_eq!(save(&guard).unwrap_err().code, "lease_required");
+        assert!(matches!(
+            baselines.load(&p).unwrap(),
+            LoadResult::FirstRun { .. }
+        ));
+    }
+
+    /// Another lease of the SAME process does not satisfy a guard: the guard's own row counts.
+    #[test]
+    fn baseline_save_with_guard_is_not_satisfied_by_a_sibling_lease() {
+        let (b, l, r, baselines) = setup("guard-sibling");
+        let (auto, registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        let guard = guard_on(&auto, &env, &l, &r);
+        auto.with_write(|c| crate::automation::store::leases::release(c, guard.id(), env.holder))
+            .unwrap();
+        // A manual lease of the same process now covers the folders, the dead guard still must not.
+        lease_on(&auto, &registry, &l, &r);
+        assert_eq!(
+            save_with_guard(&baselines, &guard, &real_canonical, &p, &bl)
+                .unwrap_err()
+                .code,
+            "lease_required"
+        );
     }
 }

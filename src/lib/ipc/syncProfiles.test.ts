@@ -208,6 +208,106 @@ describe('browser-dev fallback', () => {
     await expect(backend.delete(list[0].id, 2)).resolves.toEqual({ status: 'deleted' });
     await expect(backend.get(list[0].id)).rejects.toMatchObject({ code: 'not_found' });
     await expect(backend.validate(DRAFT)).rejects.toMatchObject({ code: 'unsupported' });
+    await expect(backend.preview('x')).rejects.toMatchObject({ code: 'unsupported' });
+    await expect(
+      backend.run({ id: 'x', previewId: 'y', confirmOverwrite: false }),
+    ).rejects.toMatchObject({ code: 'unsupported' });
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('manual preview and run wrappers (P0.2)', () => {
+  it('sends exactly the request fixtures that the Rust command tests are held to', async () => {
+    fakeTauri();
+    const preview = fixture('sync-profile-preview.request.json') as { id: string };
+    invokeMock.mockResolvedValueOnce(fixture('sync-profile-preview.json'));
+    const got = await defaultBackend().preview(preview.id);
+    expect(got).toEqual(fixture('sync-profile-preview.json'));
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_preview', preview);
+
+    const run = fixture('sync-profile-run.request.json') as {
+      id: string;
+      previewId: string;
+      confirmOverwrite: boolean;
+    };
+    invokeMock.mockResolvedValueOnce(fixture('sync-profile-run.json'));
+    const started = await defaultBackend().run(run);
+    expect(started).toEqual({ runId: 1790000000123 });
+    // Flat top-level arguments, exactly the fixture; no nested request object.
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_run', run);
+    expect(Object.keys(invokeMock.mock.lastCall?.[1] ?? {}).sort()).toEqual([
+      'confirmOverwrite',
+      'id',
+      'previewId',
+    ]);
+  });
+
+  it('never lets the webview say a permanent delete was confirmed (SE-1)', async () => {
+    fakeTauri();
+    invokeMock.mockResolvedValueOnce({ runId: 1 });
+    await defaultBackend().run({
+      id: 'a',
+      previewId: 'b',
+      confirmOverwrite: true,
+      // @ts-expect-error extra keys are not part of the wrapper input and must not be forwarded
+      confirmed: true,
+      confirmPermanent: true,
+    });
+    const args = invokeMock.mock.lastCall?.[1] as Record<string, unknown>;
+    expect(Object.keys(args)).not.toContain('confirmed');
+    expect(Object.keys(args)).not.toContain('confirmPermanent');
+  });
+
+  it('keeps every wire field of the preview and event fixtures intact', () => {
+    const ok = fixture('sync-profile-preview.json') as import('./syncProfiles').SyncPreview;
+    expect(ok.summary.deletes).toBe(3);
+    expect(ok.guard).toEqual({ verdict: 'ok' });
+    expect(ok.blockers).toBeUndefined();
+    const tripped = fixture(
+      'sync-profile-preview-tripped.json',
+    ) as import('./syncProfiles').SyncPreview;
+    expect(tripped.guard).toEqual({
+      verdict: 'tripped',
+      side: 'right',
+      deletes: 51,
+      entries: 100,
+      percent: 51,
+    });
+    const blocked = fixture(
+      'sync-profile-preview-blocked.json',
+    ) as import('./syncProfiles').SyncPreview;
+    expect(blocked.previewId).toBe('');
+    expect(blocked.blockers).toEqual(['truncated']);
+    const phase = fixture(
+      'sync-profile-run-event-phase.json',
+    ) as import('./syncProfiles').SyncRunEvent;
+    expect(phase.phase).toBe('comparing');
+    const counts = fixture(
+      'sync-profile-run-event-counts.json',
+    ) as import('./syncProfiles').SyncRunEvent;
+    expect(counts.counts?.notStarted).toBe(3);
+    const result = fixture(
+      'sync-profile-run-event-result.json',
+    ) as import('./syncProfiles').SyncRunEvent;
+    expect(result.result?.kind).toBe('partial');
+    expect(result.result?.settle).toEqual({ state: 'saved', entries: 12 });
+    expect(result.result?.problems.map((p) => p.status)).toEqual([
+      'changed',
+      'failed',
+      'notStarted',
+    ]);
+    expect(result.result?.problems[1].reason).toBe('access_denied');
+  });
+
+  it('maps rejections of the new commands to closed-set codes', async () => {
+    fakeTauri();
+    for (const code of ['stale', 'not_ready', 'lease_busy', 'canceled', 'busy', 'invalid_input']) {
+      invokeMock.mockRejectedValueOnce({ code, message: 'm' });
+      await expect(defaultBackend().preview('x')).rejects.toMatchObject({ code });
+      invokeMock.mockRejectedValueOnce({ code, message: 'm' });
+      await expect(
+        defaultBackend().run({ id: 'x', previewId: 'y', confirmOverwrite: false }),
+      ).rejects.toMatchObject({ code });
+    }
   });
 });

@@ -67,6 +67,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_StationsAndDesktops",
     # Automation P0.3 (design §5.8): mapped network drives resolve to their UNC form.
     "Win32_NetworkManagement_WNet",
+    # Automation P0.2: local time for the versioning folder stamp (GetLocalTime).
+    "Win32_System_SystemInformation",
 ] }
 # Automation P0.3: the automation store (same version and `bundled` feature as the activity
 # store; design §4.2, §6.2).
