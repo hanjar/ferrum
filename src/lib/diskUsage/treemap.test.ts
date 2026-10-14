@@ -77,6 +77,7 @@ async function mountTreemap(
 ) {
   const onselect = vi.fn();
   const onzoom = vi.fn();
+  const onreveal = vi.fn();
   render(Treemap, {
     items,
     metric: props.metric ?? 'logical',
@@ -85,11 +86,12 @@ async function mountTreemap(
     scanRootTotal: props.scanRootTotal,
     onselect,
     onzoom,
+    onreveal,
   });
   await tick();
   fireResize(800, 500);
   await tick();
-  return { onselect, onzoom };
+  return { onselect, onzoom, onreveal };
 }
 
 function fireResize(w: number, h: number): void {
@@ -316,6 +318,53 @@ describe('squarify layout', () => {
     expect(subOther).toBeTruthy();
     expect(subOther?.otherGroup?.count).toBe(3);
   });
+
+  it('caps at maxRects (<= 2000) under large synthetic fixture (50k nodes) within reasonable time', () => {
+    const l1Items: DiskUsageChildItem[] = [];
+    let count = 0;
+    for (let i = 0; i < 50; i++) {
+      const l2Children: DiskUsageChildItem[] = [];
+      for (let j = 0; j < 50; j++) {
+        const l3Children: DiskUsageChildItem[] = [];
+        for (let k = 0; k < 20; k++) {
+          l3Children.push(
+            item({
+              id: `node-${count++}`,
+              name: `file-${k}`,
+              kind: 'file',
+              logicalBytes: 100,
+            }),
+          );
+        }
+        l2Children.push(
+          item({
+            id: `node-${count++}`,
+            name: `dir-${j}`,
+            kind: 'dir',
+            logicalBytes: 2000,
+            children: l3Children,
+          }),
+        );
+      }
+      l1Items.push(
+        item({
+          id: `node-${count++}`,
+          name: `root-${i}`,
+          kind: 'dir',
+          logicalBytes: 100000,
+          children: l2Children,
+        }),
+      );
+    }
+    expect(count).toBeGreaterThanOrEqual(50000);
+
+    const start = performance.now();
+    const res = squarify(l1Items, 1200, 800, { metric: 'logical', maxRects: 2000 });
+    const durationMs = performance.now() - start;
+
+    expect(res.rects.length).toBeLessThanOrEqual(2000);
+    expect(durationMs).toBeLessThan(1000);
+  });
 });
 
 /* ── component ───────────────────────────────────────────────────────── */
@@ -338,21 +387,28 @@ describe('Treemap component', () => {
     expect(onselect).toHaveBeenCalledTimes(2);
   });
 
-  it('double-click zooms folders only; files never act', async () => {
+  it('single click drills folders or selects files; double-click triggers reveal for both', async () => {
     const items = [
       item({ id: 'd', name: 'folder', kind: 'dir', logicalBytes: 500 }),
       item({ id: 'f', name: 'file.bin', logicalBytes: 500 }),
     ];
-    const { onzoom, onselect } = await mountTreemap(items);
-    fireDblClick(tile('d'));
-    expect(onzoom).toHaveBeenCalledTimes(1);
+    const { onzoom, onselect, onreveal } = await mountTreemap(items);
+
+    // Single click on folder zooms/drills
+    fireEvent.click(tile('d'));
     expect(onzoom).toHaveBeenCalledWith('d');
-    // double-click on a file: no zoom, no open, no execute — nothing at all
-    fireDblClick(tile('f'));
-    expect(onzoom).toHaveBeenCalledTimes(1);
-    // but a plain click still selects the file
+
+    // Single click on file selects
     fireEvent.click(tile('f'));
     expect(onselect).toHaveBeenCalledWith('f');
+
+    // Double-click on folder reveals in pane
+    fireDblClick(tile('d'));
+    expect(onreveal).toHaveBeenCalledWith('d');
+
+    // Double-click on file reveals in pane
+    fireDblClick(tile('f'));
+    expect(onreveal).toHaveBeenCalledWith('f');
   });
 
   it('highlights the selected tile via selectedId', async () => {

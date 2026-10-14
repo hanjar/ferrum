@@ -8,8 +8,8 @@
     coverage   'complete' | 'partial' | 'stale' — partial shows the
                denied/partial badge, never a silent gap (§3.5).
     onselect(id | null)  — tile click selects; click on empty plot deselects.
-    onzoom(id)           — double-click on a FOLDER only. Files and symlinks
-                           do nothing at all (never open/execute).
+    onzoom(id)           — click on a FOLDER zooms/focuses.
+    onreveal(id)         — double-click on a folder or file triggers Reveal in pane.
   Breadcrumb/up navigation is DSK-04's job, not this component's.
 
   Rendering notes:
@@ -39,6 +39,7 @@
     scanRootTotal,
     onselect,
     onzoom,
+    onreveal,
   }: {
     items: DiskUsageChildItem[];
     metric: DiskUsageSizeMetric;
@@ -47,6 +48,7 @@
     scanRootTotal?: number;
     onselect?: (id: string | null) => void;
     onzoom?: (id: string) => void;
+    onreveal?: (id: string) => void;
   } = $props();
 
   // Plot size: 0 until measured (onMount + ResizeObserver callback). No
@@ -143,8 +145,7 @@
   }
 
   function tileDblClick(r: TreemapRect): void {
-    // ONLY folders zoom. Files/symlinks never open or execute anything.
-    if (r.item && r.item.kind === 'dir') onzoom?.(r.id);
+    if (r.item) onreveal?.(r.id);
   }
 
   function plotBackgroundClick(e: MouseEvent): void {
@@ -188,6 +189,15 @@
     return p === null ? '—' : `${p.toFixed(1)}%`;
   }
 
+  /**
+   * Percentage basis conventions (FER-550):
+   * - Tile label: percent of the currently focused folder (`focusPct`), computed as
+   *   `(r.value / layout.totalValue) * 100`, consistent across all depths.
+   * - Tooltip breakdown:
+   *   1) `% of focus`: portion of the currently focused folder's total value
+   *   2) `of parent`: portion of its immediate parent folder (`it.percentOfParent`)
+   *   3) `of scan root`: portion of the entire scan root (`rootPct` / `it.percentOfScanRoot`)
+   */
   function focusPct(r: TreemapRect): number | null {
     if (layout.totalValue <= 0) return null;
     return (r.value / layout.totalValue) * 100;
@@ -240,8 +250,8 @@
       }
       lines.push(
         it.kind === 'dir'
-          ? 'klik: fokus/drill · double-click: zoom'
-          : 'klik: pilih · double-click file: tidak ada aksi',
+          ? 'klik: fokus/drill · double-click: Reveal di pane'
+          : 'klik: pilih · double-click: Reveal di pane',
       );
     }
     return lines;

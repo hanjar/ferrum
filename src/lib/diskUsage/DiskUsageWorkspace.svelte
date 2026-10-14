@@ -25,7 +25,7 @@
   import DiskUsageTree from './DiskUsageTree.svelte';
   import DiskUsageFiles from './DiskUsageFiles.svelte';
   import { duWorkspace } from './duWorkspace.svelte';
-  import { type DiskUsageTab } from './diskUsageStore.svelte';
+  import { isSubpath, normalizePath, type DiskUsageTab } from './diskUsageStore.svelte';
   // DSK-06: the standing size note (the revalidation gate lives on the store).
   import { DU_SIZE_NOTE } from './diskUsageActions.svelte';
   import { dialogs } from '../stores/dialogStore.svelte';
@@ -167,9 +167,19 @@
       const target = addressText.trim();
       if (!target) return;
       if (store.hasData && store.root) {
-        const ok = await store.focusPathIfScanned(target);
-        if (ok) {
+        const normTarget = normalizePath(target);
+        const normRoot = normalizePath(store.rootId || store.root);
+        if (normTarget === normRoot || isSubpath(normTarget, normRoot)) {
+          const ok = await store.focusPathIfScanned(target);
+          if (ok) {
+            isEditingAddress = false;
+            (e.target as HTMLElement)?.blur();
+            return;
+          }
+          // Path is within root scan, but not found in scan results!
+          store.notice = 'tidak ditemukan di hasil scan';
           isEditingAddress = false;
+          addressText = currentFocusPath;
           (e.target as HTMLElement)?.blur();
           return;
         }
@@ -481,8 +491,12 @@
                   ? (store.rootNode.subtreeAllocatedBytes ?? undefined)
                   : store.rootNode.subtreeLogicalBytes
                 : undefined}
-              onselect={(id) => store.selectNode(id)}
-              onzoom={(id) => store.zoomIn(id)}
+              onselect={(id) => {
+                if (!id) store.selectNode(null);
+                else void store.selectFile(id);
+              }}
+              onzoom={(id) => void store.zoomIn(id)}
+              onreveal={reveal}
             />
             {#if store.treemap?.loading}
               <div class="loadingNote" role="status">Memuat treemap…</div>

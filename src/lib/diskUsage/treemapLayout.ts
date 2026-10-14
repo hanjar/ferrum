@@ -371,6 +371,14 @@ function squarifySingleLevel(
  * Displays focus folder children and nested children up to 3 levels deep with folder
  * headers and padding.
  *
+ * Percentage basis conventions (FER-550):
+ * - Tile label: percent of the currently focused folder (r.value / totalValue * 100),
+ *   consistent across all nesting depths (depth 1, 2, 3).
+ * - Tooltip: comprehensive breakdown:
+ *   1) % of focus: portion against the current focused folder root
+ *   2) of parent: portion against the node's immediate parent folder (percentOfParent)
+ *   3) of scan root: portion against the global scan root (percentOfScanRoot / scanRootTotal)
+ *
  * Input order does not matter — items are sorted internally, so the same dataset always
  * produces the same rects deterministically.
  */
