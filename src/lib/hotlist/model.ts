@@ -518,6 +518,35 @@ export function moveTo(
   return next && path ? { items: next, path } : null;
 }
 
+/**
+ * Move the item into the submenu directly above it (as that submenu's last entry). `null` when the
+ * item above is not a submenu, the item is first in its list, or the depth/size limits refuse it.
+ */
+export function indent(
+  items: HotItem[],
+  path: TreePath,
+): { items: HotItem[]; path: TreePath } | null {
+  const idx = path[path.length - 1];
+  if (path.length === 0 || idx === undefined || idx < 1) return null;
+  const parent = path.slice(0, -1);
+  const above = getAt(items, [...parent, idx - 1]);
+  if (!above || above.type !== 'submenu') return null;
+  return moveTo(items, path, [...parent, idx - 1], above.items.length);
+}
+
+/**
+ * Move the item out of its submenu, to the level of that submenu, right after it. `null` for an
+ * item that is already at the top level.
+ */
+export function outdent(
+  items: HotItem[],
+  path: TreePath,
+): { items: HotItem[]; path: TreePath } | null {
+  if (path.length < 2) return null;
+  const owner = path.slice(0, -1);
+  return moveTo(items, path, owner.slice(0, -1), owner[owner.length - 1] + 1);
+}
+
 // ── folder helpers ──
 
 export function normalizeFolder(p: string): string {

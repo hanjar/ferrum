@@ -8,12 +8,14 @@ import {
   findAllDirs,
   findDir,
   getAt,
+  indent,
   insertAt,
   isDevicePath,
   LIMITS,
   migrateV1,
   moveTo,
   moveWithin,
+  outdent,
   parseDoc,
   removeAt,
   removeMany,
@@ -184,6 +186,42 @@ describe('tree operations', () => {
     for (let i = 0; i < LIMITS.depth; i++) deep = sub('s', [deep]);
     const items = [deep, sub('mover', [dir('m')])];
     expect(moveTo(items, [1], Array(LIMITS.depth).fill(0), 0)).toBeNull();
+  });
+
+  it('indent moves an item to the end of the submenu directly above it', () => {
+    const items = [sub('Zoom', [dir('Z1')]), dir('C'), dir('D')];
+    const r = indent(items, [1])!;
+    expect(titles(r.items)).toBe('Zoom,D');
+    expect(titles((getAt(r.items, [0]) as { items: HotItem[] }).items)).toBe('Z1,C');
+    expect(r.path).toEqual([0, 1]);
+    const empty = indent([sub('E'), dir('C')], [1])!;
+    expect(empty.path).toEqual([0, 0]);
+    expect(titles(items)).toBe('Zoom,C,D'); // original untouched
+  });
+
+  it('indent is refused without a submenu above, at the first position, or past the depth limit', () => {
+    expect(indent([dir('A'), dir('B')], [1])).toBeNull(); // sibling above is not a submenu
+    expect(indent([sub('S'), dir('B')], [0])).toBeNull(); // first in its list
+    expect(indent([], [])).toBeNull();
+    expect(indent([sub('S', [dir('x'), dir('y')])], [0, 1])).toBeNull(); // x is not a submenu
+    // Innermost list: [submenu "above", submenu "mover" with one child]; "above" already sits at the
+    // deepest allowed level, so mover (one level of its own) cannot go in.
+    let chain: HotItem[] = [sub('above'), sub('mover', [dir('m')])];
+    for (let i = 0; i < LIMITS.depth - 1; i++) chain = [sub('s', chain)];
+    expect(indent(chain, [...Array(LIMITS.depth - 1).fill(0), 1])).toBeNull();
+    expect(indent([sub('above'), dir('plain')], [1])).not.toBeNull();
+  });
+
+  it('outdent moves an item out of its submenu, right after that submenu', () => {
+    const items = [dir('A'), sub('S', [dir('S1'), dir('S2')]), dir('B')];
+    const r = outdent(items, [1, 0])!;
+    expect(titles(r.items)).toBe('A,S,S1,B');
+    expect(r.path).toEqual([2]);
+    const nested = outdent([sub('S', [sub('T', [dir('x')]), dir('y')])], [0, 0, 0])!;
+    expect(nested.path).toEqual([0, 1]);
+    expect(titles((getAt(nested.items, [0]) as { items: HotItem[] }).items)).toBe('T,x,y');
+    expect(outdent(items, [0])).toBeNull(); // already at the top level
+    expect(outdent(items, [])).toBeNull();
   });
 
   it('finds every folder entry for a path and removes them all safely', () => {
