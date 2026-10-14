@@ -825,7 +825,8 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
     await rightSlot().getByRole('tab', { name: 'Files' }).click();
     const files = rightSlot().getByTestId('du-files');
     const targetRow = files.locator(`tr[data-path="${KERNEL.replace(/\\/g, '\\\\')}"]`);
-    await targetRow.locator('button', { hasText: 'Reveal' }).click();
+    await targetRow.locator('.actBtn').click();
+    await page.getByRole('menuitem', { name: 'Reveal' }).click();
     // The workspace closes; the LEFT Files pane shows the parent folder with
     // the revealed file selected (existing navigation, never an execution).
     await expect(workspace()).toBeHidden();

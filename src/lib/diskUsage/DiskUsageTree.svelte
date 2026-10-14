@@ -37,7 +37,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { contextMenu } from '../stores/contextMenuStore.svelte';
+  import { contextMenu, createMenuFocusReturn } from '../stores/contextMenuStore.svelte';
   import { TREE_PAGE_SIZE, type DiskUsageStore, type TreeNodeState } from './diskUsageStore.svelte';
   import { DU_SIZE_NOTE, duRowActionItems, type DuScanTarget } from './diskUsageActions.svelte';
   import { formatSize } from '../format';
@@ -503,24 +503,14 @@
   // One mounted ContextMenu per component; a private token keeps the hidden
   // FileList's instance from rendering this menu (FileList convention).
   const menuOwner = {};
-  let menuOpener: HTMLElement | undefined;
-  let activeRowMenuId = $state<string | null>(null);
-
-  $effect(() => {
-    if (contextMenu.isOpen) return;
-    activeRowMenuId = null;
-    const el = menuOpener;
-    menuOpener = undefined;
-    if (el?.isConnected) el.focus();
-  });
+  const rowMenu = createMenuFocusReturn<string>();
 
   function rowTarget(row: TreeRow): DuScanTarget {
     return { path: row.id, kind: row.kind, logicalBytes: row.logicalBytes };
   }
 
   function openRowMenu(row: TreeRow, x: number, y: number, opener?: HTMLElement): void {
-    menuOpener = opener;
-    activeRowMenuId = row.id;
+    rowMenu.setOpener(opener, row.id);
     contextMenu.open(
       x,
       y,
@@ -684,7 +674,7 @@
               class="ctxBtn"
               tabindex="-1"
               aria-haspopup="menu"
-              aria-expanded={contextMenu.isOpen && activeRowMenuId === row.id}
+              aria-expanded={contextMenu.isOpen && rowMenu.activeId === row.id}
               aria-label={`Aksi untuk ${row.name}`}
               title={`Aksi baris via dialog existing (revalidasi dulu) — ${DU_SIZE_NOTE}`}
               onclick={(e) => rowMenuButton(row, e)}

@@ -295,21 +295,12 @@ describe('file row context menu items (FER-540) — no auto-clean', () => {
     const items = duActions.duFileRowActionItems(diskUsage, target, {
       onreveal,
       oncopy,
-      copied: false,
     });
     const labels = items.map((i) => ('separator' in i ? '—' : i.label));
     expect(labels).toEqual(['Reveal', 'Copy path', 'Properties', 'Move…', 'Delete…']);
     for (const it of items) {
       if ('label' in it) expect(it.label).not.toMatch(/clean|wipe|auto/i);
     }
-
-    // Copied feedback label
-    const copiedItems = duActions.duFileRowActionItems(diskUsage, target, {
-      onreveal,
-      oncopy,
-      copied: true,
-    });
-    expect(copiedItems[1]).toMatchObject({ label: 'Tersalin' });
   });
 
   it('Reveal is disabled when onreveal is not provided', () => {

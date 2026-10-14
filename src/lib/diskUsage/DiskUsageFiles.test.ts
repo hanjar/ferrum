@@ -64,7 +64,7 @@ function renderFiles(
 }
 const { dialogs } = await import('../stores/dialogStore.svelte');
 const { contextMenu } = await import('../stores/contextMenuStore.svelte');
-const { loadDuFilesColumnWidths } = await import('./diskUsageFilesColumns');
+const { loadDuFilesColumnWidths, DU_FILES_COLUMNS_KEY } = await import('./diskUsageFilesColumns');
 import type { DiskUsageFileItem, DiskUsageTopFiles } from '../ipc/types';
 
 const ROOT = 'C:\\data';
@@ -482,5 +482,70 @@ describe('column resizing (FER-540)', () => {
     fireEvent.keyDown(nameResizer, { key: 'ArrowRight' });
     fireEvent.dblClick(nameResizer);
     expect(loadDuFilesColumnWidths().name).toBeNull();
+  });
+
+  it('handles corrupted localStorage gracefully by falling back to defaults', () => {
+    globalThis.localStorage?.setItem(DU_FILES_COLUMNS_KEY, '{corrupt json');
+    preloadFiles();
+    const { container } = renderFiles();
+
+    const kindResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom Jenis"]',
+    ) as HTMLElement;
+    expect(kindResizer.getAttribute('aria-valuenow')).toBe('90');
+    const sizeResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom Ukuran"]',
+    ) as HTMLElement;
+    expect(sizeResizer.getAttribute('aria-valuenow')).toBe('100');
+  });
+
+  it('handles extreme and nonsensical values (1e9, negative, string, NaN) by falling back to default widths', () => {
+    globalThis.localStorage?.setItem(
+      DU_FILES_COLUMNS_KEY,
+      JSON.stringify({ name: 1e9, kind: 1e9, size: -50, percent: 'huge' }),
+    );
+    preloadFiles();
+    const { container } = renderFiles();
+
+    const kindResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom Jenis"]',
+    ) as HTMLElement;
+    expect(kindResizer.getAttribute('aria-valuenow')).toBe('90');
+
+    const sizeResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom Ukuran"]',
+    ) as HTMLElement;
+    expect(sizeResizer.getAttribute('aria-valuenow')).toBe('100');
+
+    const percentResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom % root"]',
+    ) as HTMLElement;
+    expect(percentResizer.getAttribute('aria-valuenow')).toBe('70');
+  });
+
+  it('handles storage throwing errors on getItem and setItem without crashing', () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError: Blocked storage');
+    });
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceeded');
+    });
+
+    preloadFiles();
+    const { container } = renderFiles();
+
+    const kindResizer = container.querySelector(
+      '[aria-label="Ubah lebar kolom Jenis"]',
+    ) as HTMLElement;
+    expect(kindResizer.getAttribute('aria-valuenow')).toBe('90');
+
+    // Resize via keyboard or drag does not crash when setItem throws
+    expect(() => {
+      fireEvent.keyDown(kindResizer, { key: 'ArrowRight' });
+    }).not.toThrow();
+    expect(kindResizer.getAttribute('aria-valuenow')).toBe('106');
+
+    getItemSpy.mockRestore();
+    setItemSpy.mockRestore();
   });
 });

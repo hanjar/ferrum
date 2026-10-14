@@ -159,7 +159,7 @@ export function duRowActionItems(
 }
 
 /** Context-menu items for a file row in DiskUsageFiles (Largest files view).
- *  Offers: Reveal, Copy path (with 'Tersalin' feedback), Properties, Move…, Delete…
+ *  Offers: Reveal, Copy path, Properties, Move…, Delete…
  *  Zero auto-clean affordance. Move/Delete use the existing revalidation and flows. */
 export function duFileRowActionItems(
   store: DiskUsageStore,
@@ -167,13 +167,12 @@ export function duFileRowActionItems(
   opts: {
     onreveal?: (filePath: string) => void;
     oncopy?: () => void;
-    copied?: boolean;
   } = {},
 ): ContextMenuItem[] {
   return [
     { label: 'Reveal', disabled: !opts.onreveal, run: () => opts.onreveal?.(t.path) },
     {
-      label: opts.copied ? 'Tersalin' : 'Copy path',
+      label: 'Copy path',
       run: () => {
         if (opts.oncopy) opts.oncopy();
         else void copyScanPath(t.path);

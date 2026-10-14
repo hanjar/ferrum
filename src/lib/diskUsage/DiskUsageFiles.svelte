@@ -24,7 +24,8 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { contextMenu } from '../stores/contextMenuStore.svelte';
+  import ColumnResizeHandle from '../components/ColumnResizeHandle.svelte';
+  import { contextMenu, createMenuFocusReturn } from '../stores/contextMenuStore.svelte';
   import type { DiskUsageStore } from './diskUsageStore.svelte';
   import { DU_SIZE_NOTE, duFileRowActionItems, type DuScanTarget } from './diskUsageActions.svelte';
   import {
@@ -32,9 +33,9 @@
     type DuFilesColumnWidths,
     DEFAULT_DU_FILES_COLUMNS,
     DU_FILES_MIN_WIDTHS,
+    DU_FILES_MAX_WIDTH,
     DU_FILES_DEFAULT_NAME_WIDTH,
     DU_FILES_RESIZE_STEP,
-    clampDuFilesColumnWidth,
     loadDuFilesColumnWidths,
     persistDuFilesColumnWidths,
   } from './diskUsageFilesColumns';
@@ -62,74 +63,60 @@
 
   // ── Column resize state (FER-540) ──────────────────────────────────────────
   let colWidths = $state<DuFilesColumnWidths>(loadDuFilesColumnWidths());
-  let draggingCol = $state<DuFilesCol | null>(null);
-  let dragStartX = 0;
-  let dragStartWidth = 0;
-  let activeResizerEl: HTMLElement | null = null;
-  let thName = $state<HTMLElement | undefined>();
+  let thElements = $state<Partial<Record<DuFilesCol, HTMLElement>>>({});
 
   function getEffectiveColWidth(col: DuFilesCol): number {
     if (col === 'name') {
       if (colWidths.name !== null) return colWidths.name;
-      const w = thName?.getBoundingClientRect().width;
+      const w = thElements.name?.getBoundingClientRect().width;
       return w && Number.isFinite(w) && w > 0 ? Math.round(w) : DU_FILES_DEFAULT_NAME_WIDTH;
     }
     return colWidths[col];
   }
 
-  function onPointerDownResizer(col: DuFilesCol, e: PointerEvent) {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    draggingCol = col;
-    dragStartX = e.clientX;
-    dragStartWidth = getEffectiveColWidth(col);
-    activeResizerEl = e.currentTarget as HTMLElement;
-    activeResizerEl?.setPointerCapture?.(e.pointerId);
+  function handleColChange(col: DuFilesCol, width: number): void {
+    colWidths = { ...colWidths, [col]: width };
   }
 
-  function onPointerMoveResizer(e: PointerEvent) {
-    if (!draggingCol) return;
-    const delta = e.clientX - dragStartX;
-    const next = clampDuFilesColumnWidth(draggingCol, dragStartWidth + delta);
-    colWidths = { ...colWidths, [draggingCol]: next };
+  function handleColCommit(): void {
     persistDuFilesColumnWidths(colWidths);
   }
 
-  function endColResize(e: PointerEvent) {
-    if (!draggingCol) return;
-    draggingCol = null;
-    if (activeResizerEl?.hasPointerCapture?.(e.pointerId)) {
-      activeResizerEl.releasePointerCapture(e.pointerId);
-    }
-    activeResizerEl = null;
-  }
-
-  function onColResizerKeydown(col: DuFilesCol, e: KeyboardEvent) {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    const cur = getEffectiveColWidth(col);
-    const delta = e.key === 'ArrowRight' ? DU_FILES_RESIZE_STEP : -DU_FILES_RESIZE_STEP;
-    const next = clampDuFilesColumnWidth(col, cur + delta);
-    colWidths = { ...colWidths, [col]: next };
-    persistDuFilesColumnWidths(colWidths);
-  }
-
-  function resetColWidth(col: DuFilesCol) {
+  function handleColReset(col: DuFilesCol): void {
     colWidths = { ...colWidths, [col]: DEFAULT_DU_FILES_COLUMNS[col] };
     persistDuFilesColumnWidths(colWidths);
   }
 
-  $effect(() => {
-    if (!draggingCol) return;
-    const prevCursor = document.body.style.cursor;
-    const prevUserSelect = document.body.style.userSelect;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    return () => {
-      document.body.style.cursor = prevCursor;
-      document.body.style.userSelect = prevUserSelect;
-    };
-  });
+  const duHeaderCols = $derived([
+    {
+      key: 'name' as const,
+      label: 'Nama',
+      resizeLabel: 'Ubah lebar kolom Nama',
+      num: false,
+      min: DU_FILES_MIN_WIDTHS.name,
+    },
+    {
+      key: 'kind' as const,
+      label: 'Jenis',
+      resizeLabel: 'Ubah lebar kolom Jenis',
+      num: false,
+      min: DU_FILES_MIN_WIDTHS.kind,
+    },
+    {
+      key: 'size' as const,
+      label: store.metric === 'allocated' ? 'Allocated' : 'Logical',
+      resizeLabel: 'Ubah lebar kolom Ukuran',
+      num: true,
+      min: DU_FILES_MIN_WIDTHS.size,
+    },
+    {
+      key: 'percent' as const,
+      label: '% root',
+      resizeLabel: 'Ubah lebar kolom % root',
+      num: true,
+      min: DU_FILES_MIN_WIDTHS.percent,
+    },
+  ]);
 
   const minTableWidth = $derived(
     34 +
@@ -142,17 +129,7 @@
 
   // ── Row context actions & dropdown menu (FER-540) ──────────────────────────
   const menuOwner = {};
-  let menuOpener: HTMLElement | undefined;
-  let activeMenuFileId = $state<string | null>(null);
-
-  // Return focus to the trigger button when the context menu closes.
-  $effect(() => {
-    if (contextMenu.isOpen) return;
-    activeMenuFileId = null;
-    const el = menuOpener;
-    menuOpener = undefined;
-    if (el?.isConnected) el.focus();
-  });
+  const rowMenu = createMenuFocusReturn<string>();
 
   function applyMinBytes(raw: string): void {
     minBytesInput = raw;
@@ -207,8 +184,7 @@
     e.stopPropagation();
     const btn =
       (e.currentTarget as HTMLElement).closest('button') ?? (e.currentTarget as HTMLElement);
-    menuOpener = btn;
-    activeMenuFileId = file.id;
+    rowMenu.setOpener(btn, file.id);
     const rect = btn.getBoundingClientRect();
     const x = 'clientX' in e && e.clientX > 0 ? e.clientX : rect.left;
     const y = 'clientY' in e && e.clientY > 0 ? e.clientY : rect.bottom + 2;
@@ -218,7 +194,6 @@
       duFileRowActionItems(store, target(file), {
         onreveal,
         oncopy: () => void copyPath(file),
-        copied: copiedId === file.id,
       }),
       menuOwner,
     );
@@ -228,15 +203,14 @@
     e.preventDefault();
     e.stopPropagation();
     const tr = (e.currentTarget as HTMLElement).closest('tr');
-    menuOpener = tr?.querySelector<HTMLButtonElement>('.actBtn') ?? undefined;
-    activeMenuFileId = file.id;
+    const btn = tr?.querySelector<HTMLButtonElement>('.actBtn') ?? undefined;
+    rowMenu.setOpener(btn, file.id);
     contextMenu.open(
       e.clientX,
       e.clientY,
       duFileRowActionItems(store, target(file), {
         onreveal,
         oncopy: () => void copyPath(file),
-        copied: copiedId === file.id,
       }),
       menuOwner,
     );
@@ -312,86 +286,27 @@
         <thead>
           <tr>
             <th class="rank">#</th>
-            <th scope="col" class="thCol" bind:this={thName}>
-              <span class="thText">Nama</span>
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div
-                class="colResizer"
-                role="separator"
-                tabindex="0"
-                aria-orientation="vertical"
-                aria-label="Ubah lebar kolom Nama"
-                aria-valuemin={DU_FILES_MIN_WIDTHS.name}
-                aria-valuenow={getEffectiveColWidth('name')}
-                onpointerdown={(e) => onPointerDownResizer('name', e)}
-                onpointermove={onPointerMoveResizer}
-                onpointerup={endColResize}
-                onpointercancel={endColResize}
-                onlostpointercapture={endColResize}
-                ondblclick={() => resetColWidth('name')}
-                onkeydown={(e) => onColResizerKeydown('name', e)}
-              ></div>
-            </th>
-            <th scope="col" class="thCol" style:width="{colWidths.kind}px">
-              <span class="thText">Jenis</span>
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div
-                class="colResizer"
-                role="separator"
-                tabindex="0"
-                aria-orientation="vertical"
-                aria-label="Ubah lebar kolom Jenis"
-                aria-valuemin={DU_FILES_MIN_WIDTHS.kind}
-                aria-valuenow={getEffectiveColWidth('kind')}
-                onpointerdown={(e) => onPointerDownResizer('kind', e)}
-                onpointermove={onPointerMoveResizer}
-                onpointerup={endColResize}
-                onpointercancel={endColResize}
-                onlostpointercapture={endColResize}
-                ondblclick={() => resetColWidth('kind')}
-                onkeydown={(e) => onColResizerKeydown('kind', e)}
-              ></div>
-            </th>
-            <th scope="col" class="thCol num" style:width="{colWidths.size}px">
-              <span class="thText">{store.metric === 'allocated' ? 'Allocated' : 'Logical'}</span>
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div
-                class="colResizer"
-                role="separator"
-                tabindex="0"
-                aria-orientation="vertical"
-                aria-label="Ubah lebar kolom Ukuran"
-                aria-valuemin={DU_FILES_MIN_WIDTHS.size}
-                aria-valuenow={getEffectiveColWidth('size')}
-                onpointerdown={(e) => onPointerDownResizer('size', e)}
-                onpointermove={onPointerMoveResizer}
-                onpointerup={endColResize}
-                onpointercancel={endColResize}
-                onlostpointercapture={endColResize}
-                ondblclick={() => resetColWidth('size')}
-                onkeydown={(e) => onColResizerKeydown('size', e)}
-              ></div>
-            </th>
-            <th scope="col" class="thCol num" style:width="{colWidths.percent}px">
-              <span class="thText">% root</span>
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div
-                class="colResizer"
-                role="separator"
-                tabindex="0"
-                aria-orientation="vertical"
-                aria-label="Ubah lebar kolom % root"
-                aria-valuemin={DU_FILES_MIN_WIDTHS.percent}
-                aria-valuenow={getEffectiveColWidth('percent')}
-                onpointerdown={(e) => onPointerDownResizer('percent', e)}
-                onpointermove={onPointerMoveResizer}
-                onpointerup={endColResize}
-                onpointercancel={endColResize}
-                onlostpointercapture={endColResize}
-                ondblclick={() => resetColWidth('percent')}
-                onkeydown={(e) => onColResizerKeydown('percent', e)}
-              ></div>
-            </th>
+            {#each duHeaderCols as col (col.key)}
+              <th
+                scope="col"
+                class="thCol"
+                class:num={col.num}
+                bind:this={thElements[col.key]}
+                style={colWidths[col.key] !== null ? `width: ${colWidths[col.key]}px;` : undefined}
+              >
+                <span class="thText">{col.label}</span>
+                <ColumnResizeHandle
+                  label={col.resizeLabel}
+                  value={getEffectiveColWidth(col.key)}
+                  min={col.min}
+                  max={DU_FILES_MAX_WIDTH}
+                  step={DU_FILES_RESIZE_STEP}
+                  onchange={(w) => handleColChange(col.key, w)}
+                  oncommit={handleColCommit}
+                  onreset={() => handleColReset(col.key)}
+                />
+              </th>
+            {/each}
             <th scope="col" class="act"><span class="srOnly">Aksi</span></th>
           </tr>
         </thead>
@@ -420,7 +335,7 @@
                   type="button"
                   class="rowBtn actBtn"
                   aria-haspopup="menu"
-                  aria-expanded={contextMenu.isOpen && activeMenuFileId === file.id}
+                  aria-expanded={contextMenu.isOpen && rowMenu.activeId === file.id}
                   aria-label={`Aksi untuk ${file.name}`}
                   title={copiedId === file.id
                     ? 'Tersalin'
@@ -544,34 +459,6 @@
   th.num .thText {
     display: block;
     text-align: right;
-  }
-  .colResizer {
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 8px;
-    height: 100%;
-    cursor: col-resize;
-    user-select: none;
-    touch-action: none;
-    z-index: 2;
-  }
-  .colResizer::after {
-    content: '';
-    position: absolute;
-    top: 20%;
-    bottom: 20%;
-    right: 3px;
-    width: 1px;
-    background: var(--line2);
-  }
-  .colResizer:hover::after,
-  .colResizer:focus-visible::after {
-    background: var(--accent);
-    width: 2px;
-  }
-  .colResizer:focus-visible {
-    outline: none;
   }
   th {
     position: sticky;
