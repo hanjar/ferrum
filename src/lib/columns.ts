@@ -142,15 +142,20 @@ export function columnLayout(
   opts: {
     comments?: boolean;
     widths?: ColumnWidths;
+    useCssVars?: boolean;
   } = {},
 ): ColumnLayout {
   const columns: ColumnLayoutColumn[] = config.map((id) => {
     let track = TRACKS[id];
-    if (id !== 'name' && opts.widths) {
-      const w = opts.widths[id];
-      if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
-        track = `${Math.round(w)}px`;
-      }
+    if (id !== 'name') {
+      const fallback =
+        opts.widths &&
+        typeof opts.widths[id] === 'number' &&
+        Number.isFinite(opts.widths[id]) &&
+        (opts.widths[id] as number) > 0
+          ? `${Math.round(opts.widths[id] as number)}px`
+          : TRACKS[id];
+      track = opts.useCssVars ? `var(--col-${id}, ${fallback})` : fallback;
     }
     return {
       id,
@@ -159,13 +164,16 @@ export function columnLayout(
     };
   });
   if (opts.comments) {
-    let commentTrack = 'minmax(0, 1.6fr)';
+    let commentFallback = 'minmax(0, 1.6fr)';
     if (opts.widths) {
       const w = opts.widths.comment;
       if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
-        commentTrack = `${Math.round(w)}px`;
+        commentFallback = `${Math.round(w)}px`;
       }
     }
+    const commentTrack = opts.useCssVars
+      ? `var(--col-comment, ${commentFallback})`
+      : commentFallback;
     columns.push({ id: 'comment', label: 'Comment', track: commentTrack });
   }
   return { columns, gridTemplate: columns.map((c) => c.track).join(' ') };

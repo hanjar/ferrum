@@ -11,6 +11,12 @@
    *
    * NOTE: The parent element of ColumnResizeHandle MUST have `position: relative`
    * (or sticky/absolute) because this handle is absolutely positioned (`top: 0;`).
+   *
+   * NOTE on `side="left"`: When `side="left"` (used for trailing columns whose left boundary
+   * is dragged against a flexible leading column like Name in FileList), dragging to the left
+   * increases column width and dragging to the right decreases it. Keyboard ArrowLeft and
+   * ArrowRight directions are inverted accordingly (ArrowLeft widens the column to the left,
+   * while ArrowRight narrows it), matching user expectations and drag behavior.
    */
   let {
     label,

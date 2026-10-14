@@ -68,10 +68,15 @@
 
   $effect(() => {
     const el = thElements.name;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (!el) return;
+    const initial = el.getBoundingClientRect().width;
+    if (Number.isFinite(initial) && initial > 0) {
+      measuredNameWidth = Math.round(initial);
+    }
+    if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const w = entry.contentRect.width;
+        const w = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
         if (Number.isFinite(w) && w > 0) {
           measuredNameWidth = Math.round(w);
         }
@@ -84,8 +89,7 @@
   function getEffectiveColWidth(col: DuFilesCol): number {
     if (col === 'name') {
       if (colWidths.name !== null) return colWidths.name;
-      const w = thElements.name?.getBoundingClientRect().width;
-      return w && Number.isFinite(w) && w > 0 ? Math.round(w) : measuredNameWidth;
+      return measuredNameWidth;
     }
     return colWidths[col];
   }

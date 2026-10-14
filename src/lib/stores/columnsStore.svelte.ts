@@ -28,11 +28,30 @@ export interface PersistedColumnPayload {
   widths?: unknown;
 }
 
-export function loadStoredColumnData(storage: Storage | undefined = globalThis.localStorage): {
+function getStorage(storage?: Storage): Storage | undefined {
+  if (storage !== undefined) return storage;
+  try {
+    return typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function loadStoredColumnData(storage?: Storage): {
   config: ColumnConfig;
   widths: FileListColumnWidths;
 } {
-  const raw = storage?.getItem(KEY);
+  let raw: string | null = null;
+  try {
+    const s = getStorage(storage);
+    raw = s?.getItem(KEY) ?? null;
+  } catch {
+    return {
+      config: [...DEFAULT_COLUMN_CONFIG],
+      widths: { ...DEFAULT_FILE_LIST_COLUMN_WIDTHS },
+    };
+  }
+
   if (raw === null || raw === undefined) {
     return {
       config: [...DEFAULT_COLUMN_CONFIG],
@@ -72,39 +91,34 @@ export function loadStoredColumnData(storage: Storage | undefined = globalThis.l
   };
 }
 
-export function loadColumnConfig(
-  storage: Storage | undefined = globalThis.localStorage,
-): ColumnConfig {
+export function loadColumnConfig(storage?: Storage): ColumnConfig {
   return loadStoredColumnData(storage).config;
 }
 
-export function loadColumnWidths(
-  storage: Storage | undefined = globalThis.localStorage,
-): FileListColumnWidths {
+export function loadColumnWidths(storage?: Storage): FileListColumnWidths {
   return loadStoredColumnData(storage).widths;
 }
 
 export function persistCustomColumns(
   config: ColumnConfig,
   widths: FileListColumnWidths,
-  storage: Storage | undefined = globalThis.localStorage,
+  storage?: Storage,
 ): void {
   try {
+    const s = getStorage(storage);
+    if (!s) return;
     if (isDefaultFileListColumnWidths(widths)) {
       // If widths are all default, write flat ColumnConfig array for 100% backward compatibility
-      storage?.setItem(KEY, JSON.stringify(config));
+      s.setItem(KEY, JSON.stringify(config));
     } else {
-      storage?.setItem(KEY, JSON.stringify({ columns: config, widths }));
+      s.setItem(KEY, JSON.stringify({ columns: config, widths }));
     }
   } catch {
     /* storage full/unavailable — saving is best-effort */
   }
 }
 
-export function persistColumnConfig(
-  config: ColumnConfig,
-  storage: Storage | undefined = globalThis.localStorage,
-): void {
+export function persistColumnConfig(config: ColumnConfig, storage?: Storage): void {
   const widths = columns ? columns.widths : { ...DEFAULT_FILE_LIST_COLUMN_WIDTHS };
   persistCustomColumns(config, widths, storage);
 }
@@ -182,7 +196,7 @@ class ColumnsStore {
   resetAll(): void {
     this.open = false;
     try {
-      globalThis.localStorage?.removeItem(KEY);
+      getStorage()?.removeItem(KEY);
     } catch {
       /* best-effort */
     }

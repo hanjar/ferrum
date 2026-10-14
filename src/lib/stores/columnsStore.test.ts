@@ -3,6 +3,7 @@ import {
   columns,
   loadColumnConfig,
   loadColumnWidths,
+  loadStoredColumnData,
   persistColumnConfig,
   persistCustomColumns,
 } from './columnsStore.svelte';
@@ -187,5 +188,23 @@ describe('custom columns store (FER-365, FER-541)', () => {
         length: 0,
       } as Storage),
     ).not.toThrow();
+
+    const throwingStorage = {
+      getItem: () => {
+        throw new Error('SecurityError: Access denied');
+      },
+      setItem: () => {
+        throw new Error('SecurityError: Access denied');
+      },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as Storage;
+
+    expect(() => loadStoredColumnData(throwingStorage)).not.toThrow();
+    const loaded = loadStoredColumnData(throwingStorage);
+    expect(loaded.config).toEqual(DEFAULT_COLUMN_CONFIG);
+    expect(loaded.widths).toEqual(DEFAULT_FILE_LIST_COLUMN_WIDTHS);
   });
 });

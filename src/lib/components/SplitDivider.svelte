@@ -96,6 +96,7 @@
 <div
   bind:this={el}
   class="divider"
+  data-testid="pane-divider"
   class:rows={orientation === 'rows'}
   class:dragging
   role="separator"

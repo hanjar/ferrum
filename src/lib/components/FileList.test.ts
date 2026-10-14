@@ -736,4 +736,60 @@ describe('FileList column resize (FER-541)', () => {
     });
     expect(thumbContainer.querySelectorAll('[role="separator"]').length).toBe(0);
   });
+
+  it('reactive auto-width: resize observer changes comment aria-valuenow and first drag does not jump', async () => {
+    let observerCallback: ResizeObserverCallback | undefined;
+    class TestResizeObserver implements ResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        observerCallback = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = TestResizeObserver;
+
+    try {
+      const { container } = render(FileList, {
+        rows: twoRows,
+        viewportOverride: 520,
+        showComments: true,
+      });
+
+      const commentDiv = container.querySelector('.hComment') as HTMLElement;
+      const handle = commentDiv.querySelector('[role="separator"]') as HTMLElement;
+      expect(handle).toBeTruthy();
+      expect(handle.getAttribute('aria-valuenow')).toBe('200');
+
+      // Simulate container resize:
+      observerCallback?.(
+        [
+          {
+            contentRect: { width: 280, height: 26 },
+            borderBoxSize: [{ inlineSize: 280, blockSize: 26 }],
+          } as unknown as ResizeObserverEntry,
+        ],
+        {} as ResizeObserver,
+      );
+      await tick();
+
+      expect(handle.getAttribute('aria-valuenow')).toBe('280');
+
+      handle.setPointerCapture = vi.fn();
+      handle.hasPointerCapture = vi.fn(() => true);
+      handle.releasePointerCapture = vi.fn();
+
+      // First drag: side="left", drag from x=300 to x=260 (delta = -40, so width increases by 40 from 280 -> 320)
+      fireEvent.pointerDown(handle, { button: 0, clientX: 300, pointerId: 1 });
+      fireEvent.pointerMove(handle, { clientX: 260, pointerId: 1 });
+      fireEvent.pointerUp(handle, { clientX: 260, pointerId: 1 });
+      await tick();
+
+      expect(handle.getAttribute('aria-valuenow')).toBe('320');
+      expect(columnsStore.widths.comment).toBe(320);
+    } finally {
+      globalThis.ResizeObserver = origRO;
+    }
+  });
 });

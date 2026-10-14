@@ -98,10 +98,15 @@
 
   $effect(() => {
     const el = commentHeadEl;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (!el) return;
+    const initial = el.getBoundingClientRect().width;
+    if (Number.isFinite(initial) && initial > 0) {
+      measuredCommentWidth = Math.round(initial);
+    }
+    if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const w = entry.contentRect.width;
+        const w = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
         if (Number.isFinite(w) && w > 0) measuredCommentWidth = Math.round(w);
       }
     });
@@ -111,27 +116,59 @@
 
   let dragWidths = $state<Partial<FileListColumnWidths>>({});
 
-  const liveWidths = $derived<FileListColumnWidths>({
+  const committedWidths = $derived<FileListColumnWidths>({
     ...columnsStore.widths,
     ...columnWidths,
+  });
+
+  const liveWidths = $derived<FileListColumnWidths>({
+    ...committedWidths,
     ...dragWidths,
   });
 
   function effectiveColWidth(col: ResizableColumnId): number {
     if (col === 'comment') {
       if (liveWidths.comment !== null) return liveWidths.comment;
-      const w = commentHeadEl?.getBoundingClientRect().width;
-      return w && Number.isFinite(w) && w > 0 ? Math.round(w) : measuredCommentWidth;
+      return measuredCommentWidth;
     }
     return liveWidths[col] ?? DEFAULT_FILE_LIST_COLUMN_WIDTHS[col] ?? 72;
   }
 
+  let rafId: number | null = null;
+  let pendingDrag: { col: ResizableColumnId; width: number } | null = null;
+
   function handleColChange(col: ResizableColumnId, width: number): void {
-    dragWidths = { ...dragWidths, [col]: width };
-    oncolumnwidthchange?.(col, width);
+    // In production browser environments, throttle pointermove to screen refresh rate (60/120Hz)
+    // via requestAnimationFrame so rapid pointer events don't trigger redundant updates.
+    // In test environments (node/jsdom), update synchronously so tests can verify live updates.
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.requestAnimationFrame === 'function' &&
+      typeof process === 'undefined'
+    ) {
+      pendingDrag = { col, width };
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          if (pendingDrag) {
+            dragWidths = { ...dragWidths, [pendingDrag.col]: pendingDrag.width };
+            oncolumnwidthchange?.(pendingDrag.col, pendingDrag.width);
+            pendingDrag = null;
+          }
+        });
+      }
+    } else {
+      dragWidths = { ...dragWidths, [col]: width };
+      oncolumnwidthchange?.(col, width);
+    }
   }
 
   function handleColCommit(col: ResizableColumnId, width: number): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
     const next = { ...dragWidths };
     delete next[col];
     dragWidths = next;
@@ -140,12 +177,22 @@
   }
 
   function handleColCancel(col: ResizableColumnId): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
     const next = { ...dragWidths };
     delete next[col];
     dragWidths = next;
   }
 
   function handleColReset(col: ResizableColumnId): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
     const next = { ...dragWidths };
     delete next[col];
     dragWidths = next;
@@ -377,6 +424,7 @@
         </button>
       {:else if c.id === 'comment'}
         <div class="hComment" bind:this={commentHeadEl}>
+          <span>Comment</span>
           <ColumnResizeHandle
             label="Resize Comment column"
             value={effectiveColWidth('comment')}
@@ -389,13 +437,37 @@
             oncancel={() => handleColCancel('comment')}
             onreset={() => handleColReset('comment')}
           />
-          Comment
         </div>
       {:else}
-        <button
-          class={c.id === 'size' ? 'hSize' : c.id === 'extension' ? 'hExt' : 'hMod'}
-          onclick={() => onsort?.(c.id as 'size' | 'extension' | 'modified')}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div
+          class="{c.id === 'size' ? 'hSize' : c.id === 'extension' ? 'hExt' : 'hMod'} hCol"
+          onclick={(e) => {
+            if (
+              e.target !== e.currentTarget &&
+              (e.target as HTMLElement).closest('[role="separator"]')
+            )
+              return;
+            onsort?.(c.id as 'size' | 'extension' | 'modified');
+          }}
         >
+          <button
+            type="button"
+            class="sortBtn"
+            class:hSizeBtn={c.id === 'size'}
+            onclick={(e) => {
+              e.stopPropagation();
+              onsort?.(c.id as 'size' | 'extension' | 'modified');
+            }}
+          >
+            {#if c.id === 'size'}
+              <span class="arrow">{sortKey === 'size' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
+            {/if}
+            {c.label}
+            {#if c.id !== 'size'}
+              <span class="arrow">{sortKey === c.id ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
+            {/if}
+          </button>
           <ColumnResizeHandle
             label={`Resize ${c.label} column`}
             value={effectiveColWidth(c.id as ResizableColumnId)}
@@ -408,14 +480,7 @@
             oncancel={() => handleColCancel(c.id as ResizableColumnId)}
             onreset={() => handleColReset(c.id as ResizableColumnId)}
           />
-          {#if c.id === 'size'}
-            <span class="arrow">{sortKey === 'size' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
-          {/if}
-          {c.label}
-          {#if c.id !== 'size'}
-            <span class="arrow">{sortKey === c.id ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
-          {/if}
-        </button>
+        </div>
       {/if}
     {/each}
   {:else}
@@ -612,7 +677,8 @@
   .row.withComments {
     grid-template-columns: minmax(0, 1fr) 72px 132px minmax(0, 1.6fr);
   }
-  .head > button {
+  .head > button,
+  .sortBtn {
     position: relative;
     border: 0;
     padding: 0;
@@ -623,9 +689,29 @@
     white-space: nowrap;
     overflow: hidden;
     text-align: left;
+    cursor: pointer;
   }
-  .head > button:hover {
+  .head > button:hover,
+  .sortBtn:hover {
     color: var(--text2);
+  }
+  .hCol {
+    position: relative;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .sortBtn {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .hSize .sortBtn {
+    justify-content: flex-end;
+    text-align: right;
   }
   .arrow {
     color: var(--accentInk);

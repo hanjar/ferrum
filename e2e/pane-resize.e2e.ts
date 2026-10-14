@@ -102,7 +102,7 @@ test.describe('FER-406 dual-pane divider E2E (mock IPC)', () => {
   });
 
   const grid = () => page.locator('[data-pane-grid]');
-  const divider = () => page.locator('[role="separator"]');
+  const divider = () => page.locator('[data-testid="pane-divider"]');
   const pane0 = () => page.locator('[data-pane="0"]');
   const pane1 = () => page.locator('[data-pane="1"]');
 
