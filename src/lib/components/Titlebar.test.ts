@@ -54,4 +54,13 @@ describe('Titlebar window controls', () => {
     const { getByTitle } = await mount();
     expect(getByTitle('Restore')).toBeTruthy();
   });
+
+  it('displays concise build label with detailed tooltip', async () => {
+    const { container } = await mount();
+    const label = container.querySelector('.buildLabel') as HTMLElement;
+    expect(label).not.toBeNull();
+    expect(label.textContent?.trim()).toBe('0.2.0 · test000');
+    expect(label.getAttribute('title')).toContain('Ferrum 0.2.0');
+    expect(label.getAttribute('title')).toContain('Commit: test000');
+  });
 });
