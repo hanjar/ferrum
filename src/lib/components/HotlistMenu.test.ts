@@ -30,7 +30,7 @@ const TREE: HotItem[] = [
   { type: 'command', title: 'kando', command: 'C:\\a b\\kando.exe', args: ['--x'] },
 ];
 
-let openPath: ReturnType<typeof vi.fn>;
+let openPath: ReturnType<typeof vi.fn<(path: string) => void>>;
 let current = 'C:\\somewhere';
 
 function pane(): PaneApi {
