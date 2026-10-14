@@ -221,4 +221,53 @@ test.describe('nested hotlist (FER-458)', () => {
     expect(saved.doc.items.some((i) => i.title === '&Imported')).toBe(true);
     expect(saved.doc.items.length).toBe(7);
   });
+
+  test('Configure: dragging a folder onto an empty submenu moves it inside; OK saves', async ({
+    page,
+  }) => {
+    await page.keyboard.press('Control+d');
+    await page.getByRole('menuitem', { name: 'Configure…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Configure Directory Hotlist' });
+    await expect(dialog).toBeVisible();
+    const from = await dialog.getByRole('treeitem', { name: /Downloads/ }).boundingBox();
+    const to = await dialog.getByRole('treeitem', { name: /Dummy/ }).boundingBox();
+    expect(from && to).toBeTruthy();
+    await page.mouse.move(from!.x + 30, from!.y + from!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from!.x + 32, from!.y + from!.height / 2 + 8, { steps: 3 });
+    await page.mouse.move(to!.x + 30, to!.y + to!.height / 2, { steps: 5 });
+    await page.mouse.up();
+    // Dummy is now a level above Downloads.
+    await expect(dialog.getByRole('treeitem', { name: /Downloads/ })).toHaveAttribute(
+      'aria-level',
+      '2',
+    );
+    await dialog.getByRole('button', { name: 'OK' }).click();
+    await expect(dialog).toBeHidden();
+    const saved = (await calls(page, 'hotlist_save')).at(-1)!.args as {
+      doc: { items: { title: string; items?: { title: string }[] }[] };
+    };
+    const dummy = saved.doc.items.find((i) => i.title === 'Dummy');
+    expect(dummy?.items?.map((i) => i.title)).toEqual(['&Downloads']);
+    expect(saved.doc.items.some((i) => i.title === '&Downloads')).toBe(false);
+  });
+
+  test('Configure: clicking the submenu arrow folds and unfolds it (real pointer capture)', async ({
+    page,
+  }) => {
+    await page.keyboard.press('Control+d');
+    await page.getByRole('menuitem', { name: 'Configure…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Configure Directory Hotlist' });
+    await expect(dialog).toBeVisible();
+    const bob = dialog.getByRole('treeitem', { name: /Bob/ });
+    const personal = dialog.getByRole('treeitem', { name: /^&6. personal$/ });
+    await expect(bob).toBeVisible();
+    await expect(personal).toHaveAttribute('aria-expanded', 'true');
+    await personal.locator('.glyph').click();
+    await expect(bob).toBeHidden();
+    await expect(personal).toHaveAttribute('aria-expanded', 'false');
+    await personal.locator('.glyph').click();
+    await expect(bob).toBeVisible();
+    await expect(personal).toHaveAttribute('aria-expanded', 'true');
+  });
 });
