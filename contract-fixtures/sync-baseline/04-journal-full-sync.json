@@ -1,0 +1,89 @@
+{
+  "name": "Journal marks preserved after full sync verified by content",
+  "previous": null,
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "sub",
+        "state": "same",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "sub/doc.txt",
+        "state": "same",
+        "leftSize": 50,
+        "leftModifiedMs": 1000,
+        "rightSize": 50,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true,
+    "journal": {
+      "left": {
+        "journalId": "1001",
+        "usn": "2001",
+        "rootFrn": "1",
+        "path": "C:/Left"
+      },
+      "right": {
+        "journalId": "1002",
+        "usn": "2002",
+        "rootFrn": "2",
+        "path": "D:/Right"
+      },
+      "takenAtMs": 1700000000000
+    }
+  },
+  "plan": [
+    {
+      "name": "sub",
+      "state": "same",
+      "action": "skip",
+      "isDir": true
+    },
+    {
+      "name": "sub/doc.txt",
+      "state": "same",
+      "action": "skip"
+    }
+  ],
+  "outcomes": {},
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "sub": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      },
+      "sub/doc.txt": {
+        "left": { "size": 50, "modifiedMs": 1000 },
+        "right": { "size": 50, "modifiedMs": 1000 }
+      }
+    },
+    "journal": {
+      "left": {
+        "journalId": "1001",
+        "usn": "2001",
+        "rootFrn": "1",
+        "path": "C:/Left"
+      },
+      "right": {
+        "journalId": "1002",
+        "usn": "2002",
+        "rootFrn": "2",
+        "path": "D:/Right"
+      },
+      "takenAtMs": 1700000000000
+    }
+  },
+  "provesFullSync": true
+}

@@ -1021,6 +1021,22 @@ pub(crate) fn side_info(path: &Path) -> std::io::Result<SideInfo> {
     })
 }
 
+/// Filter hook applied in the compare walker before an entry is recorded or descended (SP-4.3, design §5.3).
+pub trait EntryFilter: Send + Sync {
+    /// True if the entry should be visible in the comparison.
+    fn visible(&self, rel: &str, is_dir: bool) -> bool;
+}
+
+/// No-op filter that keeps all entries visible.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoFilter;
+
+impl EntryFilter for NoFilter {
+    fn visible(&self, _rel: &str, _is_dir: bool) -> bool {
+        true
+    }
+}
+
 /// Options for [`compare_dirs_with`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DirOpts {
@@ -1106,6 +1122,7 @@ struct Walker<'a> {
     opts: DirOpts,
     cap: usize,
     ctl: &'a Ctl,
+    filter: &'a dyn EntryFilter,
     /// FER-472: listings come from here (look-ahead on worker threads).
     pf: &'a Prefetch<'a>,
     /// Ask the look-ahead for the folders the walk will enter next.
@@ -1208,12 +1225,16 @@ impl Walker<'_> {
 
         if self.prefetch && self.opts.recursive && depth + 1 < MAX_DEPTH {
             for name in &names {
+                let full = rel_name(rel, name);
+                if !self.filter.visible(&full, true) {
+                    continue;
+                }
                 let both_dirs = matches!(
                     (left.infos.get(*name), right.infos.get(*name)),
                     (Some(l), Some(r)) if l.is_dir && r.is_dir
                 );
                 if both_dirs && !left.broken.contains(*name) && !right.broken.contains(*name) {
-                    self.pf.request(&rel_name(rel, name));
+                    self.pf.request(&full);
                 }
             }
         }
@@ -1231,6 +1252,20 @@ impl Walker<'_> {
                 continue; // already in errors; state unknown
             }
             let full = rel_name(rel, name);
+            let mut l = left
+                .infos
+                .get(name)
+                .copied()
+                .filter(|li| self.filter.visible(&full, li.is_dir));
+            let mut r = right
+                .infos
+                .get(name)
+                .copied()
+                .filter(|ri| self.filter.visible(&full, ri.is_dir));
+            if l.is_none() && r.is_none() {
+                continue;
+            }
+
             self.ctl.report(
                 ProgressPhase::Scan,
                 self.entries.len() as u64,
@@ -1238,8 +1273,6 @@ impl Walker<'_> {
                 &full,
                 false,
             );
-            let mut l = left.infos.get(name).copied();
-            let mut r = right.infos.get(name).copied();
             let Some(mut class) = classify(l.as_ref(), r.as_ref(), &self.opts) else {
                 continue;
             };
@@ -1318,7 +1351,12 @@ pub fn compare_dirs(
     by_content: bool,
     max_entries: usize,
 ) -> Result<CompareDirsReport, FsError> {
-    compare_dirs_with(
+    let cap = if max_entries == 0 {
+        DIR_ENTRY_CAP
+    } else {
+        max_entries
+    };
+    compare_dirs_filtered(
         left_root,
         right_root,
         DirOpts {
@@ -1326,7 +1364,8 @@ pub fn compare_dirs(
             recursive: false,
             max_entries,
         },
-        &Ctl::none(),
+        &NoFilter,
+        cap,
     )
 }
 
@@ -1353,10 +1392,12 @@ pub fn compare_dirs_with(
     opts: DirOpts,
     ctl: &Ctl,
 ) -> Result<CompareDirsReport, FsError> {
-    validate_dir_roots(left_root, right_root)?;
-    let left = DiskSource::new(left_root);
-    let right = DiskSource::new(right_root);
-    compare_dirs_with_sources(left_root, right_root, opts, ctl, &left, &right)
+    let cap = if opts.max_entries == 0 {
+        DIR_ENTRY_CAP
+    } else {
+        opts.max_entries
+    };
+    compare_dirs_filtered_with(left_root, right_root, opts, &NoFilter, ctl, cap)
 }
 
 /// Roots must be plain valid paths of existing folders. Cheap and
@@ -1366,6 +1407,32 @@ pub fn validate_dir_roots(left_root: &str, right_root: &str) -> Result<(), FsErr
     validate_path(right_root)?;
     check_root(left_root)?;
     check_root(right_root)
+}
+
+/// Compare directories with a filter and cap (SP-4.3, design §5.3).
+pub fn compare_dirs_filtered(
+    left_root: &str,
+    right_root: &str,
+    opts: DirOpts,
+    filter: &dyn EntryFilter,
+    cap: usize,
+) -> Result<CompareDirsReport, FsError> {
+    compare_dirs_filtered_with(left_root, right_root, opts, filter, &Ctl::none(), cap)
+}
+
+/// Directory compare with filter, ctl, and explicit cap.
+pub fn compare_dirs_filtered_with(
+    left_root: &str,
+    right_root: &str,
+    opts: DirOpts,
+    filter: &dyn EntryFilter,
+    ctl: &Ctl,
+    cap: usize,
+) -> Result<CompareDirsReport, FsError> {
+    validate_dir_roots(left_root, right_root)?;
+    let left = DiskSource::new(left_root);
+    let right = DiskSource::new(right_root);
+    compare_dirs_filtered_with_sources(left_root, right_root, opts, filter, ctl, cap, &left, &right)
 }
 
 /// [`compare_dirs_with`] with explicit listing sources (FER-472). The report
@@ -1378,6 +1445,28 @@ pub fn compare_dirs_with_sources(
     left_src: &dyn TreeSource,
     right_src: &dyn TreeSource,
 ) -> Result<CompareDirsReport, FsError> {
+    let cap = if opts.max_entries == 0 {
+        DIR_ENTRY_CAP
+    } else {
+        opts.max_entries
+    };
+    compare_dirs_filtered_with_sources(
+        left_root, right_root, opts, &NoFilter, ctl, cap, left_src, right_src,
+    )
+}
+
+/// Directory compare with explicit sources, filter, ctl, and explicit cap.
+#[allow(clippy::too_many_arguments)]
+pub fn compare_dirs_filtered_with_sources(
+    left_root: &str,
+    right_root: &str,
+    opts: DirOpts,
+    filter: &dyn EntryFilter,
+    ctl: &Ctl,
+    cap: usize,
+    left_src: &dyn TreeSource,
+    right_src: &dyn TreeSource,
+) -> Result<CompareDirsReport, FsError> {
     validate_dir_roots(left_root, right_root)?;
     let pf = Prefetch::new(left_src, right_src, ctl.cancel_flag());
     let workers = pf.wanted_workers();
@@ -1385,12 +1474,17 @@ pub fn compare_dirs_with_sources(
         left_root: Path::new(left_root),
         right_root: Path::new(right_root),
         opts,
-        cap: if opts.max_entries == 0 {
-            DIR_ENTRY_CAP
+        cap: if cap == 0 {
+            if opts.max_entries == 0 {
+                DIR_ENTRY_CAP
+            } else {
+                opts.max_entries
+            }
         } else {
-            opts.max_entries
+            cap
         },
         ctl,
+        filter,
         pf: &pf,
         prefetch: workers > 0,
         verify: [left_src.needs_verify(), right_src.needs_verify()],
@@ -2939,5 +3033,202 @@ mod tests {
         assert_eq!(state_of(&rep, "a.txt"), DirDiffState::ContentDifferent);
         let _ = fs::remove_dir_all(&l);
         let _ = fs::remove_dir_all(&r);
+    }
+
+    // ── P0.1: Profile filters and entry cap tests ──────────────────────────
+    use crate::tree_source::ScanTier;
+    use std::io;
+
+    struct CountingSource {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingSource {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TreeSource for CountingSource {
+        fn list(&self, rel: &str) -> io::Result<DirListing> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut listing = DirListing::default();
+            if rel.is_empty() {
+                listing.infos.insert(
+                    "node_modules".into(),
+                    SideInfo {
+                        is_dir: true,
+                        is_symlink: false,
+                        size: 0,
+                        modified_ms: 1000,
+                    },
+                );
+                listing.infos.insert(
+                    "src".into(),
+                    SideInfo {
+                        is_dir: true,
+                        is_symlink: false,
+                        size: 0,
+                        modified_ms: 1000,
+                    },
+                );
+                listing.infos.insert(
+                    "temp.log".into(),
+                    SideInfo {
+                        is_dir: false,
+                        is_symlink: false,
+                        size: 100,
+                        modified_ms: 1000,
+                    },
+                );
+            } else if rel == "node_modules" {
+                listing.infos.insert(
+                    "package.json".into(),
+                    SideInfo {
+                        is_dir: false,
+                        is_symlink: false,
+                        size: 50,
+                        modified_ms: 1000,
+                    },
+                );
+            } else if rel == "src" {
+                listing.infos.insert(
+                    "main.rs".into(),
+                    SideInfo {
+                        is_dir: false,
+                        is_symlink: false,
+                        size: 200,
+                        modified_ms: 1000,
+                    },
+                );
+            }
+            Ok(listing)
+        }
+
+        fn tier(&self) -> ScanTier {
+            ScanTier::Walk
+        }
+    }
+
+    #[test]
+    fn test_compare_dirs_filtered_and_walker_count() {
+        let left_src = CountingSource::new();
+        let right_src = CountingSource::new();
+        let tmp_l = temp_root("filt-l");
+        let tmp_r = temp_root("filt-r");
+
+        let filter = crate::sync_engine::filters::ProfileFilter::new(
+            &[],
+            &[r"node_modules\".into(), "*.log".into()],
+        );
+
+        let rep = compare_dirs_filtered_with_sources(
+            s(&tmp_l),
+            s(&tmp_r),
+            rec(false),
+            &filter,
+            &Ctl::none(),
+            0,
+            &left_src,
+            &right_src,
+        )
+        .unwrap();
+
+        // 1. Excluded folder node_modules was NOT descended
+        // Root was listed (rel = ""), src was listed (rel = "src"), but node_modules was never listed!
+        assert_eq!(left_src.call_count(), 2);
+        assert_eq!(right_src.call_count(), 2);
+
+        // 2. Excluded files/folders are not in entries
+        assert!(rep.entries.iter().all(|e| !e.name.contains("node_modules")));
+        assert!(rep.entries.iter().all(|e| !e.name.ends_with(".log")));
+        assert!(rep.entries.iter().any(|e| e.name == "src/main.rs"));
+
+        // 3. Mirror mode with an excluded target file never plans a delete
+        let mirror_opts = crate::sync_engine::plan::SyncOptions {
+            direction: crate::sync_engine::plan::SyncDirection::LeftToRight,
+            delete_extras: true,
+            propagate_deletes: false,
+        };
+        let plan = crate::sync_engine::plan::build_sync_plan(&rep, &mirror_opts, None);
+        assert!(
+            plan.iter()
+                .all(|item| item.action != crate::sync_engine::plan::SyncAction::DeleteRight)
+        );
+
+        let _ = fs::remove_dir_all(&tmp_l);
+        let _ = fs::remove_dir_all(&tmp_r);
+    }
+
+    struct SyntheticCapSource {
+        total: usize,
+    }
+
+    impl TreeSource for SyntheticCapSource {
+        fn list(&self, rel: &str) -> io::Result<DirListing> {
+            let mut listing = DirListing::default();
+            if rel.is_empty() {
+                for i in 0..self.total {
+                    listing.infos.insert(
+                        format!("item_{i}.txt"),
+                        SideInfo {
+                            is_dir: false,
+                            is_symlink: false,
+                            size: 10,
+                            modified_ms: 1000,
+                        },
+                    );
+                }
+            }
+            Ok(listing)
+        }
+
+        fn tier(&self) -> ScanTier {
+            ScanTier::Walk
+        }
+    }
+
+    #[test]
+    fn test_cap_200_001_synthetic_entries_blocker() {
+        let tmp_l = temp_root("cap-l");
+        let tmp_r = temp_root("cap-r");
+
+        let left_src = SyntheticCapSource { total: 200_001 };
+        let right_src = SyntheticCapSource { total: 0 };
+
+        let rep = compare_dirs_filtered_with_sources(
+            s(&tmp_l),
+            s(&tmp_r),
+            rec(false),
+            &NoFilter,
+            &Ctl::none(),
+            crate::sync_engine::plan::PROFILE_ENTRY_CAP,
+            &left_src,
+            &right_src,
+        )
+        .unwrap();
+
+        assert!(
+            rep.truncated,
+            "report must be truncated when entries exceed cap"
+        );
+        assert_eq!(
+            rep.entries.len(),
+            crate::sync_engine::plan::PROFILE_ENTRY_CAP
+        );
+
+        let blockers = crate::sync_engine::plan::sync_plan_blockers(&rep);
+        assert_eq!(blockers, vec!["truncated"]);
+
+        let desc = crate::sync_engine::plan::describe_profile_blockers(&rep);
+        assert_eq!(desc, crate::sync_engine::plan::PROFILE_CAP_BLOCKER_TEXT);
+
+        let _ = fs::remove_dir_all(&tmp_l);
+        let _ = fs::remove_dir_all(&tmp_r);
     }
 }

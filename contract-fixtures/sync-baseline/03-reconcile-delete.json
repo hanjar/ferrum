@@ -1,0 +1,61 @@
+{
+  "name": "Reconcile baseline removes verified deleted items",
+  "previous": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "gone.txt": {
+        "left": { "size": 20, "modifiedMs": 2000 },
+        "right": { "size": 20, "modifiedMs": 2000 }
+      },
+      "keep.txt": {
+        "left": { "size": 10, "modifiedMs": 1000 },
+        "right": { "size": 10, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "keep.txt",
+        "state": "same",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 10,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "plan": [
+    {
+      "name": "gone.txt",
+      "state": "rightOnly",
+      "action": "deleteRight"
+    },
+    {
+      "name": "keep.txt",
+      "state": "same",
+      "action": "skip"
+    }
+  ],
+  "outcomes": {
+    "gone.txt": "ok"
+  },
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "keep.txt": {
+        "left": { "size": 10, "modifiedMs": 1000 },
+        "right": { "size": 10, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "provesFullSync": true
+}

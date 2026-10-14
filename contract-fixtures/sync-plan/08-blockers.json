@@ -1,0 +1,53 @@
+{
+  "name": "Sync plan blockers (truncated, cancelled, errors)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "partial.txt",
+        "state": "same",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": true,
+    "cancelled": true,
+    "errors": [
+      { "name": "e1.txt", "message": "denied" },
+      { "name": "e2.txt", "message": "io error" },
+      { "name": "e3.txt", "message": "locked" },
+      { "name": "e4.txt", "message": "vanished" }
+    ],
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "partial.txt",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\partial.txt",
+        "rightPath": "D:\\Right\\partial.txt"
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 0,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": ["truncated", "cancelled", "errors"],
+    "blockersDescription": "Synchronization blocked: the comparison was truncated (too many entries), so the plan would be incomplete; the comparison was cancelled, so the result is partial; 4 entries could not be read (e1.txt: denied; e2.txt: io error; e3.txt: locked; …)."
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "name": "Folder entries in sync plan (same, leftOnly, rightOnly mirror delete, typeMismatch)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "shared-dir",
+        "state": "same",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "new-dir",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "extra-dir",
+        "state": "rightOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "mismatched-dir",
+        "state": "newerLeft",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 2000,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "leftToRight",
+    "deleteExtras": true
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "shared-dir",
+        "state": "same",
+        "action": "skip",
+        "isDir": true,
+        "leftPath": "C:\\Left\\shared-dir",
+        "rightPath": "D:\\Right\\shared-dir"
+      },
+      {
+        "name": "new-dir",
+        "state": "leftOnly",
+        "action": "copyToRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\new-dir",
+        "rightPath": "D:\\Right\\new-dir"
+      },
+      {
+        "name": "extra-dir",
+        "state": "rightOnly",
+        "action": "deleteRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\extra-dir",
+        "rightPath": "D:\\Right\\extra-dir"
+      },
+      {
+        "name": "mismatched-dir",
+        "state": "newerLeft",
+        "action": "conflict",
+        "reason": "typeMismatch",
+        "isDir": true,
+        "leftPath": "C:\\Left\\mismatched-dir",
+        "rightPath": "D:\\Right\\mismatched-dir"
+      }
+    ],
+    "summary": {
+      "total": 4,
+      "toRight": 1,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 1,
+      "conflicts": 1,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}
