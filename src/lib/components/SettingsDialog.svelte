@@ -18,7 +18,12 @@
     COPY_THREAD_CHOICES,
     supportsPermissionPreservation,
   } from '../ipc/prefs';
-  import { TERMINAL_CHOICES, type TerminalChoice } from '../ipc/shellOpen';
+  import {
+    TERMINAL_CHOICES,
+    handleShellError,
+    openThirdPartyNotices,
+    type TerminalChoice,
+  } from '../ipc/shellOpen';
   import { prefs } from '../stores/prefsStore.svelte';
   import { copyText } from '../clipboard';
   import { APP_NAME, BUILD_LABEL, BUILD_DETAIL } from '../version';
@@ -153,6 +158,14 @@
     if (isInTauri()) void activity.refresh().catch(() => undefined);
   });
 
+  async function handleOpenNotices() {
+    try {
+      await openThirdPartyNotices();
+    } catch (e) {
+      handleShellError('Third-party notices', e);
+    }
+  }
+
   let copyBuildStatus = $state('');
   let copyBuildTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -268,6 +281,14 @@
       </div>
       <button type="button" class="copyBuildBtn" title={BUILD_DETAIL} onclick={handleCopyBuildInfo}>
         {copyBuildStatus || 'Salin info build'}
+      </button>
+      <button
+        type="button"
+        class="copyBuildBtn"
+        title="Open the license notices of the third-party software included in Ferrum"
+        onclick={handleOpenNotices}
+      >
+        Third-party notices
       </button>
     </div>
   </aside>

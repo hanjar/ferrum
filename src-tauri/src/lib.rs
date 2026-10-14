@@ -196,6 +196,7 @@ pub fn run() {
             ipc::activity_chat_locate,
             ipc::shell_open,
             ipc::open_external,
+            ipc::open_third_party_notices,
             ipc::open_terminal,
             ipc::associate_with,
             ipc::print_file,

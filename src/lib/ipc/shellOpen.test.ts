@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const invokeMock = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invokeMock(...a) }));
 
-const { openExternal, associateWith, openTerminal, printFile } = await import('./shellOpen');
+const { openExternal, associateWith, openTerminal, printFile, openThirdPartyNotices } =
+  await import('./shellOpen');
 const { FsError } = await import('./types');
 
 function fakeTauri() {
@@ -16,6 +17,20 @@ function unTauri() {
 beforeEach(() => {
   invokeMock.mockReset().mockName('invoke');
   unTauri();
+});
+
+describe('third-party notices (FER-554)', () => {
+  it('invokes the backend command without any path argument', async () => {
+    fakeTauri();
+    invokeMock.mockResolvedValue(undefined);
+    await openThirdPartyNotices();
+    expect(invokeMock).toHaveBeenCalledWith('open_third_party_notices', {});
+  });
+
+  it('rejects unsupported outside Tauri', async () => {
+    await expect(openThirdPartyNotices()).rejects.toMatchObject({ code: 'unsupported' });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('shell open backend wrapper (F2-25)', () => {

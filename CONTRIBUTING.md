@@ -81,6 +81,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+## Third-Party Notices
+
+`THIRD-PARTY-NOTICES.txt` is generated and shipped with the installer. If you add or update a dependency (`package-lock.json` or `src-tauri/Cargo.lock` changes), regenerate it and commit the result:
+
+```powershell
+npm ci
+node scripts/generate-third-party-notices.mjs
+```
+
+CI runs `node scripts/generate-third-party-notices.mjs --check` and fails when the file is stale. The generator also fails for a dependency without a license file or with a license outside its allowlist (`scripts/lib/third-party-notices.mjs`); do not add GPL, AGPL, LGPL, SSPL, BUSL, or unlicensed code without discussing it first.
+
 ## Commit Guidelines
 
 - Use clear and descriptive commit messages following the Conventional Commits style where appropriate:
