@@ -1,0 +1,92 @@
+{
+  "name": "Mirror sync actions rightToLeft (deleteLeft, copyToLeft, updateLeft, skip)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "left-extra.txt",
+        "state": "leftOnly",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "right-new.txt",
+        "state": "rightOnly",
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 200,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "right-newer.txt",
+        "state": "newerRight",
+        "leftSize": 300,
+        "leftModifiedMs": 1000,
+        "rightSize": 300,
+        "rightModifiedMs": 2000
+      },
+      {
+        "name": "left-newer.txt",
+        "state": "newerLeft",
+        "leftSize": 400,
+        "leftModifiedMs": 2000,
+        "rightSize": 400,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "rightToLeft",
+    "deleteExtras": true
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "left-extra.txt",
+        "state": "leftOnly",
+        "action": "deleteLeft",
+        "leftPath": "C:\\Left\\left-extra.txt",
+        "rightPath": "D:\\Right\\left-extra.txt"
+      },
+      {
+        "name": "right-new.txt",
+        "state": "rightOnly",
+        "action": "copyToLeft",
+        "leftPath": "C:\\Left\\right-new.txt",
+        "rightPath": "D:\\Right\\right-new.txt"
+      },
+      {
+        "name": "right-newer.txt",
+        "state": "newerRight",
+        "action": "updateLeft",
+        "leftPath": "C:\\Left\\right-newer.txt",
+        "rightPath": "D:\\Right\\right-newer.txt"
+      },
+      {
+        "name": "left-newer.txt",
+        "state": "newerLeft",
+        "action": "skip",
+        "leftPath": "C:\\Left\\left-newer.txt",
+        "rightPath": "D:\\Right\\left-newer.txt"
+      }
+    ],
+    "summary": {
+      "total": 4,
+      "toRight": 0,
+      "toLeft": 2,
+      "overwrites": 1,
+      "deletes": 1,
+      "conflicts": 0,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

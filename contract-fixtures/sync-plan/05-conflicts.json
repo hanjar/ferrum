@@ -1,0 +1,183 @@
+{
+  "name": "Sync conflict reasons (noBaseline, bothChanged, modifyDelete, deletedLeft, deletedRight, typeMismatch, caseCollision)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "no-base.txt",
+        "state": "sizeDifferent",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 20,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "both-changed.txt",
+        "state": "sizeDifferent",
+        "leftSize": 35,
+        "leftModifiedMs": 2000,
+        "rightSize": 45,
+        "rightModifiedMs": 2000
+      },
+      {
+        "name": "mod-del.txt",
+        "state": "leftOnly",
+        "leftSize": 55,
+        "leftModifiedMs": 2000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "del-left.txt",
+        "state": "rightOnly",
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 60,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "del-right.txt",
+        "state": "leftOnly",
+        "leftSize": 70,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "type-mismatch.txt",
+        "state": "sizeDifferent",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 80,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "case-dup.txt",
+        "state": "leftOnly",
+        "leftSize": 90,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "CASE-DUP.TXT",
+        "state": "rightOnly",
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 95,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "both-changed.txt": {
+        "left": { "size": 30, "modifiedMs": 1000 },
+        "right": { "size": 30, "modifiedMs": 1000 }
+      },
+      "mod-del.txt": {
+        "left": { "size": 50, "modifiedMs": 1000 },
+        "right": { "size": 50, "modifiedMs": 1000 }
+      },
+      "del-left.txt": {
+        "left": { "size": 60, "modifiedMs": 1000 },
+        "right": { "size": 60, "modifiedMs": 1000 }
+      },
+      "del-right.txt": {
+        "left": { "size": 70, "modifiedMs": 1000 },
+        "right": { "size": 70, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "no-base.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "noBaseline",
+        "leftPath": "C:\\Left\\no-base.txt",
+        "rightPath": "D:\\Right\\no-base.txt"
+      },
+      {
+        "name": "both-changed.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "bothChanged",
+        "leftPath": "C:\\Left\\both-changed.txt",
+        "rightPath": "D:\\Right\\both-changed.txt"
+      },
+      {
+        "name": "mod-del.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "modifyDelete",
+        "leftPath": "C:\\Left\\mod-del.txt",
+        "rightPath": "D:\\Right\\mod-del.txt"
+      },
+      {
+        "name": "del-left.txt",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "deletedLeft",
+        "leftPath": "C:\\Left\\del-left.txt",
+        "rightPath": "D:\\Right\\del-left.txt"
+      },
+      {
+        "name": "del-right.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "deletedRight",
+        "leftPath": "C:\\Left\\del-right.txt",
+        "rightPath": "D:\\Right\\del-right.txt"
+      },
+      {
+        "name": "type-mismatch.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "typeMismatch",
+        "isDir": true,
+        "leftPath": "C:\\Left\\type-mismatch.txt",
+        "rightPath": "D:\\Right\\type-mismatch.txt"
+      },
+      {
+        "name": "case-dup.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\case-dup.txt",
+        "rightPath": "D:\\Right\\case-dup.txt"
+      },
+      {
+        "name": "CASE-DUP.TXT",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\CASE-DUP.TXT",
+        "rightPath": "D:\\Right\\CASE-DUP.TXT"
+      }
+    ],
+    "summary": {
+      "total": 8,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 8,
+      "skipped": 0,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

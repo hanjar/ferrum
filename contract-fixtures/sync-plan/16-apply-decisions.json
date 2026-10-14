@@ -1,0 +1,233 @@
+{
+  "name": "Apply decisions parity on conflicts (resolvable vs unresolvable)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "both-chg.txt",
+        "state": "sizeDifferent",
+        "leftSize": 15,
+        "leftModifiedMs": 2000,
+        "rightSize": 25,
+        "rightModifiedMs": 2000
+      },
+      {
+        "name": "mod-del.txt",
+        "state": "leftOnly",
+        "leftSize": 15,
+        "leftModifiedMs": 2000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "skip-conf.txt",
+        "state": "sizeDifferent",
+        "leftSize": 20,
+        "leftModifiedMs": 1000,
+        "rightSize": 30,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "unres-type.txt",
+        "state": "newerLeft",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 2000,
+        "rightSize": 50,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "unres-case.txt",
+        "state": "leftOnly",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "UNRES-CASE.TXT",
+        "state": "rightOnly",
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 10,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "undecided.txt",
+        "state": "sizeDifferent",
+        "leftSize": 35,
+        "leftModifiedMs": 2000,
+        "rightSize": 45,
+        "rightModifiedMs": 2000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "both-chg.txt": {
+        "left": { "size": 10, "modifiedMs": 1000 },
+        "right": { "size": 10, "modifiedMs": 1000 }
+      },
+      "mod-del.txt": {
+        "left": { "size": 10, "modifiedMs": 1000 },
+        "right": { "size": 10, "modifiedMs": 1000 }
+      },
+      "undecided.txt": {
+        "left": { "size": 30, "modifiedMs": 1000 },
+        "right": { "size": 30, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "decisions": {
+    "both-chg.txt": "keepLeft",
+    "mod-del.txt": "keepRight",
+    "skip-conf.txt": "skip",
+    "unres-type.txt": "keepLeft",
+    "unres-case.txt": "keepRight",
+    "UNRES-CASE.TXT": "keepRight"
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "both-chg.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "bothChanged",
+        "leftPath": "C:\\Left\\both-chg.txt",
+        "rightPath": "D:\\Right\\both-chg.txt"
+      },
+      {
+        "name": "mod-del.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "modifyDelete",
+        "leftPath": "C:\\Left\\mod-del.txt",
+        "rightPath": "D:\\Right\\mod-del.txt"
+      },
+      {
+        "name": "skip-conf.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "noBaseline",
+        "leftPath": "C:\\Left\\skip-conf.txt",
+        "rightPath": "D:\\Right\\skip-conf.txt"
+      },
+      {
+        "name": "unres-type.txt",
+        "state": "newerLeft",
+        "action": "conflict",
+        "reason": "typeMismatch",
+        "isDir": true,
+        "leftPath": "C:\\Left\\unres-type.txt",
+        "rightPath": "D:\\Right\\unres-type.txt"
+      },
+      {
+        "name": "unres-case.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\unres-case.txt",
+        "rightPath": "D:\\Right\\unres-case.txt"
+      },
+      {
+        "name": "UNRES-CASE.TXT",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\UNRES-CASE.TXT",
+        "rightPath": "D:\\Right\\UNRES-CASE.TXT"
+      },
+      {
+        "name": "undecided.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "bothChanged",
+        "leftPath": "C:\\Left\\undecided.txt",
+        "rightPath": "D:\\Right\\undecided.txt"
+      }
+    ],
+    "summary": {
+      "total": 7,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 7,
+      "skipped": 0,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": "",
+    "resolvedItems": [
+      {
+        "name": "both-chg.txt",
+        "state": "sizeDifferent",
+        "action": "updateRight",
+        "reason": "bothChanged",
+        "decision": "keepLeft",
+        "leftPath": "C:\\Left\\both-chg.txt",
+        "rightPath": "D:\\Right\\both-chg.txt"
+      },
+      {
+        "name": "mod-del.txt",
+        "state": "leftOnly",
+        "action": "deleteLeft",
+        "reason": "modifyDelete",
+        "decision": "keepRight",
+        "leftPath": "C:\\Left\\mod-del.txt",
+        "rightPath": "D:\\Right\\mod-del.txt"
+      },
+      {
+        "name": "skip-conf.txt",
+        "state": "sizeDifferent",
+        "action": "skip",
+        "reason": "noBaseline",
+        "decision": "skip",
+        "leftPath": "C:\\Left\\skip-conf.txt",
+        "rightPath": "D:\\Right\\skip-conf.txt"
+      },
+      {
+        "name": "unres-type.txt",
+        "state": "newerLeft",
+        "action": "conflict",
+        "reason": "typeMismatch",
+        "isDir": true,
+        "leftPath": "C:\\Left\\unres-type.txt",
+        "rightPath": "D:\\Right\\unres-type.txt"
+      },
+      {
+        "name": "unres-case.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\unres-case.txt",
+        "rightPath": "D:\\Right\\unres-case.txt"
+      },
+      {
+        "name": "UNRES-CASE.TXT",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "caseCollision",
+        "leftPath": "C:\\Left\\UNRES-CASE.TXT",
+        "rightPath": "D:\\Right\\UNRES-CASE.TXT"
+      },
+      {
+        "name": "undecided.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "bothChanged",
+        "leftPath": "C:\\Left\\undecided.txt",
+        "rightPath": "D:\\Right\\undecided.txt"
+      }
+    ]
+  }
+}

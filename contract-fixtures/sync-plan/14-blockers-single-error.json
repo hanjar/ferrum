@@ -1,0 +1,53 @@
+{
+  "name": "Sync plan blocker with single error (singular wording)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "item.txt",
+        "state": "same",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "cancelled": false,
+    "errors": [
+      {
+        "name": "locked.txt",
+        "message": "access denied"
+      }
+    ],
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "item.txt",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\item.txt",
+        "rightPath": "D:\\Right\\item.txt"
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 0,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": ["errors"],
+    "blockersDescription": "Synchronization blocked: 1 entry could not be read (locked.txt: access denied)."
+  }
+}

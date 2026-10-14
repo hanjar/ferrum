@@ -1,0 +1,188 @@
+{
+  "name": "Profile two-way without propagation: new file under a folder deleted on the other side is a noBaseline conflict, nothing is copied back",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "truncated": false,
+    "recursive": true,
+    "entries": [
+      {
+        "name": "A",
+        "state": "rightOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "A/new.txt",
+        "state": "rightOnly",
+        "isDir": false,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 5,
+        "rightModifiedMs": 3000
+      },
+      {
+        "name": "A/x.txt",
+        "state": "rightOnly",
+        "isDir": false,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "B",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "B/n.txt",
+        "state": "leftOnly",
+        "isDir": false,
+        "leftSize": 7,
+        "leftModifiedMs": 3000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "B/y.txt",
+        "state": "leftOnly",
+        "isDir": false,
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      }
+    ]
+  },
+  "options": {
+    "direction": "both",
+    "deleteExtras": false,
+    "propagateDeletes": false,
+    "profile": true
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "A": {
+        "left": {
+          "size": 0,
+          "modifiedMs": 1000
+        },
+        "right": {
+          "size": 0,
+          "modifiedMs": 1000
+        }
+      },
+      "A/x.txt": {
+        "left": {
+          "size": 100,
+          "modifiedMs": 1000
+        },
+        "right": {
+          "size": 100,
+          "modifiedMs": 1000
+        }
+      },
+      "B": {
+        "left": {
+          "size": 0,
+          "modifiedMs": 1000
+        },
+        "right": {
+          "size": 0,
+          "modifiedMs": 1000
+        }
+      },
+      "B/y.txt": {
+        "left": {
+          "size": 100,
+          "modifiedMs": 1000
+        },
+        "right": {
+          "size": 100,
+          "modifiedMs": 1000
+        }
+      }
+    }
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "A",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "deletedLeft",
+        "isDir": true,
+        "leftPath": "C:\\Left\\A",
+        "rightPath": "D:\\Right\\A"
+      },
+      {
+        "name": "A/new.txt",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "noBaseline",
+        "isDir": false,
+        "leftPath": "C:\\Left\\A\\new.txt",
+        "rightPath": "D:\\Right\\A\\new.txt"
+      },
+      {
+        "name": "A/x.txt",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "deletedLeft",
+        "isDir": false,
+        "leftPath": "C:\\Left\\A\\x.txt",
+        "rightPath": "D:\\Right\\A\\x.txt"
+      },
+      {
+        "name": "B",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "deletedRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\B",
+        "rightPath": "D:\\Right\\B"
+      },
+      {
+        "name": "B/n.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "noBaseline",
+        "isDir": false,
+        "leftPath": "C:\\Left\\B\\n.txt",
+        "rightPath": "D:\\Right\\B\\n.txt"
+      },
+      {
+        "name": "B/y.txt",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "deletedRight",
+        "isDir": false,
+        "leftPath": "C:\\Left\\B\\y.txt",
+        "rightPath": "D:\\Right\\B\\y.txt"
+      }
+    ],
+    "summary": {
+      "total": 6,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 6,
+      "skipped": 0,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

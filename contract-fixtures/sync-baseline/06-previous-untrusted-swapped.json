@@ -1,0 +1,50 @@
+{
+  "name": "Reconcile baseline with swapped roots previous baseline (previous discarded)",
+  "previous": {
+    "version": 1,
+    "leftRoot": "D:\\Right",
+    "rightRoot": "C:\\Left",
+    "entries": {
+      "old.txt": {
+        "left": { "size": 50, "modifiedMs": 500 },
+        "right": { "size": 50, "modifiedMs": 500 }
+      }
+    }
+  },
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "new.txt",
+        "state": "same",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "plan": [
+    {
+      "name": "new.txt",
+      "state": "same",
+      "action": "skip"
+    }
+  ],
+  "outcomes": {},
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "new.txt": {
+        "left": { "size": 100, "modifiedMs": 1000 },
+        "right": { "size": 100, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "provesFullSync": true
+}

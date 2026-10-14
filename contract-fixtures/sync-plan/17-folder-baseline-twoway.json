@@ -1,0 +1,102 @@
+{
+  "name": "Folder entries with baseline in two-way mode without propagate (parity: deletedLeft/deletedRight conflicts)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "deleted-left-dir",
+        "state": "rightOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "deleted-right-dir",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "shared-dir",
+        "state": "same",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "deleted-left-dir": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      },
+      "deleted-right-dir": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      },
+      "shared-dir": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "deleted-left-dir",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "deletedLeft",
+        "isDir": true,
+        "leftPath": "C:\\Left\\deleted-left-dir",
+        "rightPath": "D:\\Right\\deleted-left-dir"
+      },
+      {
+        "name": "deleted-right-dir",
+        "state": "leftOnly",
+        "action": "conflict",
+        "reason": "deletedRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\deleted-right-dir",
+        "rightPath": "D:\\Right\\deleted-right-dir"
+      },
+      {
+        "name": "shared-dir",
+        "state": "same",
+        "action": "skip",
+        "isDir": true,
+        "leftPath": "C:\\Left\\shared-dir",
+        "rightPath": "D:\\Right\\shared-dir"
+      }
+    ],
+    "summary": {
+      "total": 3,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 2,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}
