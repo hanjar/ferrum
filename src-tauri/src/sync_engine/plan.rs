@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compare::{CompareDirsReport, DirDiffEntry, DirDiffState};
+use crate::compare::{CompareDirsReport, DirDiffEntry, DirDiffState, EntryFilter};
 use crate::sync_baseline::{BASELINE_VERSION, BaselineDto, EntryDto, FactsDto};
 
 pub const MTIME_TOLERANCE_MS: i64 = 2000;
@@ -403,6 +403,15 @@ pub fn build_sync_plan(
     opts: &SyncOptions,
     baseline: Option<&BaselineDto>,
 ) -> Vec<SyncPlanItem> {
+    build_plan_inner(report, opts, baseline, None)
+}
+
+fn build_plan_inner(
+    report: &CompareDirsReport,
+    opts: &SyncOptions,
+    baseline: Option<&BaselineDto>,
+    filter: Option<&dyn EntryFilter>,
+) -> Vec<SyncPlanItem> {
     let sep = if report.left_root.contains('\\') || report.right_root.contains('\\') {
         '\\'
     } else {
@@ -466,6 +475,19 @@ pub fn build_sync_plan(
                 class.reason = Some(SyncConflictReason::CaseCollision);
             }
 
+            // Transit folders (visible only so the walker can reach deeper include
+            // matches) are never acted on: no CreateDir*, no RemoveEmptyDir*.
+            if opts.profile
+                && entry.is_dir
+                && entry.state != DirDiffState::Same
+                && filter.is_some_and(|f| !f.selects_dir(&entry.name))
+            {
+                class = Classification {
+                    action: SyncAction::Skip,
+                    reason: None,
+                };
+            }
+
             SyncPlanItem {
                 name: entry.name.clone(),
                 state: entry.state,
@@ -498,20 +520,23 @@ fn has_deleted_ancestor(name: &str, deleted_dirs: &HashSet<&str>) -> bool {
     false
 }
 
+fn violating_items(plan: &[SyncPlanItem]) -> impl Iterator<Item = &SyncPlanItem> {
+    plan.iter().filter(|item| {
+        item.is_dir
+            && matches!(
+                item.action,
+                SyncAction::DeleteLeft
+                    | SyncAction::DeleteRight
+                    | SyncAction::CopyToLeft
+                    | SyncAction::CopyToRight
+            )
+    })
+}
+
 /// Folder items that violate the profile contract: a folder must never get a
 /// recursive `Delete*` or `CopyTo*` action. Returns one message per violation.
 pub fn profile_plan_violations(plan: &[SyncPlanItem]) -> Vec<String> {
-    plan.iter()
-        .filter(|item| {
-            item.is_dir
-                && matches!(
-                    item.action,
-                    SyncAction::DeleteLeft
-                        | SyncAction::DeleteRight
-                        | SyncAction::CopyToLeft
-                        | SyncAction::CopyToRight
-                )
-        })
+    violating_items(plan)
         .map(|item| {
             format!(
                 "profile plan folder item '{}' must never have a recursive action, got {:?}",
@@ -521,23 +546,57 @@ pub fn profile_plan_violations(plan: &[SyncPlanItem]) -> Vec<String> {
         .collect()
 }
 
+/// One profile plan contract violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Violation {
+    pub name: String,
+    pub action: SyncAction,
+}
+
+impl std::fmt::Display for Violation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "profile plan folder item '{}' must never have a recursive action, got {:?}",
+            self.name, self.action
+        )
+    }
+}
+
+/// Always-on (release builds too) validation of a profile plan. The P0.2 executor
+/// must call this and refuse to run a plan that fails it.
+pub fn validate_profile_plan(plan: &[SyncPlanItem]) -> Result<(), Vec<Violation>> {
+    let v: Vec<Violation> = violating_items(plan)
+        .map(|i| Violation {
+            name: i.name.clone(),
+            action: i.action,
+        })
+        .collect();
+    if v.is_empty() { Ok(()) } else { Err(v) }
+}
+
 /// Global guard for profile plans: `debug_assert!` that no folder item has a
 /// recursive action. Called at the end of `build_sync_plan` (profile) and
-/// `apply_decisions` (profile mode).
+/// `apply_decisions` (profile mode). Release builds rely on [`validate_profile_plan`].
 pub fn assert_profile_plan_invariants(plan: &[SyncPlanItem]) {
     let violations = profile_plan_violations(plan);
     debug_assert!(violations.is_empty(), "{}", violations.join("; "));
 }
 
 /// Build a profile sync plan enforcing profile non-recursive folder actions.
+///
+/// `filter` is the profile filter used for the compare. Visible folders that the
+/// filter does not select (transit folders) always get `Skip`. Pass `None` only
+/// when there is no include list.
 pub fn build_profile_sync_plan(
     report: &CompareDirsReport,
     opts: &SyncOptions,
     baseline: Option<&BaselineDto>,
+    filter: Option<&dyn EntryFilter>,
 ) -> Vec<SyncPlanItem> {
     let mut profile_opts = opts.clone();
     profile_opts.profile = true;
-    build_sync_plan(report, &profile_opts, baseline)
+    build_plan_inner(report, &profile_opts, baseline, filter)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -972,7 +1031,8 @@ mod tests {
             let fix: Fixture = serde_json::from_str(&content)
                 .unwrap_or_else(|e| panic!("parse profile fixture {}: {}", path.display(), e));
 
-            let items = build_profile_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref());
+            let items =
+                build_profile_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref(), None);
             assert_eq!(
                 items,
                 fix.expected.items,
@@ -982,6 +1042,7 @@ mod tests {
             );
 
             assert_profile_plan_invariants(&items);
+            assert!(validate_profile_plan(&items).is_ok());
 
             assert_eq!(
                 plan_summary(&items),
@@ -1759,6 +1820,28 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_profile_plan_always_on() {
+        let report = test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_file("f.txt", DirDiffState::RightOnly, 1, 1000),
+        ]);
+        let mut plan = build_profile_sync_plan(&report, &opts_both(false, true), None, None);
+        assert!(validate_profile_plan(&plan).is_ok());
+        plan[0].action = SyncAction::DeleteRight;
+        let err = validate_profile_plan(&plan).unwrap_err();
+        assert_eq!(
+            err,
+            vec![Violation {
+                name: "A".to_string(),
+                action: SyncAction::DeleteRight
+            }]
+        );
+        assert!(err[0].to_string().contains("'A'"));
+        plan[0].action = SyncAction::CreateDirLeft;
+        assert!(validate_profile_plan(&plan).is_ok());
+    }
+
+    #[test]
     fn test_plan_item_rejects_unknown_fields() {
         let ok = r#"{"name":"a","state":"leftOnly","action":"copyToRight"}"#;
         assert!(serde_json::from_str::<SyncPlanItem>(ok).is_ok());
@@ -1768,5 +1851,126 @@ mod tests {
 
         let other = r#"{"name":"a","state":"leftOnly","action":"copyToRight","bogus":1}"#;
         assert!(serde_json::from_str::<SyncPlanItem>(other).is_err());
+    }
+
+    // ---- Rework 4: transit folders ----
+
+    fn transit_plan(
+        tag: &str,
+        include: &[&str],
+        direction: SyncDirection,
+        delete_extras: bool,
+        build: impl Fn(&std::path::Path, &std::path::Path),
+    ) -> Vec<SyncPlanItem> {
+        use crate::compare::{DirOpts, compare_dirs_filtered};
+        use crate::sync_engine::filters::ProfileFilter;
+        let base = std::env::temp_dir().join(format!("ferrum-p01r4-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (l, r) = (base.join("l"), base.join("r"));
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&r).unwrap();
+        build(&l, &r);
+        let inc: Vec<String> = include.iter().map(|s| s.to_string()).collect();
+        let filter = ProfileFilter::new(&inc, &[]).unwrap();
+        let report = compare_dirs_filtered(
+            l.to_str().unwrap(),
+            r.to_str().unwrap(),
+            DirOpts {
+                by_content: false,
+                recursive: true,
+                max_entries: 0,
+            },
+            &filter,
+            0,
+        )
+        .unwrap();
+        let opts = SyncOptions {
+            direction,
+            delete_extras,
+            propagate_deletes: false,
+            profile: true,
+        };
+        let plan = build_profile_sync_plan(&report, &opts, None, Some(&filter));
+        assert_profile_plan_invariants(&plan);
+        assert!(validate_profile_plan(&plan).is_ok());
+        let _ = fs::remove_dir_all(&base);
+        plan
+    }
+
+    fn folder_actions(plan: &[SyncPlanItem]) -> Vec<(String, SyncAction)> {
+        plan.iter()
+            .filter(|i| i.is_dir && i.action != SyncAction::Skip)
+            .map(|i| (i.name.clone(), i.action))
+            .collect()
+    }
+
+    #[test]
+    fn test_r4_transit_folders_include_without_matches_have_no_folder_action() {
+        // include *.txt, no .txt anywhere: photos, a, a/docs are only walked.
+        let plan = transit_plan("a1", &["*.txt"], SyncDirection::Both, false, |l, _r| {
+            fs::create_dir_all(l.join("photos")).unwrap();
+            fs::create_dir_all(l.join("a/docs")).unwrap();
+            fs::write(l.join("a/docs/pic.jpg"), b"x").unwrap();
+        });
+        assert!(
+            plan.iter().any(|i| i.is_dir),
+            "transit folders are listed: {plan:?}"
+        );
+        assert!(folder_actions(&plan).is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn test_r4_empty_target_folder_outside_include_not_removed() {
+        let plan = transit_plan(
+            "a2",
+            &["*.txt"],
+            SyncDirection::LeftToRight,
+            true,
+            |_l, r| {
+                fs::create_dir_all(r.join("empty-extra")).unwrap();
+                fs::create_dir_all(r.join("x/y")).unwrap();
+            },
+        );
+        assert!(folder_actions(&plan).is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn test_r4_include_folder_mirrors_contents_with_empty_subfolders() {
+        let plan = transit_plan(
+            "a3",
+            &["docs\\"],
+            SyncDirection::LeftToRight,
+            true,
+            |l, r| {
+                fs::create_dir_all(l.join("docs/empty-sub")).unwrap();
+                fs::write(l.join("docs/g.md"), b"x").unwrap();
+                fs::create_dir_all(l.join("photos")).unwrap();
+                fs::create_dir_all(r.join("docs/stale-empty")).unwrap();
+                fs::create_dir_all(r.join("elsewhere")).unwrap();
+            },
+        );
+        let fa = folder_actions(&plan);
+        // `docs` exists on both sides (state same): no folder action for it.
+        assert!(fa.contains(&("docs/empty-sub".to_string(), SyncAction::CreateDirRight)));
+        assert!(fa.contains(&(
+            "docs/stale-empty".to_string(),
+            SyncAction::RemoveEmptyDirRight
+        )));
+        // transit folders: nothing.
+        assert!(
+            !fa.iter().any(|(n, _)| n == "photos" || n == "elsewhere"),
+            "{fa:?}"
+        );
+    }
+
+    #[test]
+    fn test_r4_no_include_list_still_mirrors_empty_folders() {
+        let plan = transit_plan("a4", &[], SyncDirection::LeftToRight, true, |l, r| {
+            fs::create_dir_all(l.join("empty-new")).unwrap();
+            fs::create_dir_all(r.join("empty-old")).unwrap();
+        });
+        let fa = folder_actions(&plan);
+        assert!(fa.contains(&("empty-new".to_string(), SyncAction::CreateDirRight)));
+        assert!(fa.contains(&("empty-old".to_string(), SyncAction::RemoveEmptyDirRight)));
     }
 }

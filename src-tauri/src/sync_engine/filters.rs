@@ -336,7 +336,36 @@ impl ProfileFilter {
     }
 }
 
+impl ProfileFilter {
+    /// Empty include list, a direct include match, or an ancestor directory matching
+    /// an include pattern (P2-6: an include matching a folder covers its contents).
+    fn include_selects(&self, rel: &str, is_dir: bool, segments: &[String]) -> bool {
+        if self.include.is_empty() {
+            return true;
+        }
+        if self.include.iter().any(|p| p.matches(rel, is_dir)) {
+            return true;
+        }
+        for prefix_len in 1..segments.len() {
+            let ancestor_rel = segments[..prefix_len].join("/");
+            if self.include.iter().any(|p| p.matches(&ancestor_rel, true)) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 impl EntryFilter for ProfileFilter {
+    fn selects_dir(&self, rel: &str) -> bool {
+        let segments: Vec<String> = rel
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty())
+            .map(fold_str)
+            .collect();
+        self.include_selects(rel, true, &segments)
+    }
+
     fn visible(&self, rel: &str, is_dir: bool) -> bool {
         // Built-in excludes always apply (SP-4.4)
         if is_builtin_exclude(rel) {
@@ -365,22 +394,8 @@ impl EntryFilter for ProfileFilter {
         }
 
         // Include list (SP-4.3)
-        if self.include.is_empty() {
+        if self.include_selects(rel, is_dir, &segments) {
             return true;
-        }
-
-        // Direct match with include pattern
-        if self.include.iter().any(|p| p.matches(rel, is_dir)) {
-            return true;
-        }
-
-        // P2-6: include matching a folder recursively includes all its contents.
-        // Check if any ancestor directory matches an include pattern (as a directory).
-        for prefix_len in 1..segments.len() {
-            let ancestor_rel = segments[..prefix_len].join("/");
-            if self.include.iter().any(|p| p.matches(&ancestor_rel, true)) {
-                return true;
-            }
         }
 
         // For directories, also keep visible if an include pattern could match inside (descend).

@@ -472,6 +472,22 @@ Profile sync plans must never copy or delete folders wholesale, because doing so
    the baseline **while still holding the lease** (§3.4). Settle failure does not change the outcome; it is logged
    as an event and the baseline stays as it was.
 
+#### Execution contract for profile plans
+
+1. **Parents are created no-follow.** `CopyTo*` and `CreateDir*` create any missing parent folders with handle-relative,
+   no-follow primitives; a reparse point on the parent path is rejected (the item fails).
+2. **A parent that is a file fails the item.** If a parent turns out to be a file, that item fails and nothing is overwritten.
+3. **Order.** `CreateDir*` shallow to deep, before any file copy; `RemoveEmptyDir*` deep to shallow, last. A
+   `RemoveEmptyDir*` that fails because the folder is not empty is skipped, not an error.
+4. **Entry points.** P0.2 builds plans only with `build_profile_sync_plan` (passing the profile filter) and resolves
+   conflicts only with `apply_decisions(.., PlanMode::Profile)`.
+5. **Transit folders.** A folder that is visible only so the walker can reach deeper include matches (not selected by
+   the include list, nor under a selected folder) always plans `Skip`: never `CreateDir*`, never `RemoveEmptyDir*`.
+   Selected folders, and all folders when the include list is empty, behave as described above.
+6. **Release-mode guard.** The executor must call `validate_profile_plan(&plan)` before running anything and refuse to
+   run a plan that returns `Err` (a folder item with `CopyTo*`/`Delete*`). This check is always on; the
+   `debug_assert!` inside the planner is only an extra.
+
 ### 5.5 Delete policies
 
 | Policy       | Implementation                                                                                                                                                                                |

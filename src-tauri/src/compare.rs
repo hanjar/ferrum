@@ -1029,6 +1029,12 @@ pub trait EntryFilter: Send + Sync {
     fn is_active(&self) -> bool {
         true
     }
+    /// True if the visible directory is itself selected (include list empty, or the
+    /// directory or one of its ancestors matches an include pattern). A visible but
+    /// unselected directory is only a transit folder, walked to reach deeper matches.
+    fn selects_dir(&self, _rel: &str) -> bool {
+        true
+    }
 }
 
 /// No-op filter that keeps all entries visible.
