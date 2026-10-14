@@ -190,15 +190,21 @@ backend memeriksa folder dengan `symlink_metadata` saja (reparse point tidak dii
 
 Hasilnya dikirim ke UI sebagai `warnings`:
 
-- **Aider, opencode, Gemini CLI, omp, agy**: backend sendiri memunculkan konfirmasi **native**
-  Windows (FER-516) berisi nama agent, path lengkap folder kerja, dan peringatan bahwa konfigurasi
-  proyek bisa menjalankan program. Tombol bawaan = Batal. Webview tidak ikut memutuskan: request
-  `agent_terminal_open` tidak punya field konfirmasi (`confirmedUntrusted` ditolak). Batal atau
-  gagal membuat dialog = `cancelled`; dialog lain sedang terbuka = `busy`; path dengan karakter
-  format/bidi/kontrol ditolak (`folder_invalid`) tanpa dialog. Tidak ada proses yang dijalankan
-  pada ketiga kasus itu.
-- **Claude Code, Codex**: keduanya sudah punya dialog trust folder sendiri. Agent langsung dibuka dan
-  temuan hanya ditampilkan sebagai catatan di toast.
+- **Aider, opencode, Gemini CLI, omp, agy** (agent tanpa trust prompt sendiri): backend **selalu**
+  memunculkan konfirmasi **native** Windows (FER-516) di setiap pembukaan, di folder mana pun dan
+  apa pun hasil scan, karena folder bisa berubah antara scan dan saat agent membaca konfigurasinya.
+  Isinya: nama agent, path folder kerja (path sangat panjang dipotong di tengah untuk tampilan;
+  cwd tetap path lengkap), peringatan bahwa konfigurasi proyek bisa menjalankan program, dan
+  temuan scan (maks 5) sebagai informasi. Tombol bawaan = Batal. Webview tidak ikut memutuskan:
+  request `agent_terminal_open` tidak punya field konfirmasi (`confirmedUntrusted` ditolak). Batal
+  atau gagal membuat dialog = `cancelled`; dialog lain sedang terbuka = `busy`; path dengan karakter
+  format/bidi/kontrol ditolak (`folder_invalid`) tanpa dialog. Tidak ada proses yang dijalankan pada
+  ketiga kasus itu. Sesudah jawaban "ya", lokasi exe agent dicek ulang sebelum start.
+- **Claude Code, Codex**: keduanya sudah punya dialog trust folder sendiri. Bila scan bersih,
+  agent langsung dibuka. Bila scan menemukan konfigurasi proyek (hook `.claude\settings*.json`,
+  `.mcp.json`, `.codex`), konfirmasi native yang sama dimunculkan, karena folder yang sudah
+  pernah dipercayai tidak ditanya ulang oleh agent. Sisa risiko (konfigurasi ditanam sesudah scan
+  untuk kedua agent ini) ditanggung oleh trust prompt agent itu sendiri.
 
 **`wt.exe` (T2)** tidak lagi dicari dengan nama saja. Ferrum me-resolve path absolutnya: alias App
 Execution `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe`, lalu `wt.exe` di folder PATH yang absolut.

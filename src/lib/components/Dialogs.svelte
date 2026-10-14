@@ -90,7 +90,6 @@
   let fastDontAsk = $state(false);
   /** FER-460: initial focus of the scan offer = the safe "Scan biasa". */
   let safeScanBtn = $state<HTMLButtonElement | undefined>();
-  /** FER-494 T1: initial focus of the agent confirmation = "Batal". */
   let busy = $state(false);
   let error = $state('');
   let inputEl = $state<HTMLInputElement | undefined>();

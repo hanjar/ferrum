@@ -183,9 +183,11 @@ function injectTauriMock(page: Page) {
             : [];
           const ownTrust = agent.id === 'claude' || agent.id === 'codex';
           // FER-516: the confirmation is a NATIVE dialog raised by the backend. This mock
-          // stands in for it; the test sets the answer in `__nativeAnswer` (default: No).
-          if (warnings.length && !ownTrust) {
-            const answer = (w as unknown as { __nativeAnswer?: string }).__nativeAnswer ?? 'no';
+          // stands in for it; the test sets the answer in `__nativeAnswer` (default: Yes).
+          // Agents without their own trust prompt are always asked; the others only when the
+          // scan finds project configuration. Default answer: Yes.
+          if (warnings.length || !ownTrust) {
+            const answer = (w as unknown as { __nativeAnswer?: string }).__nativeAnswer ?? 'yes';
             if (answer === 'busy') return Promise.reject({ kind: 'busy' });
             if (answer !== 'yes') return Promise.reject({ kind: 'cancelled' });
           }

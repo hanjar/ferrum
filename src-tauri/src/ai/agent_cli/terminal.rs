@@ -20,10 +20,12 @@
 //!   - T2: `wt.exe` is resolved to an absolute path and ACL-checked (`shell_open::resolve_wt`);
 //!     an untrusted or missing wt means the console route.
 //! - T1/T3: project configuration the agent would load (per agent, [`AgentDef::project_configs`]),
-//!   a UNC or linked folder, or a folder owned by another account produce `warnings`. Agents
-//!   without their own folder-trust dialog need an explicit confirmation (`needsConfirm`, then a
-//!   a NATIVE confirmation owned by the backend, FER-516); Claude Code and Codex get a note only.
-//!   The webview cannot answer that confirmation and its request carries no flag for it.
+//!   a UNC or linked folder, or a folder owned by another account produce `warnings`.
+//!   FER-516: an agent without its own folder-trust dialog ALWAYS needs a NATIVE confirmation
+//!   raised by the backend (the scan can be outrun by a file planted afterwards); the findings are
+//!   shown in it as information. Claude Code and Codex (own trust prompt) get the native
+//!   confirmation only when the scan finds project configuration, otherwise a note. The webview
+//!   cannot answer the confirmation and its request carries no flag for it.
 //! - The folder is validated with `path_guard::check_str` (no device namespace, no `\\?\`, no odd
 //!   UNC host, no ADS) plus: no control characters, no `"`/wildcards, no `.`/`..` segments, must be
 //!   an existing directory (a file means its parent folder). Plain UNC shares are allowed.
@@ -691,10 +693,28 @@ pub struct OpenContext<'a> {
 
 pub const CONFIRM_CAPTION: &str = "Konfirmasi membuka agent";
 
-/// The native dialog text, built by the backend only: agent, the full folder path and a short
-/// warning (plus the first findings). `None` when any character could reorder or hide text
-/// (control or format characters, e.g. U+202E) in the folder or in a finding: then no dialog is
-/// shown at all and nothing starts.
+/// Longest folder path / finding shown in the dialog; longer text is cut in the middle for
+/// display only (the full path is still the one used as the working directory).
+const SHOWN_PATH_MAX: usize = 180;
+const SHOWN_FINDING_MAX: usize = 240;
+
+/// `s` cut in the middle with an ellipsis when longer than `max` characters.
+fn shorten(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_owned();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}\u{2026}{end}")
+}
+
+/// The native dialog text, built by the backend only: agent, the folder path (cut in the middle
+/// when very long) and a short warning, plus up to five scan findings as information. `None` when
+/// any character could reorder or hide text (control or format characters, e.g. U+202E) in the
+/// folder or in a finding: then no dialog is shown at all and nothing starts.
 pub fn confirm_text(agent_name: &str, folder: &Path, warnings: &[String]) -> Option<String> {
     let path = folder.to_string_lossy();
     let findings: Vec<&String> = warnings.iter().take(5).collect();
@@ -703,21 +723,20 @@ pub fn confirm_text(agent_name: &str, folder: &Path, warnings: &[String]) -> Opt
         return None;
     }
     let mut text = format!(
-        "Buka {agent_name} di folder ini?
-
-{path}
-
-"
+        "Buka {agent_name} di folder ini?\n\n{}\n\n",
+        shorten(&path, SHOWN_PATH_MAX)
     );
     text.push_str(
-        "Konfigurasi proyek di folder ini (mis. server MCP atau hook) bisa menjalankan program          di komputer ini saat agent dimulai. Lanjutkan hanya jika Anda memercayai folder dan          isinya.",
+        "Konfigurasi proyek di folder ini (mis. server MCP atau hook) bisa menjalankan program \
+         di komputer ini saat agent dimulai, dan folder bisa berubah sesudah pemeriksaan. \
+         Lanjutkan hanya jika Anda memercayai folder dan isinya.",
     );
+    if !findings.is_empty() {
+        text.push_str("\n\nTemuan pemeriksaan:");
+    }
     for w in findings {
-        text.push_str(
-            "
-- ",
-        );
-        text.push_str(w);
+        text.push_str("\n- ");
+        text.push_str(&shorten(w, SHOWN_FINDING_MAX));
     }
     Some(text)
 }
@@ -786,16 +805,26 @@ pub fn open(
     })?;
     let warnings = assess(agent, &folder, ctx.folder_owner);
     let note = agent.def().terminal_note;
-    if !warnings.is_empty() && !agent.def().own_trust_prompt {
-        // FER-516: the only authorization is a native dialog the backend raises itself; nothing
-        // the webview sends can stand in for it. A refusal, a busy guard or a text that cannot
-        // be shown safely all mean nothing starts.
+    // FER-516 (rework 1): an agent WITHOUT its own folder-trust prompt (the explicit allowlist is
+    // `AgentDef::own_trust_prompt`) always needs the native confirmation, whatever the scan found:
+    // the folder can change between the scan and the moment the agent reads its configuration.
+    // Claude Code / Codex (own trust prompt) are asked only when the scan finds project
+    // configuration; a plant after the scan is left to their own prompt.
+    if !agent.def().own_trust_prompt || !warnings.is_empty() {
+        // The only authorization is a native dialog the backend raises itself; nothing the
+        // webview sends can stand in for it. A refusal, a busy guard or a text that cannot be
+        // shown safely all mean nothing starts.
         let text = confirm_text(agent.def().name, &folder, &warnings)
             .ok_or_else(|| AgentError::at("folder_invalid", &req.path))?;
         match (ctx.confirm)(CONFIRM_CAPTION, &text) {
             Ok(true) => {}
             Err(e) if e.code == ErrorCode::Busy => return Err(AgentError::new("busy")),
             Ok(false) | Err(_) => return Err(AgentError::new("cancelled")),
+        }
+        // The user may have taken a while: the executable's location is checked once more.
+        if ctx.test_profile_config.is_none() {
+            (ctx.trusted)(launch)
+                .map_err(|reason| AgentError::with_message("agent_untrusted", reason))?;
         }
     }
     let pref = TerminalPref::parse(req.program.as_deref().unwrap_or("auto"));

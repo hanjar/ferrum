@@ -700,7 +700,7 @@ fn open_starts_the_composed_command_once_with_the_folder_as_cwd() {
 }
 
 #[test]
-fn a_clean_folder_opens_directly_for_every_agent() {
+fn a_clean_folder_asks_only_for_agents_without_their_own_trust_prompt() {
     let f = fx();
     let s = settings_for(&Launch::exe(&f.exe), true);
     let count = RefCell::new(0);
@@ -708,12 +708,22 @@ fn a_clean_folder_opens_directly_for_every_agent() {
         *count.borrow_mut() += 1;
         Ok(c[0].clone())
     };
-    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
+    let asked = RefCell::new(0);
+    let yes = |_: &str, _: &str| {
+        *asked.borrow_mut() += 1;
+        Ok(true)
+    };
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &yes);
     for id in ALL_AGENTS {
         let out = open(&ctx, &req_for(id.as_str(), &f.folder)).unwrap();
         assert!(out.via.is_some(), "{id:?}");
     }
     assert_eq!(*count.borrow(), ALL_AGENTS.len());
+    let expected = ALL_AGENTS
+        .into_iter()
+        .filter(|id| !id.def().own_trust_prompt)
+        .count();
+    assert_eq!(*asked.borrow(), expected);
 }
 
 /// Build a folder holding project configuration the given agent loads.
@@ -820,19 +830,103 @@ fn a_bidi_or_format_character_in_the_folder_is_refused_without_a_dialog() {
 }
 
 #[test]
-fn a_trusted_folder_opens_without_any_dialog() {
+fn an_agent_without_a_trust_prompt_always_asks_even_in_a_clean_folder() {
     let f = fx();
     let s = settings_for(&Launch::exe(&f.exe), true);
-    let count = RefCell::new(0);
+    for agent in ["opencode", "aider", "gemini", "omp", "antigravity"] {
+        let asked = RefCell::new(0);
+        let started = RefCell::new(0);
+        let spawn = |c: Vec<TerminalCommand>| {
+            *started.borrow_mut() += 1;
+            Ok(c[0].clone())
+        };
+        // "No" in a folder with no configuration: nothing starts.
+        let no = |_: &str, text: &str| {
+            *asked.borrow_mut() += 1;
+            assert!(text.contains("Buka "), "{text}");
+            Ok(false)
+        };
+        let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no);
+        let e = open(&ctx, &req_for(agent, &f.folder)).unwrap_err();
+        assert_eq!(e.kind, "cancelled", "{agent}");
+        assert_eq!((*asked.borrow(), *started.borrow()), (1, 0), "{agent}");
+        // "Yes": started once.
+        let yes = |_: &str, _: &str| Ok(true);
+        let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &yes);
+        open(&ctx, &req_for(agent, &f.folder)).unwrap();
+        assert_eq!(*started.borrow(), 1, "{agent}");
+    }
+}
+
+#[test]
+fn a_configuration_planted_after_the_scan_cannot_skip_the_dialog() {
+    // The scan sees a clean folder (owner check says fine, nothing on disk yet); the file appears
+    // while the dialog is open (the confirmation closure plants it). The dialog was still asked
+    // and the answer "No" stops everything.
+    let f = fx();
+    let s = settings_for(&Launch::exe(&f.exe), true);
+    let started = RefCell::new(0);
     let spawn = |c: Vec<TerminalCommand>| {
-        *count.borrow_mut() += 1;
+        *started.borrow_mut() += 1;
         Ok(c[0].clone())
     };
-    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
-    for agent in ["opencode", "aider", "gemini"] {
-        open(&ctx, &req_for(agent, &f.folder)).unwrap();
-    }
-    assert_eq!(*count.borrow(), 3);
+    let dir = f.folder.join("late");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plant_then_no = |_: &str, _: &str| {
+        std::fs::write(dir.join("opencode.json"), "{}").unwrap();
+        Ok(false)
+    };
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &plant_then_no);
+    assert_eq!(
+        open(&ctx, &req_for("opencode", &dir)).unwrap_err().kind,
+        "cancelled"
+    );
+    assert_eq!(*started.borrow(), 0);
+    // Planted between the request and the scan outcome is the same: a clean scan still asks.
+    let other = f.folder.join("late2");
+    std::fs::create_dir_all(&other).unwrap();
+    let asked = RefCell::new(false);
+    let no = |_: &str, _: &str| {
+        *asked.borrow_mut() = true;
+        Ok(false)
+    };
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no);
+    assert!(open(&ctx, &req_for("gemini", &other)).is_err());
+    assert!(*asked.borrow());
+}
+
+#[test]
+fn the_dialog_text_is_tidy_and_bounded_but_the_cwd_stays_complete() {
+    let long = format!(r"C:\{}", "segment\\".repeat(60));
+    let text = confirm_text("Aider", Path::new(&long), &[format!("{long} x")]).unwrap();
+    assert!(!text.contains("  "), "no runs of spaces: {text}");
+    assert!(text.contains('\u{2026}'), "long path is cut in the middle");
+    assert!(text.chars().count() < 900, "{}", text.chars().count());
+    assert!(text.starts_with("Buka Aider di folder ini?"));
+    // Short paths are shown whole.
+    let short = confirm_text("Aider", Path::new(r"C:\a\b"), &[]).unwrap();
+    assert!(short.contains(r"C:\a\b") && !short.contains("Temuan"));
+}
+
+#[test]
+fn the_executable_is_rechecked_after_a_yes() {
+    let f = fx();
+    let s = settings_for(&Launch::exe(&f.exe), true);
+    let spawn =
+        |_: Vec<TerminalCommand>| -> std::io::Result<TerminalCommand> { panic!("must not start") };
+    let calls = RefCell::new(0);
+    let flaky_trust = |_: &Launch| {
+        *calls.borrow_mut() += 1;
+        if *calls.borrow() >= 2 {
+            Err("lokasi berubah".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    let yes = |_: &str, _: &str| Ok(true);
+    let ctx = mk(&s, &flaky_trust, &owner_ok, &spawn, &yes);
+    let e = open(&ctx, &req_for("opencode", &f.folder)).unwrap_err();
+    assert_eq!(e.kind, "agent_untrusted");
 }
 
 /// FER-516 (structural): no AI path reaches `agent_terminal_open` / `terminal::open`, and inside
@@ -875,23 +969,53 @@ fn no_ai_adapter_reaches_the_terminal_open_and_confirm_precedes_spawn() {
 }
 
 #[test]
-fn claude_and_codex_get_a_note_but_are_not_blocked() {
+fn claude_and_codex_ask_natively_only_when_the_scan_finds_configuration() {
     let f = fx();
     let s = settings_for(&Launch::exe(&f.exe), true);
-    let spawn = |c: Vec<TerminalCommand>| Ok(c[0].clone());
-    let ctx = mk(&s, &ok_trust, &owner_bad, &spawn, &no_dialog);
+    let started = RefCell::new(0);
+    let spawn = |c: Vec<TerminalCommand>| {
+        *started.borrow_mut() += 1;
+        Ok(c[0].clone())
+    };
+    // Clean folder: no dialog (their own trust prompt covers the rest).
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
+    for agent in ["claude", "codex"] {
+        assert!(
+            open(&ctx, &req_for(agent, &f.folder))
+                .unwrap()
+                .via
+                .is_some()
+        );
+    }
+    // Project configuration found: the native dialog decides.
     std::fs::write(f.folder.join(".mcp.json"), "{}").unwrap();
     std::fs::create_dir_all(f.folder.join(".codex")).unwrap();
+    *started.borrow_mut() = 0;
+    let no = |_: &str, _: &str| Ok(false);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no);
+    for agent in ["claude", "codex"] {
+        assert_eq!(
+            open(&ctx, &req_for(agent, &f.folder)).unwrap_err().kind,
+            "cancelled",
+            "{agent}"
+        );
+    }
+    assert_eq!(*started.borrow(), 0);
+    let yes = |_: &str, _: &str| Ok(true);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &yes);
     for agent in ["claude", "codex"] {
         let out = open(&ctx, &req_for(agent, &f.folder)).unwrap();
-        assert!(out.via.is_some());
-        assert_eq!(out.warnings.len(), 2, "{agent}: {:?}", out.warnings);
+        assert_eq!(out.warnings.len(), 1, "{agent}: {:?}", out.warnings);
     }
-    // The same foreign-owned folder asks the native dialog for an agent without a trust dialog.
+    assert_eq!(*started.borrow(), 2);
+    // A claude hook file counts too.
+    let hook = f.folder.join("hooked");
+    std::fs::create_dir_all(hook.join(".claude")).unwrap();
+    std::fs::write(hook.join(".claude").join("settings.local.json"), "{}").unwrap();
     let no = |_: &str, _: &str| Ok(false);
-    let ctx = mk(&s, &ok_trust, &owner_bad, &spawn, &no);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no);
     assert_eq!(
-        open(&ctx, &req_for("omp", &f.folder)).unwrap_err().kind,
+        open(&ctx, &req_for("claude", &hook)).unwrap_err().kind,
         "cancelled"
     );
 }

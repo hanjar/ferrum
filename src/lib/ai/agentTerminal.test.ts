@@ -33,7 +33,6 @@ function fakePort(result?: Partial<TerminalOpened>, fail?: unknown) {
         argv: ['wt', '-d', '.', 'C:\\b\\claude.exe'],
         cwd: 'C:\\proj',
         dryRun: false,
-        needsConfirm: false,
         warnings: [],
         ...result,
       });
