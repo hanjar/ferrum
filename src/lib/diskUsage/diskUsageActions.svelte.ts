@@ -157,3 +157,29 @@ export function duRowActionItems(
   }
   return items;
 }
+
+/** Context-menu items for a file row in DiskUsageFiles (Largest files view).
+ *  Offers: Reveal, Copy path, Properties, Move…, Delete…
+ *  Zero auto-clean affordance. Move/Delete use the existing revalidation and flows. */
+export function duFileRowActionItems(
+  store: DiskUsageStore,
+  t: DuScanTarget,
+  opts: {
+    onreveal?: (filePath: string) => void;
+    oncopy?: () => void;
+  } = {},
+): ContextMenuItem[] {
+  return [
+    { label: 'Reveal', disabled: !opts.onreveal, run: () => opts.onreveal?.(t.path) },
+    {
+      label: 'Copy path',
+      run: () => {
+        if (opts.oncopy) opts.oncopy();
+        else void copyScanPath(t.path);
+      },
+    },
+    { label: 'Properties', run: () => openPropertiesFor(t.path) },
+    { label: 'Move…', run: () => void moveScanEntryToOtherPane(store, t) },
+    { label: 'Delete…', danger: true, run: () => void deleteScanEntryWithConfirm(store, t) },
+  ];
+}
