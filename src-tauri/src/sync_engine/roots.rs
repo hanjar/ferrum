@@ -306,21 +306,7 @@ struct FolderIds {
 /// verified one - readiness reports it not ready (SP-8).
 pub fn identity(canonical: &str) -> Result<RootIdentity, RootError> {
     if is_unc(canonical) {
-        let prefix = unc_prefix(canonical);
-        let owned = canonical.to_string();
-        return match run_bounded(UNC_STEP_BUDGET, move || open_ids(&owned)) {
-            Some(Ok(ids)) => Ok(RootIdentity::Network {
-                unc_prefix: prefix,
-                volume_serial: Some(ids.volume_serial),
-                file_id: Some(ids.file_id),
-            }),
-            Some(Err(RootError::Invalid)) => Err(RootError::Invalid),
-            Some(Err(_)) | None => Ok(RootIdentity::Network {
-                unc_prefix: prefix,
-                volume_serial: None,
-                file_id: None,
-            }),
-        };
+        return identity_unc_with(canonical, open_ids);
     }
     let ids = open_ids(canonical)?;
     Ok(RootIdentity::Local {
@@ -329,6 +315,29 @@ pub fn identity(canonical: &str) -> Result<RootIdentity, RootError> {
         fs_name: ids.fs_name,
         drive: drive_kind(canonical),
     })
+}
+
+/// UNC identity with the folder opener injected (tests drive the openable and unopenable paths
+/// without a share).
+fn identity_unc_with(
+    canonical: &str,
+    opener: fn(&str) -> Result<FolderIds, RootError>,
+) -> Result<RootIdentity, RootError> {
+    let prefix = unc_prefix(canonical);
+    let owned = canonical.to_string();
+    match run_bounded(UNC_STEP_BUDGET, move || opener(&owned)) {
+        Some(Ok(ids)) => Ok(RootIdentity::Network {
+            unc_prefix: prefix,
+            volume_serial: Some(ids.volume_serial),
+            file_id: Some(ids.file_id),
+        }),
+        Some(Err(RootError::Invalid)) => Err(RootError::Invalid),
+        Some(Err(_)) | None => Ok(RootIdentity::Network {
+            unc_prefix: prefix,
+            volume_serial: None,
+            file_id: None,
+        }),
+    }
 }
 
 /// True when `a` equals `b` or one is inside the other, component-wise, case-insensitive
@@ -394,7 +403,8 @@ fn trim_trailing_sep(s: &str) -> String {
 
 /// Drive class of the VOLUME a path lives on: the volume root (`GetVolumePathNameW`, which is a
 /// mount folder for a volume mounted into a folder) is asked for its `GetDriveTypeW`. Only
-/// `DRIVE_FIXED` is `Fixed`; anything else, or an unanswered question, is `Removable` so the
+/// `DRIVE_FIXED` on a drive-letter root is `Fixed`; anything else, or an unanswered question, is
+/// `Removable` so the
 /// Recycle Bin policy fails closed. Both lookups are injected for tests.
 pub(crate) fn drive_kind_with(
     canonical: &str,
@@ -403,9 +413,21 @@ pub(crate) fn drive_kind_with(
 ) -> DriveKind {
     const DRIVE_FIXED: u32 = 3;
     match volume_root_of(canonical) {
-        Some(root) if drive_type_of(&root) == DRIVE_FIXED => DriveKind::Fixed,
+        // Only a drive-letter volume root (`X:\`) can have a reliable Recycle Bin; a volume that
+        // is merely mounted into a folder never qualifies, whatever its drive type.
+        Some(root) if is_drive_letter_root(&root) && drive_type_of(&root) == DRIVE_FIXED => {
+            DriveKind::Fixed
+        }
         _ => DriveKind::Removable,
     }
+}
+
+fn is_drive_letter_root(root: &str) -> bool {
+    let b = root.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && root[2..].chars().all(|c| c == '\\' || c == '/')
 }
 
 #[cfg(windows)]
@@ -850,10 +872,12 @@ mod tests {
         let local = tmp.path().to_string_lossy().into_owned();
         let b = local.as_bytes();
         if !(b.len() > 3 && b[1] == b':') {
+            eprintln!("SKIP: the temp dir is not on a drive-letter path");
             return;
         }
         let unc = format!(r"\\localhost\{}${}", b[0] as char, &local[2..]);
         let Ok(c) = canonical(&unc) else {
+            eprintln!("SKIP: the administrative share path was refused by canonical()");
             return;
         };
         match identity(&c) {
@@ -868,9 +892,52 @@ mod tests {
             Ok(RootIdentity::Network {
                 volume_serial: None,
                 ..
-            }) => eprintln!("administrative share not reachable for this user: skipped"),
+            }) => eprintln!("SKIP: the administrative share is not reachable for this user"),
             other => panic!("network identity expected, got {other:?}"),
         }
+    }
+
+    /// P2-1 (deterministic, no share needed): the openable path records the ids, an unopenable
+    /// or slow one records unknown, a non-folder is invalid.
+    #[test]
+    fn p2_1_unc_identity_paths_via_the_injected_opener() {
+        fn ok(_: &str) -> Result<FolderIds, RootError> {
+            Ok(FolderIds {
+                volume_serial: "0000000a".into(),
+                file_id: "b".repeat(32),
+                fs_name: "NTFS".into(),
+            })
+        }
+        fn gone(_: &str) -> Result<FolderIds, RootError> {
+            Err(RootError::NotFound)
+        }
+        fn not_a_folder(_: &str) -> Result<FolderIds, RootError> {
+            Err(RootError::Invalid)
+        }
+        fn hangs(_: &str) -> Result<FolderIds, RootError> {
+            std::thread::sleep(Duration::from_millis(1500));
+            Err(RootError::Io)
+        }
+        let unc = r"\\Nas\Share\x";
+        assert_eq!(
+            identity_unc_with(unc, ok).unwrap(),
+            RootIdentity::Network {
+                unc_prefix: r"\\nas\share".into(),
+                volume_serial: Some("0000000a".into()),
+                file_id: Some("b".repeat(32)),
+            }
+        );
+        let unknown = RootIdentity::Network {
+            unc_prefix: r"\\nas\share".into(),
+            volume_serial: None,
+            file_id: None,
+        };
+        assert_eq!(identity_unc_with(unc, gone).unwrap(), unknown);
+        assert_eq!(identity_unc_with(unc, hangs).unwrap(), unknown);
+        assert_eq!(
+            identity_unc_with(unc, not_a_folder),
+            Err(RootError::Invalid)
+        );
     }
 
     /// P2-2: `.`/`..`, empty, reserved and trailing-dot/space components of a path that does not
@@ -959,10 +1026,11 @@ mod tests {
             drive_kind_with(r"C:\Mount\USB\backup", volume_of, types),
             DriveKind::Removable
         );
-        // A mounted FIXED volume is fixed.
+        // A FIXED volume that is only mounted into a folder (volume root is not `X:\`) has no
+        // reliable Recycle Bin, so it is never eligible, whatever its drive type.
         assert_eq!(
             drive_kind_with(r"C:\Mount\USB\backup", volume_of, |_| FIXED),
-            DriveKind::Fixed
+            DriveKind::Removable
         );
         // No volume answer, network and unknown types fail closed.
         assert_eq!(
