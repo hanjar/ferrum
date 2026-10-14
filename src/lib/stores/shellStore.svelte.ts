@@ -4,9 +4,14 @@
  * the single place that turns structured IPC errors into honest dialogs;
  * components and registry actions never invoke the shell backend directly.
  */
-import { dialogs } from './dialogStore.svelte';
 import { activePane } from './panesRegistry.svelte';
-import { associateWith, openExternal, openTerminal, printFile } from '../ipc/shellOpen';
+import {
+  associateWith,
+  handleShellError,
+  openExternal,
+  openTerminal,
+  printFile,
+} from '../ipc/shellOpen';
 import { ui } from '../uiState.svelte';
 import { activity } from './activityStore.svelte';
 
@@ -86,8 +91,7 @@ class ShellStore {
 
   /** Shared error surfacing: structured FsErrors become honest dialogs. */
   private fail(title: string, e: unknown): void {
-    const message = e instanceof Error ? e.message : String(e);
-    dialogs.open({ kind: 'error', title, message });
+    handleShellError(title, e);
   }
 }
 

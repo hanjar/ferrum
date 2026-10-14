@@ -27,6 +27,7 @@ export type ErrorCode =
   | 'alreadyExists'
   | 'cancelled'
   | 'unsupported'
+  | 'busy'
   | 'io';
 
 /** The only error shape that crosses IPC. */

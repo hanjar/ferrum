@@ -6,6 +6,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { FsError } from './types';
 import { isInTauri } from './tauri';
+import { toast } from '../stores/toastStore.svelte';
+import { dialogs } from '../stores/dialogStore.svelte';
 
 /** Persisted per-OS terminal preference (`shell_open::TerminalPref`). */
 export type TerminalChoice = 'auto' | 'wt' | 'cmd' | 'powershell';
@@ -57,4 +59,36 @@ export function openTerminal(cwd: string, program: TerminalChoice = 'auto'): Pro
 /** Print via the associated application's print verb (F2-27). */
 export function printFile(path: string): Promise<void> {
   return launch('print_file', { path });
+}
+
+export type ShellErrorOutcome =
+  { kind: 'silent' } | { kind: 'toast'; message: string } | { kind: 'error'; message: string };
+
+/**
+ * FER-513 UI error mapping:
+ * - Cancelled: silent (user deliberately declined native confirmation)
+ * - Busy: toast "Konfirmasi lain masih terbuka" (another confirmation is open)
+ * - Other: honest error dialog
+ */
+export function mapShellError(err: unknown): ShellErrorOutcome {
+  if (err instanceof FsError) {
+    if (err.code === 'cancelled') {
+      return { kind: 'silent' };
+    }
+    if (err.code === 'busy') {
+      return { kind: 'toast', message: 'Konfirmasi lain masih terbuka' };
+    }
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return { kind: 'error', message };
+}
+
+export function handleShellError(title: string, err: unknown): void {
+  const mapped = mapShellError(err);
+  if (mapped.kind === 'silent') return;
+  if (mapped.kind === 'toast') {
+    toast.show(mapped.message);
+    return;
+  }
+  dialogs.open({ kind: 'error', title, message: mapped.message });
 }

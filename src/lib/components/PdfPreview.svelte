@@ -5,6 +5,7 @@
    * text. "Open in default app" (open_external, an explicit user action) stays available.
    */
   import { openExternal } from '../ipc/shellOpen';
+  import { FsError } from '../ipc/types';
   import { PDF_PREVIEW_MAX_BYTES } from '../preview/pdf';
   import { formatSize } from '../format';
   import PdfViewer from './PdfViewer.svelte';
@@ -25,6 +26,13 @@
     try {
       await openExternal(path);
     } catch (e) {
+      if (e instanceof FsError) {
+        if (e.code === 'cancelled') return;
+        if (e.code === 'busy') {
+          openError = 'Konfirmasi lain masih terbuka';
+          return;
+        }
+      }
       openError = e instanceof Error ? e.message : String(e);
     }
   }
