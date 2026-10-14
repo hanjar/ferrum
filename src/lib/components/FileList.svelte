@@ -16,12 +16,20 @@
   import { activity } from '../stores/activityStore.svelte';
   import { folderSizes } from '../stores/folderSizesStore.svelte';
   import { getAction, isEnabled, labelOf, runAction, shortcutLabel } from '../actions';
+  import ColumnResizeHandle from './ColumnResizeHandle.svelte';
+  import { columns as columnsStore } from '../stores/columnsStore.svelte';
   import {
     columnLayout,
     extensionText,
     displayName,
     DEFAULT_COLUMN_CONFIG,
+    DEFAULT_FILE_LIST_COLUMN_WIDTHS,
+    FILE_LIST_COLUMN_MINS,
+    FILE_LIST_COLUMN_MAX,
+    FILE_LIST_DEFAULT_COMMENT_WIDTH,
     type ColumnConfig,
+    type FileListColumnWidths,
+    type ResizableColumnId,
   } from '../columns';
 
   let {
@@ -35,6 +43,8 @@
     mode = 'full',
     /** F2-365 Custom Columns: visible columns + order for Full mode. */
     columns = DEFAULT_COLUMN_CONFIG,
+    /** FER-541: Optional column widths override / external state. */
+    columnWidths,
     /** F2-27 Comments view: extra comment column fed by the sidecar map. */
     showComments = false,
     comments,
@@ -43,6 +53,8 @@
     sortKey = 'name',
     sortDir = 1,
     onsort,
+    oncolumnwidthchange,
+    oncolumnwidthcommit,
     onlistkey,
     onlistfocus,
     onrowclick,
@@ -58,12 +70,15 @@
     notice?: string | null;
     mode?: 'brief' | 'full' | 'thumbnail';
     columns?: ColumnConfig;
+    columnWidths?: FileListColumnWidths;
     showComments?: boolean;
     comments?: Record<string, string>;
     viewportOverride?: number;
     sortKey?: 'name' | 'size' | 'modified' | 'extension' | 'unsorted';
     sortDir?: 1 | -1;
     onsort?: (key: 'name' | 'size' | 'modified' | 'extension') => void;
+    oncolumnwidthchange?: (col: ResizableColumnId, width: number) => void;
+    oncolumnwidthcommit?: (col: ResizableColumnId, width: number) => void;
     onlistkey?: (e: KeyboardEvent) => void;
     /** FER-489: the list container received focus (pane puts a cursor on a row). */
     onlistfocus?: () => void;
@@ -77,10 +92,72 @@
   const thumbnails = $derived(mode === 'thumbnail');
   // Comments column (F2-27) exists only in Full mode, like Size/Modified.
   const commentsView = $derived(showComments && !brief);
+
+  let commentHeadEl = $state<HTMLElement | undefined>();
+  let measuredCommentWidth = $state(FILE_LIST_DEFAULT_COMMENT_WIDTH);
+
+  $effect(() => {
+    const el = commentHeadEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        if (Number.isFinite(w) && w > 0) measuredCommentWidth = Math.round(w);
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  let dragWidths = $state<Partial<FileListColumnWidths>>({});
+
+  const liveWidths = $derived<FileListColumnWidths>({
+    ...columnsStore.widths,
+    ...columnWidths,
+    ...dragWidths,
+  });
+
+  function effectiveColWidth(col: ResizableColumnId): number {
+    if (col === 'comment') {
+      if (liveWidths.comment !== null) return liveWidths.comment;
+      const w = commentHeadEl?.getBoundingClientRect().width;
+      return w && Number.isFinite(w) && w > 0 ? Math.round(w) : measuredCommentWidth;
+    }
+    return liveWidths[col] ?? DEFAULT_FILE_LIST_COLUMN_WIDTHS[col] ?? 72;
+  }
+
+  function handleColChange(col: ResizableColumnId, width: number): void {
+    dragWidths = { ...dragWidths, [col]: width };
+    oncolumnwidthchange?.(col, width);
+  }
+
+  function handleColCommit(col: ResizableColumnId, width: number): void {
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+    columnsStore.setWidth(col, width);
+    oncolumnwidthcommit?.(col, width);
+  }
+
+  function handleColCancel(col: ResizableColumnId): void {
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+  }
+
+  function handleColReset(col: ResizableColumnId): void {
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+    columnsStore.resetWidth(col);
+  }
+
   // F2-365: Full mode renders the configured columns; the default config
   // reproduces the built-in Name/Size/Modified grid exactly.
   const layout = $derived(
-    brief || thumbnails ? null : columnLayout(columns, { comments: commentsView }),
+    brief || thumbnails
+      ? null
+      : columnLayout(columns, { comments: commentsView, widths: liveWidths }),
   );
 
   let bodyEl = $state<HTMLElement | undefined>();
@@ -299,12 +376,38 @@
           Name <span class="arrow">{sortKey === 'name' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
         </button>
       {:else if c.id === 'comment'}
-        <div class="hComment">Comment</div>
+        <div class="hComment" bind:this={commentHeadEl}>
+          <ColumnResizeHandle
+            label="Resize Comment column"
+            value={effectiveColWidth('comment')}
+            min={FILE_LIST_COLUMN_MINS.comment}
+            max={FILE_LIST_COLUMN_MAX}
+            step={16}
+            side="left"
+            onchange={(w) => handleColChange('comment', w)}
+            oncommit={(w) => handleColCommit('comment', w)}
+            oncancel={() => handleColCancel('comment')}
+            onreset={() => handleColReset('comment')}
+          />
+          Comment
+        </div>
       {:else}
         <button
           class={c.id === 'size' ? 'hSize' : c.id === 'extension' ? 'hExt' : 'hMod'}
           onclick={() => onsort?.(c.id as 'size' | 'extension' | 'modified')}
         >
+          <ColumnResizeHandle
+            label={`Resize ${c.label} column`}
+            value={effectiveColWidth(c.id as ResizableColumnId)}
+            min={FILE_LIST_COLUMN_MINS[c.id as ResizableColumnId]}
+            max={FILE_LIST_COLUMN_MAX}
+            step={16}
+            side="left"
+            onchange={(w) => handleColChange(c.id as ResizableColumnId, w)}
+            oncommit={(w) => handleColCommit(c.id as ResizableColumnId, w)}
+            oncancel={() => handleColCancel(c.id as ResizableColumnId)}
+            onreset={() => handleColReset(c.id as ResizableColumnId)}
+          />
           {#if c.id === 'size'}
             <span class="arrow">{sortKey === 'size' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
           {/if}
@@ -510,6 +613,7 @@
     grid-template-columns: minmax(0, 1fr) 72px 132px minmax(0, 1.6fr);
   }
   .head > button {
+    position: relative;
     border: 0;
     padding: 0;
     background: transparent;
@@ -637,6 +741,7 @@
     text-overflow: ellipsis;
   }
   .hComment {
+    position: relative;
     white-space: nowrap;
     overflow: hidden;
   }

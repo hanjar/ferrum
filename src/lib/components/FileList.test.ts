@@ -8,6 +8,11 @@ import { FsError } from '../ipc/types';
 import { registerPane, type PaneApi } from '../stores/panesRegistry.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
 import { contextMenu } from '../stores/contextMenuStore.svelte';
+import {
+  columns as columnsStore,
+  loadColumnConfig,
+  loadColumnWidths,
+} from '../stores/columnsStore.svelte';
 import { ui } from '../uiState.svelte';
 
 vi.mock('../ipc/mutations', () => ({
@@ -501,5 +506,234 @@ describe('inline rename', () => {
     expect(document.querySelector('.renameInput')).toBeNull();
     expect(renameEntry).not.toHaveBeenCalled();
     expect(contextMenu.isOpen).toBe(true);
+  });
+});
+
+describe('FileList column resize (FER-541)', () => {
+  beforeEach(() => {
+    columnsStore.resetAll();
+  });
+
+  it('drag handle Size changes grid-template-columns for header and rows', async () => {
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px');
+
+    const sizeBtn = container.querySelector('.hSize') as HTMLElement;
+    const handle = sizeBtn.querySelector('[role="separator"]') as HTMLElement;
+    expect(handle).toBeTruthy();
+
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    // Start drag at x = 200
+    fireEvent.pointerDown(handle, { button: 0, clientX: 200, pointerId: 1 });
+    // Move left to x = 172 (delta = -28). Because handle is on the left edge (side="left"),
+    // moving left increases width: 72 - (-28) = 100px.
+    fireEvent.pointerMove(handle, { clientX: 172, pointerId: 1 });
+    await tick();
+
+    // Live update changes grid-template-columns of header
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 100px 132px');
+
+    // And rows also reflect the new grid-template-columns
+    const row = container.querySelector('.row') as HTMLElement;
+    expect(row.style.gridTemplateColumns).toBe('minmax(0, 1fr) 100px 132px');
+
+    const upRow = container.querySelector('.upRow') as HTMLElement;
+    expect(upRow.style.gridTemplateColumns).toBe('minmax(0, 1fr) 100px 132px');
+  });
+
+  it('commit saves width through the existing persistence store', async () => {
+    const oncommit = vi.fn();
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      oncolumnwidthcommit: oncommit,
+    });
+
+    const sizeBtn = container.querySelector('.hSize') as HTMLElement;
+    const handle = sizeBtn.querySelector('[role="separator"]') as HTMLElement;
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 200, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 172, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 172, pointerId: 1 });
+    await tick();
+
+    expect(oncommit).toHaveBeenCalledWith('size', 100);
+    expect(columnsStore.widths.size).toBe(100);
+    // Persisted to localStorage under the existing customColumns key
+    const raw = globalThis.localStorage?.getItem('ferrum.customColumns.v1');
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw!);
+    expect(parsed.widths.size).toBe(100);
+  });
+
+  it('double click on handle resets to default width', async () => {
+    columnsStore.setWidth('size', 120);
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 120px 132px');
+
+    const sizeBtn = container.querySelector('.hSize') as HTMLElement;
+    const handle = sizeBtn.querySelector('[role="separator"]') as HTMLElement;
+
+    fireEvent.dblClick(handle);
+    await tick();
+
+    expect(columnsStore.widths.size).toBe(72);
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px');
+  });
+
+  it('respects column minimum and maximum bounds', async () => {
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    const sizeBtn = container.querySelector('.hSize') as HTMLElement;
+    const handle = sizeBtn.querySelector('[role="separator"]') as HTMLElement;
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    // Shrink size past minimum 56 (dragging right by 100px: 72 - 100 = -28 -> clamps to 56)
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 200, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 200, pointerId: 1 });
+    await tick();
+
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 56px 132px');
+    expect(columnsStore.widths.size).toBe(56);
+
+    // Expand size past maximum 2000 (dragging left by 3000px)
+    fireEvent.pointerDown(handle, { button: 0, clientX: 3000, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 0, pointerId: 1 });
+    await tick();
+
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 2000px 132px');
+    expect(columnsStore.widths.size).toBe(2000);
+  });
+
+  it('clicking and double clicking the resize handle does not trigger header sort', async () => {
+    const onsort = vi.fn();
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      onsort,
+    });
+
+    const sizeBtn = container.querySelector('.hSize') as HTMLElement;
+    const handle = sizeBtn.querySelector('[role="separator"]') as HTMLElement;
+
+    // Click handle: sort must NOT trigger
+    fireEvent.click(handle);
+    expect(onsort).not.toHaveBeenCalled();
+
+    // Double-click handle: sort must NOT trigger
+    fireEvent.dblClick(handle);
+    expect(onsort).not.toHaveBeenCalled();
+
+    // Click header button outside handle: sort DOES trigger
+    fireEvent.click(sizeBtn);
+    expect(onsort).toHaveBeenCalledWith('size');
+  });
+
+  it('loads default widths when legacy preference has no width field', () => {
+    globalThis.localStorage?.setItem(
+      'ferrum.customColumns.v1',
+      JSON.stringify(['name', 'extension', 'size', 'modified']),
+    );
+    columnsStore.config = loadColumnConfig();
+    columnsStore.widths = loadColumnWidths();
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      columns: columnsStore.config,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 72px 132px');
+  });
+
+  it('corrupted width values fall back to defaults', () => {
+    globalThis.localStorage?.setItem(
+      'ferrum.customColumns.v1',
+      JSON.stringify({
+        columns: ['name', 'size', 'modified'],
+        widths: { size: 'bogus', modified: -99 },
+      }),
+    );
+    columnsStore.config = loadColumnConfig();
+    columnsStore.widths = loadColumnWidths();
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      columns: columnsStore.config,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px');
+  });
+
+  it('handles resizable Comment column and resets to fractional unit', async () => {
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      showComments: true,
+    });
+    const head = container.querySelector('.head') as HTMLElement;
+    // Default Comment is fractional: minmax(0, 1.6fr)
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px minmax(0, 1.6fr)');
+
+    const commentDiv = container.querySelector('.hComment') as HTMLElement;
+    const handle = commentDiv.querySelector('[role="separator"]') as HTMLElement;
+    expect(handle).toBeTruthy();
+
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    // Drag comment handle left (expand by 50px from measured/default 200 -> 250px)
+    fireEvent.pointerDown(handle, { button: 0, clientX: 200, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 150, pointerId: 1 });
+    fireEvent.pointerUp(handle, { clientX: 150, pointerId: 1 });
+    await tick();
+
+    // Now comment is a fixed px width (250px)
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px 250px');
+    expect(columnsStore.widths.comment).toBe(250);
+
+    // Double-click resets back to null / minmax(0, 1.6fr)
+    fireEvent.dblClick(handle);
+    await tick();
+
+    expect(head.style.gridTemplateColumns).toBe('minmax(0, 1fr) 72px 132px minmax(0, 1.6fr)');
+    expect(columnsStore.widths.comment).toBeNull();
+  });
+
+  it('does not render column resize handles in brief or thumbnail mode', () => {
+    const { container: briefContainer } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      mode: 'brief',
+    });
+    expect(briefContainer.querySelectorAll('[role="separator"]').length).toBe(0);
+
+    const { container: thumbContainer } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      mode: 'thumbnail',
+    });
+    expect(thumbContainer.querySelectorAll('[role="separator"]').length).toBe(0);
   });
 });

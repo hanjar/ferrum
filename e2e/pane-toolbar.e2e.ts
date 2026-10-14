@@ -193,4 +193,36 @@ test.describe('pane toolbar + breadcrumb (FER-491)', () => {
     await page.waitForSelector('[data-path]', { state: 'attached', timeout: 10_000 });
     expect(await backY()).toBeGreaterThan((await addrY()) + 20);
   });
+
+  test('file list column resize: dragging Size handle resizes column and survives reload', async () => {
+    const head = pane().locator('.head');
+    await expect(head).toBeVisible();
+    const sizeHandle = head.locator('.hSize [role="separator"]');
+    await expect(sizeHandle).toBeVisible();
+
+    const initialTemplate = await head.evaluate((el) => el.style.gridTemplateColumns);
+    expect(initialTemplate).toContain('72px');
+
+    const box = await sizeHandle.boundingBox();
+    expect(box).not.toBeNull();
+
+    // Drag the handle to the left (by 30px) to widen Size column
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + box!.width / 2 - 30, box!.y + box!.height / 2, { steps: 5 });
+    await page.mouse.up();
+
+    // Template should reflect the increased width
+    const updatedTemplate = await head.evaluate((el) => el.style.gridTemplateColumns);
+    expect(updatedTemplate).not.toBe(initialTemplate);
+    expect(updatedTemplate).toContain('102px');
+
+    // Reload and verify persistence
+    await page.reload();
+    await page.waitForSelector('[data-path]', { state: 'attached', timeout: 10_000 });
+    const reloadedTemplate = await pane()
+      .locator('.head')
+      .evaluate((el) => el.style.gridTemplateColumns);
+    expect(reloadedTemplate).toContain('102px');
+  });
 });

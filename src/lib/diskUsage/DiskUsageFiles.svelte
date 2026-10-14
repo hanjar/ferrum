@@ -64,12 +64,28 @@
   // ── Column resize state (FER-540) ──────────────────────────────────────────
   let colWidths = $state<DuFilesColumnWidths>(loadDuFilesColumnWidths());
   let thElements = $state<Partial<Record<DuFilesCol, HTMLElement>>>({});
+  let measuredNameWidth = $state(DU_FILES_DEFAULT_NAME_WIDTH);
+
+  $effect(() => {
+    const el = thElements.name;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        if (Number.isFinite(w) && w > 0) {
+          measuredNameWidth = Math.round(w);
+        }
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
 
   function getEffectiveColWidth(col: DuFilesCol): number {
     if (col === 'name') {
       if (colWidths.name !== null) return colWidths.name;
       const w = thElements.name?.getBoundingClientRect().width;
-      return w && Number.isFinite(w) && w > 0 ? Math.round(w) : DU_FILES_DEFAULT_NAME_WIDTH;
+      return w && Number.isFinite(w) && w > 0 ? Math.round(w) : measuredNameWidth;
     }
     return colWidths[col];
   }
