@@ -254,7 +254,7 @@ pub fn walk_branch(
                 if !is_link {
                     stack.push(item.path()); // real directory: descend later
                 }
-                continue; // directories (and dir-links) are not listed
+                continue; // real directories are not listed
             }
             if total >= opts.max_entries {
                 truncated = true;
@@ -418,7 +418,14 @@ mod tests {
             return;
         }
         let result = list_branch(&s(&root), DEFAULT_MAX_ENTRIES).unwrap();
-        assert_eq!(paths(&result), vec!["outside.txt"]);
+        let mut names = paths(&result);
+        names.sort();
+        // `inside.txt` appears once (via `real`), never a second time via
+        // `link`; the dir link itself is listed as a symlink entry (D07).
+        assert_eq!(names, vec!["inside.txt", "link", "outside.txt"]);
+        let link_entry = result.entries.iter().find(|e| e.name == "link").unwrap();
+        assert!(link_entry.is_symlink);
+        assert!(!link_entry.is_dir);
         assert!(result.failed.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
@@ -434,8 +441,19 @@ mod tests {
             return;
         }
         let result = list_branch(&s(&root), DEFAULT_MAX_ENTRIES).unwrap();
-        // Exactly one file: the loop link is never descended into.
-        assert_eq!(paths(&result), vec!["f.txt"]);
+        // The loop link is listed but never descended into, so `f.txt`
+        // appears exactly once.
+        let mut names = paths(&result);
+        names.sort();
+        assert_eq!(names, vec!["f.txt", "up"]);
+        assert!(
+            result
+                .entries
+                .iter()
+                .find(|e| e.name == "up")
+                .unwrap()
+                .is_symlink
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

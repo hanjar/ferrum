@@ -8,7 +8,7 @@ use ferrum_ntfs_scan::mft::fixture::{
     FLAG_DIR, FLAG_IN_USE, MemVolume, data_resident, fref, name_attr, record, std_info_meta, volume,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 const ROOT: u64 = 5 | (5 << 48);
 const SERIAL: u64 = 0xABCD_1234;
@@ -1329,10 +1329,19 @@ fn served_snapshot_is_consistent_with_mode_changes() {
         }
     };
     let stop = Arc::new(AtomicBool::new(false));
-    let (s2, stop2) = (shared.clone(), stop.clone());
+    // The writer keeps switching until the reader has checked at least one
+    // served list concurrently (bounded by a deadline): on a fast runner the
+    // 20 000 switches could otherwise finish before the reader ever runs.
+    let checked = Arc::new(AtomicU64::new(0));
+    let (s2, stop2, checked2) = (shared.clone(), stop.clone(), checked.clone());
     let writer = std::thread::spawn(move || {
         let mut m = Mode::HighPerformance;
-        for _ in 0..20_000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut i = 0u64;
+        while i < 20_000
+            || (checked2.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline)
+        {
+            i += 1;
             m = if m == Mode::HighPerformance {
                 Mode::Shared
             } else {
@@ -1347,7 +1356,6 @@ fn served_snapshot_is_consistent_with_mode_changes() {
         }
         stop2.store(true, Ordering::SeqCst);
     });
-    let mut checked = 0u64;
     while !stop.load(Ordering::SeqCst) {
         let (list, epoch, mode) = shared.served();
         if let Some(v) = list.first() {
@@ -1355,11 +1363,11 @@ fn served_snapshot_is_consistent_with_mode_changes() {
             // The epoch read with it is the one that mode was set with:
             // a later switch would have bumped it and cleared the list.
             assert!(epoch <= shared.epoch());
-            checked += 1;
+            checked.fetch_add(1, Ordering::SeqCst);
         }
     }
     writer.join().unwrap();
-    assert!(checked > 0);
+    assert!(checked.load(Ordering::SeqCst) > 0);
 }
 
 // ── FER-477: change log (incremental sync) and freshness barrier ──────────
