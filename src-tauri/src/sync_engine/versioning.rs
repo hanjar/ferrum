@@ -169,12 +169,16 @@ impl VersionStore {
             .map_err(|e: ChainError| e.classify())?;
         let os = OsStr::new(name);
         let check = |size, ms| expect.matches(size, ms);
-        match env.mover.rename_into(src_parent, os, &dest, os, &check) {
-            Ok(true) => return Ok(Moved::Renamed),
-            Ok(false) => return Ok(Moved::Changed),
-            Err(MoveError::CrossDevice) => {}
-            Err(MoveError::Exists) => return Err(per_item(Reason::AlreadyExists)),
-            Err(MoveError::Publish(e)) => return Err(classify_publish(&e)),
+        // A cloud placeholder is copied (which reads and so hydrates its bytes) and then deleted;
+        // a rename would carry only the stub into the versions tree.
+        if !env.mover.needs_copy(src_parent, os) {
+            match env.mover.rename_into(src_parent, os, &dest, os, &check) {
+                Ok(true) => return Ok(Moved::Renamed),
+                Ok(false) => return Ok(Moved::Changed),
+                Err(MoveError::CrossDevice) => {}
+                Err(MoveError::Exists) => return Err(per_item(Reason::AlreadyExists)),
+                Err(MoveError::Publish(e)) => return Err(classify_publish(&e)),
+            }
         }
         self.copy_then_delete(
             side, src_parent, src_path, rel_parent, name, expect, &dest, env, cancel,

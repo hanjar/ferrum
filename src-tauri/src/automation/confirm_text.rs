@@ -120,6 +120,14 @@ pub fn run_prompt(
     guard: Option<GuardWarning<'_>>,
 ) -> Prompt {
     let mut lines: Vec<String> = Vec::new();
+    // SE-2.2: the text of a permanent delete starts with its warning; the guard follows.
+    if matches!(
+        policy.delete_policy,
+        crate::automation::model::DeletePolicy::Permanent
+    ) && deletes > 0
+    {
+        lines.push(PERMANENT_WARNING.to_string());
+    }
     if let Some(g) = &guard {
         lines.push(format!(
             "WARNING: this run deletes {} files ({} % of {}) - over the safety limit.",
@@ -127,13 +135,6 @@ pub fn run_prompt(
             g.percent,
             part(g.root)
         ));
-    }
-    if matches!(
-        policy.delete_policy,
-        crate::automation::model::DeletePolicy::Permanent
-    ) && deletes > 0
-    {
-        lines.push(PERMANENT_WARNING.to_string());
     }
     lines.push(format!(
         "Run sync profile \"{}\" now? {deletes} file{} will be deleted.",

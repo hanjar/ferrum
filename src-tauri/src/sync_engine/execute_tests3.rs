@@ -535,6 +535,105 @@ fn a_recycle_that_deleted_for_good_is_detected_and_stops_the_run() {
     }
 }
 
+// FAT/exFAT: the shell deletes classically, the name stays while the engine's probe is open.
+// The pending delete is detected, the run stops as recycle_bypassed, one file is affected.
+#[test]
+fn a_classic_pending_delete_is_detected_as_bypassed() {
+    let rig = Rig::new();
+    write(&rig.left.join("keep.txt"), b"k");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        write(&rig.right.join(n), b"x");
+    }
+    let profile = rig.profile(mirror(), DeletePolicy::RecycleBin);
+    let bin = FakeTrash::new(rig.base().join("bin"));
+    bin.classic.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut env = test_env();
+    env.trash = bin.clone();
+    let r = go(&rig, &profile, &env);
+    assert_eq!(status_of(&r, "a.txt"), OpStatus::Failed);
+    assert_eq!(reason_of(&r, "a.txt"), Some(Reason::RecycleBypassed));
+    assert_eq!(
+        bin.trashed.lock().unwrap().len(),
+        1,
+        "only one file was affected"
+    );
+    assert!(rig.right.join("b.txt").exists() && rig.right.join("c.txt").exists());
+    match &r.report.outcome {
+        EngineOutcome::Failed { error } | EngineOutcome::Partial { error, .. } => {
+            assert_eq!(error.code, "recycle_bypassed")
+        }
+        other => panic!("expected a stopped run, got {other:?}"),
+    }
+}
+
+/// Mover that reports every file as a cloud placeholder and refuses to rename.
+struct PlaceholderMover;
+
+impl Mover for PlaceholderMover {
+    fn rename_into(
+        &self,
+        _: &crate::archive_extract::publish::DirHandle,
+        _: &std::ffi::OsStr,
+        _: &crate::archive_extract::publish::DirHandle,
+        _: &std::ffi::OsStr,
+        _: crate::archive_extract::publish::FactsCheck<'_>,
+    ) -> Result<bool, MoveError> {
+        panic!("a cloud placeholder must not be renamed into the versions tree");
+    }
+
+    fn needs_copy(
+        &self,
+        _: &crate::archive_extract::publish::DirHandle,
+        _: &std::ffi::OsStr,
+    ) -> bool {
+        true
+    }
+}
+
+// A not-yet-downloaded cloud placeholder is versioned by copy-then-delete (the bytes are read),
+// never by renaming the stub.
+#[test]
+fn a_cloud_placeholder_is_versioned_by_copy_then_delete() {
+    let rig = Rig::new();
+    write(&rig.left.join("keep.txt"), b"k");
+    write(&rig.right.join("extra.txt"), b"cloud content");
+    let profile = rig.profile(mirror(), rig.versioning());
+    let mut env = test_env();
+    env.mover = Arc::new(PlaceholderMover);
+    let r = go(&rig, &profile, &env);
+    assert!(
+        matches!(r.report.outcome, EngineOutcome::Completed { .. }),
+        "{:?}",
+        r.report.outcome
+    );
+    assert!(!rig.right.join("extra.txt").exists());
+    assert_eq!(
+        read(
+            &rig.versions
+                .join("Right")
+                .join("2026-01-02 030405 #7")
+                .join("extra.txt")
+        ),
+        "cloud content"
+    );
+}
+
+// An ordinary local file is not a placeholder (no attribute set): the real check says so.
+#[test]
+fn a_local_file_is_not_an_offline_placeholder() {
+    let rig = Rig::new();
+    write(&rig.right.join("f.txt"), b"x");
+    let root = crate::archive_extract::publish::open_root(&rig.right).unwrap();
+    assert!(!crate::archive_extract::publish::is_offline_placeholder(
+        &root,
+        std::ffi::OsStr::new("f.txt")
+    ));
+    assert!(crate::archive_extract::publish::is_offline_placeholder(
+        &root,
+        std::ffi::OsStr::new("missing.txt")
+    ));
+}
+
 // SP-3.1: a volume whose bin is off (delete immediately, size 0, policy) or unreadable is
 // refused by the gate before any operation.
 #[test]

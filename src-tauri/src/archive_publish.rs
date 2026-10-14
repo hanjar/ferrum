@@ -623,6 +623,39 @@ impl Drop for FileProbe {
 
 #[cfg(windows)]
 impl FileProbe {
+    /// Is the object marked for deletion (a classic, non-POSIX delete on FAT/exFAT leaves the
+    /// name in place while a handle like this one is open)?
+    pub fn delete_pending(&self) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+        };
+        let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: valid handle; `info` is a writable out structure of the given size.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                self.handle,
+                FileStandardInfo,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+            )
+        };
+        // Unknown counts as pending: the caller treats it as "removed for good".
+        ok == 0 || info.DeletePending
+    }
+
+    /// File attributes of the object behind the handle.
+    pub fn attributes(&self) -> io::Result<u32> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: valid handle, writable out structure.
+        if unsafe { GetFileInformationByHandle(self.handle, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info.dwFileAttributes)
+    }
+
     /// Size and last-write time (unix ms) of the object behind the handle.
     pub fn facts(&self) -> io::Result<(u64, i64)> {
         handle_facts(self.handle)
@@ -647,6 +680,27 @@ impl FileProbe {
             buf.resize(n + 1, 0);
         }
     }
+}
+
+/// Is the file a cloud placeholder whose content is not on this machine (OneDrive Files
+/// On-Demand and the like: OFFLINE / RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS)? Reads attributes
+/// only; nothing is hydrated. Unknown answers `true` (fail safe: the caller then reads the bytes).
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn is_offline_placeholder(parent: &DirHandle, name: &OsStr) -> bool {
+    const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x4_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    match open_file_probe(parent, name).and_then(|p| p.attributes().map_err(PublishError::io)) {
+        Ok(attrs) => attrs & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0,
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn is_offline_placeholder(_parent: &DirHandle, _name: &OsStr) -> bool {
+    true
 }
 
 /// Open the file `name` below `parent` for observation (no-follow; a reparse point is

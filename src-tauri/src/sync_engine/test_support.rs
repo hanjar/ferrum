@@ -286,6 +286,9 @@ pub struct FakeTrash {
     pub fail: Mutex<Option<FsError>>,
     /// Behave like a shell that deletes for good instead of moving to the bin.
     pub nuke: std::sync::atomic::AtomicBool,
+    /// Behave like FAT/exFAT: a classic delete (disposition on a handle) that leaves the name in
+    /// place while another handle is open.
+    pub classic: std::sync::atomic::AtomicBool,
 }
 
 impl FakeTrash {
@@ -301,6 +304,7 @@ impl FakeTrash {
             trashed: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
             nuke: std::sync::atomic::AtomicBool::new(false),
+            classic: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -309,6 +313,11 @@ impl Trash for FakeTrash {
     fn trash_file(&self, path: &Path) -> Result<(), FsError> {
         if let Some(e) = self.fail.lock().unwrap().clone() {
             return Err(e);
+        }
+        if self.classic.load(Ordering::SeqCst) {
+            classic_delete(path)?;
+            self.trashed.lock().unwrap().push(path.to_path_buf());
+            return Ok(());
         }
         if self.nuke.load(Ordering::SeqCst) {
             fs::remove_file(path).map_err(FsError::from)?;
@@ -329,6 +338,45 @@ impl Trash for FakeTrash {
         let p = final_path.trim_start_matches(r"\?\").to_lowercase();
         p.starts_with(&self.bin.to_string_lossy().to_lowercase())
     }
+}
+
+/// Mark `path` for deletion the classic way (FileDispositionInfo) and close: the name stays
+/// until every other handle is closed.
+#[cfg(windows)]
+fn classic_delete(path: &Path) -> Result<(), FsError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    const DELETE: u32 = 0x0001_0000;
+    let f = fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(7)
+        .open(path)
+        .map_err(FsError::from)?;
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: valid handle; `info` outlives the call.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle() as _,
+            FileDispositionInfo,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(FsError::from(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn classic_delete(_path: &Path) -> Result<(), FsError> {
+    Err(FsError::new(
+        crate::domain::ErrorCode::Unsupported,
+        "windows only",
+    ))
 }
 
 /// Recycle Bin configuration that answers one fixed state.

@@ -304,6 +304,14 @@ impl Deleter<'_> {
                 .trash
                 .trash_file(path)
                 .map_err(|e| classify_fs(&e, false))?;
+            // A classic (non-POSIX) delete - FAT/exFAT volumes - keeps the name while our probe is
+            // open, but the object is gone for good as soon as it closes.
+            if probe.delete_pending() {
+                return Err(Classified {
+                    class: ErrorClass::Systemic,
+                    reason: Reason::RecycleBypassed,
+                });
+            }
             let original = path.to_string_lossy().to_lowercase();
             match probe.final_path() {
                 Some(p) if self.env.trash.is_in_bin(&p) => Ok(Removal::Done),

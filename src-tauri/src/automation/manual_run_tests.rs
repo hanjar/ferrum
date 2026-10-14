@@ -775,11 +775,11 @@ fn permanent_and_tripped_share_one_dialog() {
     )
     .unwrap();
     assert_eq!(asked.get(), 1);
+    assert!(text.borrow().starts_with(confirm_text::PERMANENT_WARNING));
     assert!(
         text.borrow()
-            .starts_with("WARNING: this run deletes 3 files")
+            .contains("WARNING: this run deletes 3 files (")
     );
-    assert!(text.borrow().contains(confirm_text::PERMANENT_WARNING));
     assert!(matches!(
         execute(&rig, run).outcome,
         EngineOutcome::Completed { .. }

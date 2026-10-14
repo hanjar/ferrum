@@ -276,6 +276,13 @@ pub trait Mover: Send + Sync {
         dst_name: &std::ffi::OsStr,
         check: publish::FactsCheck<'_>,
     ) -> Result<bool, MoveError>;
+
+    /// Must this file be moved by copy-then-delete instead of a rename? True for a cloud
+    /// placeholder whose bytes are not local: a rename would move only the stub out of the sync
+    /// root and leave the version unreadable, so the content is read (hydrated) and copied.
+    fn needs_copy(&self, parent: &DirHandle, name: &std::ffi::OsStr) -> bool {
+        publish::is_offline_placeholder(parent, name)
+    }
 }
 
 pub struct HandleMover;
