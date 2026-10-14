@@ -134,3 +134,43 @@ fn indexer_set_mode_intent_carries_only_the_mode() {
         .expect_err("a confirmed flag is not part of the AI wire");
     assert!(matches!(err, ContractError::InvalidEnvelope(_)), "{err:?}");
 }
+
+/// FER-513: The AI adapter surface has NO capability or path to `shell_open`, `open_external`,
+/// or executing arbitrary binaries. Any attempt to invoke execution or shell capabilities
+/// is rejected as an invalid envelope.
+#[test]
+fn ai_surface_has_no_path_to_shell_open_or_executable_execution() {
+    for capability in ALL_CAPABILITIES {
+        let lower = capability.to_ascii_lowercase();
+        assert!(
+            !lower.contains("shell")
+                && !lower.contains("open")
+                && !lower.contains("exec")
+                && !lower.contains("launch")
+                && !lower.contains("run"),
+            "AI capability {capability} must not expose execution or shell open"
+        );
+    }
+
+    for forbidden in [
+        "shell_open",
+        "shell.open",
+        "open_external",
+        "openExternal",
+        "launch_program",
+        "execute",
+        "run",
+    ] {
+        let envelope = json!({
+            "schemaVersion": 1,
+            "requestId": "req_1",
+            "intent": { "capability": forbidden, "path": "C:\\evil.exe" }
+        });
+        let err = parse_intent_offered(envelope, "req_1", &ALL_CAPABILITIES)
+            .expect_err("execution capabilities must be rejected");
+        assert!(
+            matches!(err, ContractError::InvalidEnvelope(_)),
+            "{forbidden}: {err:?}"
+        );
+    }
+}

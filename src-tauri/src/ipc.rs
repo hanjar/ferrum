@@ -1989,15 +1989,32 @@ fn fs_io(message: String) -> FsError {
 // ── Explicit OS file open (OpenAccepted receipt source) ─────────────────
 
 #[tauri::command]
-pub fn shell_open(
+pub async fn shell_open(
+    window: tauri::Window,
     path: String,
     record: Option<bool>,
     activity: State<'_, ActivityHandle>,
 ) -> Result<bool, FsError> {
     validate_path(&path)?;
-    // FER-467 R5: same allow-list as `open_external` (existing drive/UNC paths only).
-    let path = crate::shell_open::external_target(&path)?;
-    let accepted = shell_execute(&path)?;
+    let owner = window_hwnd(&window);
+    let path_clone = path.clone();
+    let accepted = spawn_blocking(move || {
+        crate::shell_open::shell_open_with(
+            owner,
+            &path_clone,
+            |o, text| {
+                crate::shell_open::native_confirm_with_guard(
+                    o,
+                    text,
+                    crate::shell_open::native_confirm,
+                )
+            },
+            shell_execute,
+        )
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))??;
+
     if shell_open_records(accepted, record) {
         // Receipt only after the OS accepted the request; failures are quiet.
         if let Ok(service) = activity_service_of(&activity) {
@@ -2790,9 +2807,10 @@ fn preview(
 
 /// Open a file or folder with its OS default association (F2-25).
 #[tauri::command]
-pub async fn open_external(path: String) -> Result<(), FsError> {
+pub async fn open_external(window: tauri::Window, path: String) -> Result<(), FsError> {
     validate_path(&path)?;
-    spawn_blocking(move || crate::shell_open::open_external(&path))
+    let owner = window_hwnd(&window);
+    spawn_blocking(move || crate::shell_open::open_external_in(owner, &path))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
 }

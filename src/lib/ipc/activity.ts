@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isInTauri } from './tauri';
+import { FsError } from './types';
 import type { MatchKind, ReasonCode } from '../activity/contract';
 
 export interface ActivityEntityDto {
@@ -239,7 +240,11 @@ export function onActivityChanged(cb: (state: ActivityStateDto) => void): Promis
  */
 export async function shellOpen(path: string, record: boolean): Promise<boolean> {
   if (!isInTauri()) return false;
-  return invoke<boolean>('shell_open', { path, record });
+  try {
+    return await invoke<boolean>('shell_open', { path, record });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
 }
 
 /**

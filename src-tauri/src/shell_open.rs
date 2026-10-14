@@ -240,7 +240,7 @@ impl LaunchVerb {
 }
 
 #[cfg(windows)]
-fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
+pub fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -267,7 +267,7 @@ fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
 }
 
 #[cfg(not(windows))]
-fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
+pub fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
     match verb {
         LaunchVerb::OpenAs | LaunchVerb::Print => Err(FsError::new(
             ErrorCode::Unsupported,
@@ -305,6 +305,12 @@ fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
 /// other `\\?\` / `\\.\` form (GLOBALROOT, volumes, devices) stays refused.
 pub fn external_target(path: &str) -> Result<String, FsError> {
     let unprefixed = strip_long_prefix(path);
+    if unprefixed
+        .chars()
+        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
+    {
+        return Err(refused_target());
+    }
     let checked = crate::path_guard::check_str(&unprefixed).map_err(|_| refused_target())?;
     if std::fs::symlink_metadata(&checked).is_err() {
         return Err(FsError::new(ErrorCode::NotFound, "File or path not found").with_path(&checked));
@@ -336,9 +342,241 @@ fn refused_target() -> FsError {
     )
 }
 
+/// Fixed list of executable and risky target file extensions (FER-513).
+/// Includes Windows default PATHEXT and additional script/executable types.
+pub const RISKY_EXTENSIONS: &[&str] = &[
+    // Windows default PATHEXT
+    "com",
+    "exe",
+    "bat",
+    "cmd",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msc",
+    // Additional risky extensions
+    "lnk",
+    "url",
+    "pif",
+    "scr",
+    "cpl",
+    "msi",
+    "msp",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "appref-ms",
+    "application",
+    "hta",
+    "ps1",
+    "psm1",
+    "psd1",
+    "reg",
+    "inf",
+    "jar",
+    "chm",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+    "scf",
+    "gadget",
+    "diagcab",
+    "vb",
+    "wsc",
+    "sct",
+    "xll",
+    "xlam",
+    "ppam",
+    "iqy",
+    "slk",
+    "website",
+];
+
+fn has_ads(path: &str) -> bool {
+    let p = strip_long_prefix(path);
+    let b = p.as_bytes();
+    let is_drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    if is_drive {
+        p[2..].contains(':')
+    } else {
+        p.contains(':')
+    }
+}
+
+/// FER-513: Pure function classifying whether a target path is an executable or risky file.
+/// Case-insensitive, trailing dots and spaces trimmed from file name.
+/// - Risky extension: Ok(true)
+/// - Normal document / no extension / folder: Ok(false)
+/// - ADS or format/bidi/control character: Err(InvalidPath)
+pub fn is_risky_target(path: impl AsRef<std::path::Path>) -> Result<bool, FsError> {
+    let p = path.as_ref();
+    let s = p.to_string_lossy();
+    if s.chars()
+        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
+    {
+        return Err(refused_target());
+    }
+    if has_ads(&s) {
+        return Err(refused_target());
+    }
+    if std::fs::symlink_metadata(p).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(false);
+    }
+    let file_name = match p.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return Ok(false),
+    };
+    let trimmed = file_name.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+    if let Some(dot_idx) = trimmed.rfind('.') {
+        let ext = &trimmed[dot_idx + 1..];
+        if ext.is_empty() {
+            return Ok(false);
+        }
+        let ext_lower = ext.to_ascii_lowercase();
+        if RISKY_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Text for the native confirmation dialog before launching risky targets.
+pub fn confirm_prompt_text(path: &str) -> String {
+    format!(
+        "Jalankan program ini?\n\n{path}\n\nProgram dapat mengubah sistem atau file Anda. Jalankan hanya jika Anda memercayai file ini."
+    )
+}
+
+static DIALOG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Guard ensuring only one native confirmation dialog is active at a time.
+#[derive(Debug)]
+pub struct DialogGuard;
+
+impl DialogGuard {
+    pub fn try_acquire() -> Result<Self, FsError> {
+        if DIALOG_ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            Ok(DialogGuard)
+        } else {
+            Err(FsError::new(
+                ErrorCode::Busy,
+                "Konfirmasi lain masih terbuka",
+            ))
+        }
+    }
+}
+
+impl Drop for DialogGuard {
+    fn drop(&mut self) {
+        DIALOG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn native_confirm_with_guard<F>(
+    owner: isize,
+    text: &str,
+    confirm_fn: F,
+) -> Result<bool, FsError>
+where
+    F: FnOnce(isize, &str) -> bool,
+{
+    let _guard = DialogGuard::try_acquire()?;
+    Ok(confirm_fn(owner, text))
+}
+
+#[cfg(windows)]
+pub fn native_confirm(owner: isize, text: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
+    };
+    let text_wide = to_wide(text);
+    let caption_wide = to_wide("Konfirmasi menjalankan program");
+    unsafe {
+        MessageBoxW(
+            owner as _,
+            text_wide.as_ptr(),
+            caption_wide.as_ptr(),
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        ) == IDOK
+    }
+}
+
+#[cfg(not(windows))]
+pub fn native_confirm(_owner: isize, _text: &str) -> bool {
+    false
+}
+
+/// Core launch function with injectable confirmation and launcher seams.
+pub fn shell_open_with<C, L>(
+    owner: isize,
+    path: &str,
+    confirm: C,
+    launcher: L,
+) -> Result<bool, FsError>
+where
+    C: FnOnce(isize, &str) -> Result<bool, FsError>,
+    L: FnOnce(&str) -> Result<bool, FsError>,
+{
+    let target = external_target(path)?;
+    let is_risky = is_risky_target(&target)?;
+    if is_risky {
+        let prompt_text = confirm_prompt_text(&target);
+        let confirmed = confirm(owner, &prompt_text)?;
+        if !confirmed {
+            return Err(
+                FsError::new(ErrorCode::Cancelled, "Operasi dibatalkan oleh pengguna")
+                    .with_path(&target),
+            );
+        }
+    }
+    launcher(&target)
+}
+
+/// Open a file or folder with injectable confirmation and launcher seams.
+pub fn open_external_with<C, L>(
+    owner: isize,
+    path: &str,
+    confirm: C,
+    launcher: L,
+) -> Result<(), FsError>
+where
+    C: FnOnce(isize, &str) -> Result<bool, FsError>,
+    L: FnOnce(LaunchVerb, &str) -> Result<(), FsError>,
+{
+    shell_open_with(owner, path, confirm, |target| {
+        launcher(LaunchVerb::Open, target).map(|_| true)
+    })
+    .map(|_| ())
+}
+
+/// Open a file or folder with its OS default association (window-bound).
+pub fn open_external_in(owner: isize, path: &str) -> Result<(), FsError> {
+    open_external_with(
+        owner,
+        path,
+        |o, text| native_confirm_with_guard(o, text, native_confirm),
+        shell_execute,
+    )
+}
+
 /// Open a file or folder with its OS default association.
 pub fn open_external(path: &str) -> Result<(), FsError> {
-    shell_execute(LaunchVerb::Open, &external_target(path)?)
+    open_external_in(0, path)
 }
 
 /// Quote one argument for a Windows command line (CommandLineToArgvW rules), so an argument with
@@ -424,7 +662,15 @@ pub fn associate_with(path: &str) -> Result<(), FsError> {
 
 /// Hand a file to its associated application's print verb (F2-27).
 pub fn print_file(path: &str) -> Result<(), FsError> {
-    shell_execute(LaunchVerb::Print, &external_target(path)?)
+    let target = external_target(path)?;
+    if is_risky_target(&target)? {
+        return Err(FsError::new(
+            ErrorCode::Unsupported,
+            "Printing executable or risky targets is not supported",
+        )
+        .with_path(&target));
+    }
+    shell_execute(LaunchVerb::Print, &target)
 }
 
 #[cfg(test)]
@@ -699,5 +945,207 @@ mod tests {
         assert_eq!(strip_long_prefix(r"\\?\UNC\srv\share\x"), r"\\srv\share\x");
         assert_eq!(strip_long_prefix(r"\\?\unc\srv\s"), r"\\srv\s");
         assert_eq!(strip_long_prefix(r"\\.\UNC\srv\s"), r"\\.\UNC\srv\s");
+    }
+
+    #[test]
+    fn test_is_risky_target_table() {
+        // Table test for all 47 risky extensions and their uppercase variants
+        for ext in RISKY_EXTENSIONS {
+            let lower = format!("run.{ext}");
+            assert!(
+                is_risky_target(&lower).unwrap(),
+                "expected {lower} to be risky"
+            );
+            let upper = format!("run.{}", ext.to_uppercase());
+            assert!(
+                is_risky_target(&upper).unwrap(),
+                "expected {upper} to be risky"
+            );
+        }
+
+        // Trailing dots and spaces stripped before checking
+        assert!(is_risky_target("run.exe.").unwrap());
+        assert!(is_risky_target("run.exe ").unwrap());
+        assert!(is_risky_target("run.exe...   ").unwrap());
+        assert!(is_risky_target("run.bat. . ").unwrap());
+
+        // Multi-dot filenames
+        assert!(is_risky_target("notes.txt.exe").unwrap());
+        assert!(!is_risky_target("archive.tar.gz").unwrap());
+        assert!(!is_risky_target("payload.exe.txt").unwrap());
+
+        // Ordinary documents and images
+        for safe in ["doc.pdf", "read.txt", "photo.png", "calc.xlsx", "doc.docx"] {
+            assert!(
+                !is_risky_target(safe).unwrap(),
+                "expected {safe} not to be risky"
+            );
+        }
+
+        // Files without extension
+        assert!(!is_risky_target("README").unwrap());
+        assert!(!is_risky_target(r"C:\tools\noext").unwrap());
+
+        // Directories (even if named with an extension)
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_risky_target(dir.path()).unwrap());
+        let folder_exe = dir.path().join("folder.exe");
+        std::fs::create_dir(&folder_exe).unwrap();
+        assert!(!is_risky_target(&folder_exe).unwrap());
+
+        // ADS is completely rejected
+        for ads in [
+            "file.txt:stream",
+            r"C:\dir\file.txt:stream",
+            r"\\server\share\file.txt:stream",
+            r"\\?\C:\dir\file.txt:stream",
+        ] {
+            let err = is_risky_target(ads).expect_err("ADS must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidPath, "{ads}");
+        }
+
+        // Bidi formatting and control characters are rejected
+        let bidi = "test\u{202E}exe.txt";
+        let err = is_risky_target(bidi).expect_err("bidi must be rejected");
+        assert_eq!(err.code, ErrorCode::InvalidPath);
+
+        let ctrl = "test\x07.exe";
+        let err = is_risky_target(ctrl).expect_err("control char must be rejected");
+        assert_eq!(err.code, ErrorCode::InvalidPath);
+    }
+
+    #[test]
+    fn test_shell_open_exe_declined_never_calls_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("program.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        let exe_str = exe.to_string_lossy().into_owned();
+
+        let asked = std::cell::Cell::new(false);
+        let launched = std::cell::Cell::new(false);
+
+        let res = shell_open_with(
+            0,
+            &exe_str,
+            |_owner, text| {
+                asked.set(true);
+                assert!(text.contains("Jalankan program ini?"));
+                assert!(text.contains(&exe_str));
+                Ok(false) // user cancelled
+            },
+            |_target| {
+                launched.set(true);
+                Ok(true)
+            },
+        );
+
+        assert_eq!(res.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(asked.get(), "confirmation must be asked");
+        assert!(
+            !launched.get(),
+            "launcher must NOT be called when user cancels"
+        );
+    }
+
+    #[test]
+    fn test_shell_open_exe_accepted_calls_launcher_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("program.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        let exe_str = exe.to_string_lossy().into_owned();
+
+        let asked = std::cell::Cell::new(false);
+        let launched_path = std::cell::RefCell::new(None);
+
+        let res = shell_open_with(
+            0,
+            &exe_str,
+            |_owner, text| {
+                asked.set(true);
+                assert!(text.contains("Jalankan program ini?"));
+                Ok(true) // user confirmed
+            },
+            |target| {
+                *launched_path.borrow_mut() = Some(target.to_string());
+                Ok(true)
+            },
+        );
+
+        assert!(res.unwrap());
+        assert!(asked.get(), "confirmation must be asked");
+        assert_eq!(
+            launched_path.borrow().as_deref(),
+            Some(exe_str.as_str()),
+            "launcher must be called with the target path"
+        );
+    }
+
+    #[test]
+    fn test_shell_open_pdf_no_confirm_calls_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("document.pdf");
+        std::fs::write(&pdf, b"%PDF").unwrap();
+        let pdf_str = pdf.to_string_lossy().into_owned();
+
+        let launched_path = std::cell::RefCell::new(None);
+
+        let res = shell_open_with(
+            0,
+            &pdf_str,
+            |_owner, _text| {
+                panic!("non-risky file must never trigger confirmation dialog");
+            },
+            |target| {
+                *launched_path.borrow_mut() = Some(target.to_string());
+                Ok(true)
+            },
+        );
+
+        assert!(res.unwrap());
+        assert_eq!(
+            launched_path.borrow().as_deref(),
+            Some(pdf_str.as_str()),
+            "launcher must be called directly for safe targets"
+        );
+    }
+
+    #[test]
+    fn test_shell_open_bidi_override_rejected_without_confirm_or_launcher() {
+        let bad_path = "C:\\tools\\evil\u{202E}txt.exe";
+        let res = shell_open_with(
+            0,
+            bad_path,
+            |_owner, _text| {
+                panic!("bidi path must never trigger confirmation dialog");
+            },
+            |_target| {
+                panic!("bidi path must never call launcher");
+            },
+        );
+
+        assert_eq!(res.unwrap_err().code, ErrorCode::InvalidPath);
+    }
+
+    #[test]
+    fn test_dialog_guard_busy_when_already_open() {
+        let guard1 = DialogGuard::try_acquire().expect("first acquire should succeed");
+        let err = DialogGuard::try_acquire().expect_err("second acquire must fail");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.message, "Konfirmasi lain masih terbuka");
+
+        drop(guard1);
+        let guard2 = DialogGuard::try_acquire().expect("subsequent acquire should succeed");
+        drop(guard2);
+    }
+
+    #[test]
+    fn test_print_file_risky_target_rejected_with_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("malicious.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        let exe_str = exe.to_string_lossy().into_owned();
+
+        let err = print_file(&exe_str).expect_err("print verb on risky target must fail");
+        assert_eq!(err.code, ErrorCode::Unsupported);
     }
 }
