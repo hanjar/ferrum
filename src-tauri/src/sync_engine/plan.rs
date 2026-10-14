@@ -77,6 +77,11 @@ pub struct SyncPlanItem {
     pub left_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_path: Option<String>,
+    /// For directory delete actions: indicates the directory should only be removed
+    /// if it is empty after all child operations have completed (`delete_if_empty: true`).
+    /// The executor (P0.2) MUST only call non-recursive `remove_dir` on this folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_if_empty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -183,36 +188,40 @@ pub fn classify_detailed(
                     reason: None,
                 };
             }
-            if let Some(base) = base {
-                let left_change = side_change(&base.left, Some(&left));
-                if left_change == SideChange::Changed {
-                    Classification {
+            // P1-1 + P1-2: SP-2.3 deletion propagation applies only to files (!is_dir).
+            // Folders are never deleted based on baseline facts, only removed if empty after children.
+            if !entry.is_dir {
+                if let Some(base) = base {
+                    let left_change = side_change(&base.left, Some(&left));
+                    if left_change == SideChange::Changed {
+                        return Classification {
+                            action: SyncAction::Conflict,
+                            reason: Some(SyncConflictReason::ModifyDelete),
+                        };
+                    } else if opts.propagate_deletes {
+                        // SP-2.3: right deleted, left unchanged -> delete left
+                        return Classification {
+                            action: SyncAction::DeleteLeft,
+                            reason: None,
+                        };
+                    } else {
+                        return Classification {
+                            action: SyncAction::Conflict,
+                            reason: Some(SyncConflictReason::DeletedRight),
+                        };
+                    }
+                } else if both && opts.propagate_deletes && trusted.is_none() {
+                    // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
+                    // If baseline is trusted and entry is new, it proceeds to CopyToRight below.
+                    return Classification {
                         action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::ModifyDelete),
-                    }
-                } else if opts.propagate_deletes {
-                    // SP-2.3: right deleted, left unchanged -> delete left
-                    Classification {
-                        action: SyncAction::DeleteLeft,
-                        reason: None,
-                    }
-                } else {
-                    Classification {
-                        action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::DeletedRight),
-                    }
+                        reason: Some(SyncConflictReason::NoBaseline),
+                    };
                 }
-            } else if both && opts.propagate_deletes {
-                // SP-2.3: two-way with propagate_deletes requires trusted baseline for deletions
-                Classification {
-                    action: SyncAction::Conflict,
-                    reason: Some(SyncConflictReason::NoBaseline),
-                }
-            } else {
-                Classification {
-                    action: SyncAction::CopyToRight,
-                    reason: None,
-                }
+            }
+            Classification {
+                action: SyncAction::CopyToRight,
+                reason: None,
             }
         }
         DirDiffState::RightOnly => {
@@ -226,35 +235,39 @@ pub fn classify_detailed(
                     reason: None,
                 };
             }
-            if let Some(base) = base {
-                let right_change = side_change(&base.right, Some(&right));
-                if right_change == SideChange::Changed {
-                    Classification {
+            // P1-1 + P1-2: SP-2.3 deletion propagation applies only to files (!is_dir).
+            if !entry.is_dir {
+                if let Some(base) = base {
+                    let right_change = side_change(&base.right, Some(&right));
+                    if right_change == SideChange::Changed {
+                        return Classification {
+                            action: SyncAction::Conflict,
+                            reason: Some(SyncConflictReason::ModifyDelete),
+                        };
+                    } else if opts.propagate_deletes {
+                        // SP-2.3: left deleted, right unchanged -> delete right
+                        return Classification {
+                            action: SyncAction::DeleteRight,
+                            reason: None,
+                        };
+                    } else {
+                        return Classification {
+                            action: SyncAction::Conflict,
+                            reason: Some(SyncConflictReason::DeletedLeft),
+                        };
+                    }
+                } else if both && opts.propagate_deletes && trusted.is_none() {
+                    // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
+                    // If baseline is trusted and entry is new, it proceeds to CopyToLeft below.
+                    return Classification {
                         action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::ModifyDelete),
-                    }
-                } else if opts.propagate_deletes {
-                    // SP-2.3: left deleted, right unchanged -> delete right
-                    Classification {
-                        action: SyncAction::DeleteRight,
-                        reason: None,
-                    }
-                } else {
-                    Classification {
-                        action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::DeletedLeft),
-                    }
+                        reason: Some(SyncConflictReason::NoBaseline),
+                    };
                 }
-            } else if both && opts.propagate_deletes {
-                Classification {
-                    action: SyncAction::Conflict,
-                    reason: Some(SyncConflictReason::NoBaseline),
-                }
-            } else {
-                Classification {
-                    action: SyncAction::CopyToLeft,
-                    reason: None,
-                }
+            }
+            Classification {
+                action: SyncAction::CopyToLeft,
+                reason: None,
             }
         }
         DirDiffState::NewerLeft => {
@@ -383,6 +396,12 @@ pub fn build_sync_plan(
                 class.action = SyncAction::Conflict;
                 class.reason = Some(SyncConflictReason::CaseCollision);
             }
+            let delete_if_empty = entry.is_dir
+                && matches!(
+                    class.action,
+                    SyncAction::DeleteRight | SyncAction::DeleteLeft
+                );
+
             SyncPlanItem {
                 name: entry.name.clone(),
                 state: entry.state,
@@ -392,6 +411,7 @@ pub fn build_sync_plan(
                 decision: None,
                 left_path: Some(format!("{}{sep}{rel}", report.left_root)),
                 right_path: Some(format!("{}{sep}{rel}", report.right_root)),
+                delete_if_empty,
             }
         })
         .collect()
@@ -485,10 +505,34 @@ pub fn describe_blockers(report: &CompareDirsReport) -> String {
 }
 
 pub fn describe_profile_blockers(report: &CompareDirsReport) -> String {
+    let mut parts = Vec::new();
     if report.truncated {
+        parts.push(PROFILE_CAP_BLOCKER_TEXT.to_string());
+    }
+    if report.cancelled {
+        parts.push("the comparison was cancelled, so the result is partial".to_string());
+    }
+    if !report.errors.is_empty() {
+        let count = report.errors.len();
+        let sample = report
+            .errors
+            .iter()
+            .take(3)
+            .map(|e| format!("{}: {}", e.name, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let suffix = if count > 3 { "; …" } else { "" };
+        let word = if count == 1 { "entry" } else { "entries" };
+        parts.push(format!(
+            "{count} {word} could not be read ({sample}{suffix})"
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else if parts.len() == 1 && report.truncated {
         PROFILE_CAP_BLOCKER_TEXT.to_string()
     } else {
-        describe_blockers(report)
+        format!("Synchronization blocked: {}.", parts.join("; "))
     }
 }
 
@@ -609,6 +653,7 @@ mod tests {
         blockers_description: String,
         is_stale: Option<bool>,
         is_stale_by_content: Option<bool>,
+        resolved_items: Option<Vec<SyncPlanItem>>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -619,6 +664,7 @@ mod tests {
         options: SyncOptions,
         baseline: Option<BaselineDto>,
         fresh_report: Option<CompareDirsReport>,
+        decisions: Option<HashMap<String, SyncDecision>>,
         expected: FixtureExpected,
     }
 
@@ -643,12 +689,64 @@ mod tests {
 
             let items = build_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref());
             assert_eq!(
-                items,
-                fix.expected.items,
-                "fixture items mismatch: {} ({})",
+                items.len(),
+                fix.expected.items.len(),
+                "fixture items count mismatch: {} ({})",
                 path.display(),
                 fix.name
             );
+
+            for (actual, expected) in items.iter().zip(&fix.expected.items) {
+                assert_eq!(
+                    actual.name,
+                    expected.name,
+                    "name mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.state,
+                    expected.state,
+                    "state mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.action,
+                    expected.action,
+                    "action mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.reason,
+                    expected.reason,
+                    "reason mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.is_dir,
+                    expected.is_dir,
+                    "is_dir mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.left_path,
+                    expected.left_path,
+                    "left_path mismatch in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    actual.right_path,
+                    expected.right_path,
+                    "right_path mismatch in {}",
+                    path.display()
+                );
+                if expected.delete_if_empty {
+                    assert!(
+                        actual.delete_if_empty,
+                        "delete_if_empty mismatch in {}",
+                        path.display()
+                    );
+                }
+            }
 
             assert_eq!(
                 plan_summary(&items),
@@ -691,6 +789,27 @@ mod tests {
                         path.display(),
                         fix.name
                     );
+                }
+            }
+
+            if let Some(ref decisions) = fix.decisions {
+                let resolved = apply_decisions(&items, decisions);
+                let expected_resolved = fix
+                    .expected
+                    .resolved_items
+                    .as_ref()
+                    .expect("resolved_items");
+                assert_eq!(
+                    resolved.len(),
+                    expected_resolved.len(),
+                    "resolved items count mismatch in {}",
+                    path.display()
+                );
+                for (actual, expected) in resolved.iter().zip(expected_resolved) {
+                    assert_eq!(actual.name, expected.name);
+                    assert_eq!(actual.action, expected.action);
+                    assert_eq!(actual.reason, expected.reason);
+                    assert_eq!(actual.decision, expected.decision);
                 }
             }
         }
@@ -819,5 +938,175 @@ mod tests {
             plan_no_prop[0].reason,
             Some(SyncConflictReason::DeletedLeft)
         );
+    }
+
+    #[test]
+    fn test_sp_2_3_folder_no_recursive_delete() {
+        // SP-2.3 folder: baseline contains A and A/x.txt.
+        // A is deleted on left, while A/x.txt is modified on right.
+        // Result must be modifyDelete for A/x.txt, and NO recursive delete on A.
+        let left_root = "C:\\Left";
+        let right_root = "D:\\Right";
+
+        let mut baseline_entries = std::collections::BTreeMap::new();
+        baseline_entries.insert(
+            "A".to_string(),
+            EntryDto {
+                left: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+                right: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+            },
+        );
+        baseline_entries.insert(
+            "A/x.txt".to_string(),
+            EntryDto {
+                left: FactsDto {
+                    size: 10,
+                    modified_ms: 1000,
+                },
+                right: FactsDto {
+                    size: 10,
+                    modified_ms: 1000,
+                },
+            },
+        );
+        let baseline = BaselineDto {
+            version: 1,
+            left_root: left_root.to_string(),
+            right_root: right_root.to_string(),
+            entries: baseline_entries,
+            journal: None,
+        };
+
+        let report = CompareDirsReport {
+            left_root: left_root.to_string(),
+            right_root: right_root.to_string(),
+            entries: vec![
+                DirDiffEntry {
+                    name: "A".to_string(),
+                    is_dir: true,
+                    state: DirDiffState::RightOnly,
+                    left_size: 0,
+                    left_modified_ms: 0,
+                    right_size: 0,
+                    right_modified_ms: 1000,
+                },
+                DirDiffEntry {
+                    name: "A/x.txt".to_string(),
+                    is_dir: false,
+                    state: DirDiffState::RightOnly,
+                    left_size: 0,
+                    left_modified_ms: 0,
+                    right_size: 20, // modified on right!
+                    right_modified_ms: 2000,
+                },
+            ],
+            truncated: false,
+            recursive: true,
+            cancelled: false,
+            errors: Vec::new(),
+            fast_scan: None,
+            journal: None,
+            incremental: None,
+        };
+
+        let opts = SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: true,
+        };
+        let plan = build_sync_plan(&report, &opts, Some(&baseline));
+
+        // A/x.txt has modifyDelete conflict
+        let file_item = plan.iter().find(|i| i.name == "A/x.txt").unwrap();
+        assert_eq!(file_item.action, SyncAction::Conflict);
+        assert_eq!(file_item.reason, Some(SyncConflictReason::ModifyDelete));
+
+        // Folder A is NOT planned for DeleteRight (no recursive deletion of A)
+        let folder_item = plan.iter().find(|i| i.name == "A").unwrap();
+        assert_ne!(folder_item.action, SyncAction::DeleteRight);
+        assert_eq!(folder_item.action, SyncAction::CopyToLeft);
+    }
+
+    #[test]
+    fn test_propagate_trusted_baseline_new_file_is_copy() {
+        // P2-1: two-way sync with propagate_deletes and trusted baseline:
+        // a new file (not in baseline) must produce CopyToRight or CopyToLeft, not conflict.
+        let left_root = "C:\\Left";
+        let right_root = "D:\\Right";
+
+        let mut baseline_entries = std::collections::BTreeMap::new();
+        baseline_entries.insert(
+            "existing.txt".to_string(),
+            EntryDto {
+                left: FactsDto {
+                    size: 10,
+                    modified_ms: 1000,
+                },
+                right: FactsDto {
+                    size: 10,
+                    modified_ms: 1000,
+                },
+            },
+        );
+        let baseline = BaselineDto {
+            version: 1,
+            left_root: left_root.to_string(),
+            right_root: right_root.to_string(),
+            entries: baseline_entries,
+            journal: None,
+        };
+
+        let report = CompareDirsReport {
+            left_root: left_root.to_string(),
+            right_root: right_root.to_string(),
+            entries: vec![
+                DirDiffEntry {
+                    name: "new_left.txt".to_string(),
+                    is_dir: false,
+                    state: DirDiffState::LeftOnly,
+                    left_size: 100,
+                    left_modified_ms: 1000,
+                    right_size: 0,
+                    right_modified_ms: 0,
+                },
+                DirDiffEntry {
+                    name: "new_right.txt".to_string(),
+                    is_dir: false,
+                    state: DirDiffState::RightOnly,
+                    left_size: 0,
+                    left_modified_ms: 0,
+                    right_size: 200,
+                    right_modified_ms: 1000,
+                },
+            ],
+            truncated: false,
+            recursive: true,
+            cancelled: false,
+            errors: Vec::new(),
+            fast_scan: None,
+            journal: None,
+            incremental: None,
+        };
+
+        let opts = SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: true,
+        };
+        let plan = build_sync_plan(&report, &opts, Some(&baseline));
+
+        let left_item = plan.iter().find(|i| i.name == "new_left.txt").unwrap();
+        assert_eq!(left_item.action, SyncAction::CopyToRight);
+        assert_eq!(left_item.reason, None);
+
+        let right_item = plan.iter().find(|i| i.name == "new_right.txt").unwrap();
+        assert_eq!(right_item.action, SyncAction::CopyToLeft);
+        assert_eq!(right_item.reason, None);
     }
 }

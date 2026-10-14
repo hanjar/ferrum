@@ -510,6 +510,22 @@ impl<'s> Prefetch<'s> {
         self.cv.notify_all();
     }
 
+    /// Queue `rel` on a specific side (only if source benefits).
+    pub fn request_side(&self, side: TreeSide, rel: &str) {
+        if !self.src(side).prefetchable() {
+            return;
+        }
+        let key = (side, rel.to_string());
+        let mut st = self.state.lock().expect("prefetch state");
+        if st.slots.contains_key(&key) {
+            return;
+        }
+        st.slots.insert(key.clone(), Slot::Queued);
+        st.queue.push_back(key);
+        drop(st);
+        self.cv.notify_all();
+    }
+
     /// The listing of `rel` on `side`: from the look-ahead when ready, else
     /// listed right here (stealing a queued item, or waiting for a running one).
     pub fn take(&self, side: TreeSide, rel: &str) -> io::Result<DirListing> {

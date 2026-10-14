@@ -1,0 +1,64 @@
+{
+  "name": "Stale plan detection by size change",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "file.txt",
+        "state": "same",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": null,
+  "freshReport": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "file.txt",
+        "state": "same",
+        "leftSize": 200,
+        "leftModifiedMs": 1000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "file.txt",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\file.txt",
+        "rightPath": "D:\\Right\\file.txt"
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 0,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": "",
+    "isStale": true,
+    "isStaleByContent": true
+  }
+}

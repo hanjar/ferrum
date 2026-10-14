@@ -3,11 +3,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  applyDecisions,
   buildSyncPlan,
   describeBlockers,
   isPlanStale,
   planSummary,
   syncPlanBlockers,
+  type SyncDecision,
   type SyncOptions,
   type SyncPlanItem,
   type PlanSummary,
@@ -21,6 +23,7 @@ interface SyncPlanFixture {
   options: SyncOptions;
   baseline: SyncBaseline | null;
   freshReport?: CompareDirsReport;
+  decisions?: Record<string, SyncDecision>;
   expected: {
     items: SyncPlanItem[];
     summary: PlanSummary;
@@ -28,6 +31,7 @@ interface SyncPlanFixture {
     blockersDescription: string;
     isStale?: boolean;
     isStaleByContent?: boolean;
+    resolvedItems?: SyncPlanItem[];
   };
 }
 
@@ -61,6 +65,11 @@ describe('syncPlan contract fixtures parity', () => {
             fixture.expected.isStaleByContent,
           );
         }
+      }
+
+      if (fixture.decisions && fixture.expected.resolvedItems) {
+        const resolved = applyDecisions(plan, fixture.decisions);
+        expect(resolved).toEqual(fixture.expected.resolvedItems);
       }
     });
   }

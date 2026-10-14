@@ -423,10 +423,28 @@ expected}`), read by a new vitest (`syncPlan.fixtures.test.ts`) against the TS i
   `compare_dirs` calls it with a no-op filter and `DIR_ENTRY_CAP` (behaviour unchanged, existing tests untouched).
 - `EntryFilter::visible(rel: &str, is_dir: bool) -> bool` is applied in the walker **before** an entry is recorded
   or descended, on both sides.
-- Glob matcher: hand-written (no new dependency), case-insensitive with Unicode simple case folding, `\` separator,
-  `*`, `?`, `**`, trailing `\` = directories only. Include list empty = include all.
+- Glob matcher: hand-written (no new dependency), case-insensitive with Unicode simple case folding (1:1 mapping only;
+  special multi-char case mappings like Turkish `İ` or Kelvin sign `\u{212A}` are handled safely), `\` or `/` accepted
+  as separators, `*`, `?`, `**`, trailing `\` or `/` = directories only.
+- Unanchored patterns (containing no separator) match basenames at any depth (gitignore style); patterns containing
+  a separator match root-relative paths. An include matching a directory recursively includes all of its contents.
+  Include list empty = include all.
+- Built-in exclusions: copy staging (`.*.ferrum-stage-*`, `.*.ferrum-backup-*`), recycle bins (`$RECYCLE.BIN`), and
+  System Volume Information (`System Volume Information`). `$RECYCLE.BIN` and System Volume Information are also
+  safely over-excluded at the root level if present as the top component.
+- Listing errors for items that are excluded by filter are ignored and not recorded as compare issues.
 - Profile runs use `entry_cap = 200_000` (aligned with `sync_baseline::MAX_ENTRIES`). Exceeding it is a blocker:
   outcome Failed "Too many items (more than 200,000) — narrow the profile with filters." (open question Q6).
+
+#### Profile plans never act on whole folders
+
+Profile sync plans must never copy or delete folders wholesale, because doing so could inadvertently transfer or destroy files that were meant to be excluded by profile filters:
+
+- In the profile path (`compare_dirs_filtered`), one-sided directories are always descended, regardless of whether filters or delete propagation are enabled. Children that pass filters are catalogued individually. All descended entries count toward the 200,000 cap.
+- **One-sided folder copy:** Handled as `mkdir` for the folder, followed by individual file copies for each visible descendant.
+- **One-sided folder delete:** Handled as individual file deletes for visible descendants, while the folder action is marked with `delete_if_empty: true`. The executor (P0.2) MUST only call `remove_dir` (non-recursive) on this folder. If excluded or untracked files remain inside it, the deletion fails safely without deleting any children.
+- **Deletion propagation (SP-2.3):** Applies strictly to files (`!is_dir`). Directories are never deleted based solely on baseline deletion facts; directories are only ever removed via the "empty after its children" rule.
+- If an entry name exists on both sides but has differing filter visibility (e.g., folder on left vs file on right matching a directory-only filter `foo\`), it is hidden on both sides (fail-safe) and produces 0 sync actions.
 
 ### 5.4 Execution
 

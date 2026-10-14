@@ -1,0 +1,61 @@
+{
+  "name": "Case collision check does not turn same entries into conflict",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "Readme.txt",
+        "state": "same",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 10,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "README.TXT",
+        "state": "same",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 10,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "Readme.txt",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\Readme.txt",
+        "rightPath": "D:\\Right\\Readme.txt"
+      },
+      {
+        "name": "README.TXT",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\README.TXT",
+        "rightPath": "D:\\Right\\README.TXT"
+      }
+    ],
+    "summary": {
+      "total": 2,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 0,
+      "skipped": 2,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

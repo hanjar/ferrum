@@ -1,4 +1,4 @@
-//! Profile filters and glob matcher (SP-4.2, SP-4.3, SP-4.4; design §5.3).
+//! Profile filters and glob matcher (SP-4.1, SP-4.2, SP-4.3, SP-4.4; design §5.3).
 //!
 //! Excluded entries are invisible to the comparison on both sides: never copied,
 //! never overwritten, never deleted. Excluded folders are never descended.
@@ -9,6 +9,11 @@
 use crate::compare::EntryFilter;
 use serde::{Deserialize, Serialize};
 
+/// Maximum allowed patterns per list (SP-4.2).
+pub const MAX_PATTERNS_PER_LIST: usize = 64;
+/// Maximum character length per pattern (SP-4.2).
+pub const MAX_PATTERN_CHARS: usize = 260;
+
 /// Profile filter patterns (include and exclude).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +22,56 @@ pub struct Filters {
     pub include: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+}
+
+/// Errors when validating filter pattern limits (SP-4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterError {
+    TooManyIncludePatterns(usize),
+    TooManyExcludePatterns(usize),
+    PatternTooLong { pattern: String, len: usize },
+}
+
+impl std::fmt::Display for FilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyIncludePatterns(n) => {
+                write!(
+                    f,
+                    "Too many include patterns ({n} > {MAX_PATTERNS_PER_LIST})"
+                )
+            }
+            Self::TooManyExcludePatterns(n) => {
+                write!(
+                    f,
+                    "Too many exclude patterns ({n} > {MAX_PATTERNS_PER_LIST})"
+                )
+            }
+            Self::PatternTooLong { pattern, len } => {
+                write!(
+                    f,
+                    "Filter pattern exceeds maximum length of {MAX_PATTERN_CHARS} characters ({len} chars): '{pattern}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FilterError {}
+
+/// Simple case folding per character (P3-2).
+/// Uses `to_lowercase()` if and only if the mapping produces exactly one character;
+/// otherwise preserves the character unchanged (e.g. Turkish `İ` remains `İ`).
+pub fn fold_char(c: char) -> char {
+    let mut it = c.to_lowercase();
+    match (it.next(), it.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
+}
+
+pub fn fold_str(s: &str) -> String {
+    s.chars().map(fold_char).collect()
 }
 
 /// Parsed single pattern for path matching.
@@ -34,10 +89,11 @@ impl Pattern {
     /// Syntax:
     /// - `*` matches 0 or more characters within one path component.
     /// - `?` matches 1 character within one path component.
-    /// - `**` matches 0 or more directory components.
-    /// - Trailing `\` matches directories only.
-    /// - Patterns containing `\` (or starting with `\`) are anchored to root.
-    /// - Patterns without `\` match either the basename or the full relative path.
+    /// - `**` matches 0 or more directory components. Consecutive `**` are collapsed (P2-3).
+    /// - Trailing `\` or `/` matches directories only.
+    /// - Patterns containing `\` or `/` are anchored to the root.
+    /// - Patterns without `\` or `/` match the basename at any depth (gitignore style, P3-1).
+    /// - Separators `/` and `\` are normalized interchangeably (P3-1).
     pub fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         let (pattern_no_dir, dir_only) = if trimmed.ends_with('\\') || trimmed.ends_with('/') {
@@ -46,20 +102,28 @@ impl Pattern {
             (trimmed, false)
         };
 
-        let (cleaned, anchored) =
-            if pattern_no_dir.starts_with('\\') || pattern_no_dir.starts_with('/') {
-                (&pattern_no_dir[1..], true)
-            } else if pattern_no_dir.contains('\\') || pattern_no_dir.contains('/') {
-                (pattern_no_dir, true)
-            } else {
-                (pattern_no_dir, false)
-            };
+        // P3-1: Pattern containing `\` or `/` is anchored to root; pattern without separator matches basename at any depth.
+        let anchored = trimmed.contains('\\') || trimmed.contains('/');
+        let cleaned = if pattern_no_dir.starts_with('\\') || pattern_no_dir.starts_with('/') {
+            &pattern_no_dir[1..]
+        } else {
+            pattern_no_dir
+        };
 
-        let segments: Vec<String> = cleaned
+        let raw_segs: Vec<String> = cleaned
             .split(['\\', '/'])
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_lowercase())
+            .map(fold_str)
             .collect();
+
+        // Collapse consecutive `**` segments (P2-3)
+        let mut segments = Vec::with_capacity(raw_segs.len());
+        for seg in raw_segs {
+            if seg == "**" && segments.last().map(|s: &String| s.as_str()) == Some("**") {
+                continue;
+            }
+            segments.push(seg);
+        }
 
         Self {
             raw: raw.to_string(),
@@ -78,7 +142,7 @@ impl Pattern {
         let path_segments: Vec<String> = rel_path
             .split(['\\', '/'])
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_lowercase())
+            .map(fold_str)
             .collect();
 
         let seg_refs: Vec<&str> = self.segments.iter().map(|s| s.as_str()).collect();
@@ -87,10 +151,9 @@ impl Pattern {
         if self.anchored {
             match_path_segments(&seg_refs, &path_refs)
         } else {
-            // Unanchored pattern (no slash): matches full path OR basename
-            match_path_segments(&seg_refs, &path_refs)
-                || (!path_refs.is_empty()
-                    && match_path_segments(&seg_refs, &path_refs[path_refs.len() - 1..]))
+            // Unanchored pattern (no slash): matches basename at any depth (gitignore style, P3-1)
+            !path_refs.is_empty()
+                && match_path_segments(&seg_refs, &path_refs[path_refs.len() - 1..])
         }
     }
 
@@ -122,23 +185,32 @@ fn prefix_could_lead(pattern_segs: &[&str], dir_segs: &[&str]) -> bool {
     false
 }
 
-/// Match path segments where `**` matches 0 or more segments.
+/// Match path segments using DP $O(P \cdot N)$ where `**` matches 0 or more segments (P2-3).
 fn match_path_segments(pattern_segs: &[&str], path_segs: &[&str]) -> bool {
-    if pattern_segs.is_empty() {
-        return path_segs.is_empty();
+    let n_len = path_segs.len();
+
+    let mut prev = vec![false; n_len + 1];
+    let mut curr = vec![false; n_len + 1];
+    prev[0] = true;
+
+    for &pat in pattern_segs {
+        curr.fill(false);
+        if pat == "**" {
+            curr[0] = prev[0];
+            for j in 1..=n_len {
+                curr[j] = prev[j] || curr[j - 1];
+            }
+        } else {
+            for j in 1..=n_len {
+                if prev[j - 1] && match_segment_str(pat, path_segs[j - 1]) {
+                    curr[j] = true;
+                }
+            }
+        }
+        std::mem::swap(&mut prev, &mut curr);
     }
-    if pattern_segs[0] == "**" {
-        // ** matches 0 segments, or 1 segment and continues
-        return match_path_segments(&pattern_segs[1..], path_segs)
-            || (!path_segs.is_empty() && match_path_segments(pattern_segs, &path_segs[1..]));
-    }
-    if path_segs.is_empty() {
-        return false;
-    }
-    if match_segment_str(pattern_segs[0], path_segs[0]) {
-        return match_path_segments(&pattern_segs[1..], &path_segs[1..]);
-    }
-    false
+
+    prev[n_len]
 }
 
 /// Match a single path component using `*` (0+ chars) and `?` (1 char).
@@ -186,7 +258,7 @@ pub fn is_builtin_exclude(rel: &str) -> bool {
         }
     }
 
-    // At volume root: $RECYCLE.BIN and System Volume Information
+    // At volume root (or first relative segment): $RECYCLE.BIN and System Volume Information
     if rel.split(['\\', '/']).next().is_some_and(|first| {
         first.eq_ignore_ascii_case("$RECYCLE.BIN")
             || first.eq_ignore_ascii_case("System Volume Information")
@@ -205,22 +277,40 @@ pub struct ProfileFilter {
 }
 
 impl ProfileFilter {
-    pub fn new(include: &[String], exclude: &[String]) -> Self {
-        Self {
-            include: include
-                .iter()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| Pattern::parse(s))
-                .collect(),
-            exclude: exclude
-                .iter()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| Pattern::parse(s))
-                .collect(),
+    /// Create a new profile filter enforcing SP-4.2 limits (<= 64 patterns, <= 260 chars).
+    pub fn new(include: &[String], exclude: &[String]) -> Result<Self, FilterError> {
+        let non_empty_inc: Vec<&String> = include.iter().filter(|s| !s.trim().is_empty()).collect();
+        if non_empty_inc.len() > MAX_PATTERNS_PER_LIST {
+            return Err(FilterError::TooManyIncludePatterns(non_empty_inc.len()));
         }
+        let non_empty_exc: Vec<&String> = exclude.iter().filter(|s| !s.trim().is_empty()).collect();
+        if non_empty_exc.len() > MAX_PATTERNS_PER_LIST {
+            return Err(FilterError::TooManyExcludePatterns(non_empty_exc.len()));
+        }
+
+        for &p in non_empty_inc.iter().chain(non_empty_exc.iter()) {
+            let char_count = p.chars().count();
+            if char_count > MAX_PATTERN_CHARS {
+                return Err(FilterError::PatternTooLong {
+                    pattern: p.clone(),
+                    len: char_count,
+                });
+            }
+        }
+
+        Ok(Self {
+            include: non_empty_inc
+                .into_iter()
+                .map(|s| Pattern::parse(s))
+                .collect(),
+            exclude: non_empty_exc
+                .into_iter()
+                .map(|s| Pattern::parse(s))
+                .collect(),
+        })
     }
 
-    pub fn from_filters(filters: &Filters) -> Self {
+    pub fn from_filters(filters: &Filters) -> Result<Self, FilterError> {
         Self::new(&filters.include, &filters.exclude)
     }
 
@@ -231,36 +321,49 @@ impl ProfileFilter {
 
 impl EntryFilter for ProfileFilter {
     fn visible(&self, rel: &str, is_dir: bool) -> bool {
-        // Built-in excludes always apply
+        // Built-in excludes always apply (SP-4.4)
         if is_builtin_exclude(rel) {
             return false;
         }
 
-        // Exclude list
+        // Exclude list (SP-4.3)
         for p in &self.exclude {
             if p.matches(rel, is_dir) {
                 return false;
             }
         }
 
-        // Include list
+        // Include list (SP-4.3)
         if self.include.is_empty() {
             return true;
         }
 
-        if !is_dir {
-            self.include.iter().any(|p| p.matches(rel, false))
-        } else {
-            let dir_segments: Vec<String> = rel
-                .split(['\\', '/'])
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_lowercase())
-                .collect();
-            let seg_refs: Vec<&str> = dir_segments.iter().map(|s| s.as_str()).collect();
+        // Direct match with include pattern
+        if self.include.iter().any(|p| p.matches(rel, is_dir)) {
+            return true;
+        }
 
-            self.include
-                .iter()
-                .any(|p| p.matches(rel, true) || p.could_contain(&seg_refs))
+        let segments: Vec<String> = rel
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty())
+            .map(fold_str)
+            .collect();
+
+        // P2-6: include matching a folder recursively includes all its contents.
+        // Check if any ancestor directory matches an include pattern (as a directory).
+        for prefix_len in 1..segments.len() {
+            let ancestor_rel = segments[..prefix_len].join("/");
+            if self.include.iter().any(|p| p.matches(&ancestor_rel, true)) {
+                return true;
+            }
+        }
+
+        // For directories, also keep visible if an include pattern could match inside (descend).
+        if is_dir {
+            let seg_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+            self.include.iter().any(|p| p.could_contain(&seg_refs))
+        } else {
+            false
         }
     }
 }
@@ -268,16 +371,17 @@ impl EntryFilter for ProfileFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_builtin_excludes() {
-        // Staging and backup files
+        // SP-4.4: Staging and backup files
         assert!(is_builtin_exclude(".file.txt.ferrum-stage-1234-1"));
         assert!(is_builtin_exclude(r"sub\dir\.file.txt.ferrum-stage-1234-1"));
         assert!(is_builtin_exclude(".data.ferrum-backup-5678-0"));
         assert!(!is_builtin_exclude("normal.txt"));
 
-        // Volume root special folders
+        // SP-4.4: Volume root special folders
         assert!(is_builtin_exclude("$RECYCLE.BIN"));
         assert!(is_builtin_exclude(r"$recycle.bin\sub"));
         assert!(is_builtin_exclude("System Volume Information"));
@@ -287,16 +391,19 @@ mod tests {
 
     #[test]
     fn test_glob_wildcards() {
+        // SP-4.1: * wildcard
         let p_star = Pattern::parse("*.tmp");
         assert!(p_star.matches("test.tmp", false));
         assert!(p_star.matches(r"sub\test.tmp", false));
         assert!(!p_star.matches("test.txt", false));
 
+        // SP-4.1: ? wildcard
         let p_question = Pattern::parse("file?.txt");
         assert!(p_question.matches("file1.txt", false));
         assert!(p_question.matches("fileA.txt", false));
         assert!(!p_question.matches("file12.txt", false));
 
+        // SP-4.1: ** wildcard
         let p_globstar = Pattern::parse(r"docs\**\*.md");
         assert!(p_globstar.matches(r"docs\readme.md", false));
         assert!(p_globstar.matches(r"docs\sub\section\page.md", false));
@@ -305,15 +412,21 @@ mod tests {
 
     #[test]
     fn test_trailing_slash_folders_only() {
+        // SP-4.2: Trailing slash matches folders only
         let p_dir = Pattern::parse(r"node_modules\");
         assert!(p_dir.matches("node_modules", true));
-        assert!(p_dir.matches(r"project\node_modules", true));
         assert!(!p_dir.matches("node_modules", false)); // not a dir
-        assert!(!p_dir.matches(r"project\node_modules", false));
+
+        // P3-1: Trailing slash with ** matches folder at any depth
+        let p_glob_dir = Pattern::parse(r"**\node_modules\");
+        assert!(p_glob_dir.matches("node_modules", true));
+        assert!(p_glob_dir.matches(r"project\node_modules", true));
+        assert!(!p_glob_dir.matches(r"project\node_modules", false));
     }
 
     #[test]
     fn test_case_insensitivity_non_ascii() {
+        // SP-4.2: Case-insensitive matching with non-ASCII
         let p = Pattern::parse(r"Über\*.TXT");
         assert!(p.matches(r"über\notes.txt", false));
         assert!(p.matches(r"ÜBER\DOC.TXT", false));
@@ -321,11 +434,122 @@ mod tests {
     }
 
     #[test]
+    fn test_case_folding_turkish_i_and_kelvin() {
+        // P3-2: Turkish capital I with dot above ('İ', \u{0130}) produces 2 code points in lowercase.
+        // It must NOT be mapped to 2 code points; it is kept as 'İ'.
+        assert_eq!(fold_char('İ'), 'İ');
+
+        // P3-2: Kelvin sign ('\u{212A}', K) lowercases to exactly one character ('k').
+        assert_eq!(fold_char('\u{212A}'), 'k');
+
+        let pat_kelvin = Pattern::parse("\u{212A}.txt");
+        assert!(pat_kelvin.matches("k.txt", false));
+        assert!(pat_kelvin.matches("K.txt", false));
+
+        let pat_turkish = Pattern::parse("İ.txt");
+        assert!(pat_turkish.matches("İ.txt", false));
+        assert!(!pat_turkish.matches("i.txt", false));
+    }
+
+    #[test]
+    fn test_benchmark_fifty_globstars_depth_200() {
+        // P2-3: 50x `**\` against path 200 levels deep must execute in < 50 ms in debug build.
+        let mut raw_pat = String::new();
+        for _ in 0..50 {
+            raw_pat.push_str(r"**\");
+        }
+        raw_pat.push_str("target.txt");
+        let pat = Pattern::parse(&raw_pat);
+
+        // Path of depth 200
+        let mut path_components = Vec::with_capacity(200);
+        for i in 0..199 {
+            path_components.push(format!("folder_{i}"));
+        }
+        path_components.push("target.txt".to_string());
+        let full_path = path_components.join(r"\");
+
+        let start = Instant::now();
+        let matched = pat.matches(&full_path, false);
+        let elapsed = start.elapsed();
+
+        assert!(matched, "pattern must match target at depth 200");
+        assert!(
+            elapsed.as_millis() < 50,
+            "50x globstars took too long: {} ms (must be < 50 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_filter_limits_sp_4_2() {
+        // SP-4.2: <= 64 patterns
+        let max_patterns: Vec<String> = (0..64).map(|i| format!("*.tmp{i}")).collect();
+        assert!(ProfileFilter::new(&max_patterns, &[]).is_ok());
+        assert!(ProfileFilter::new(&[], &max_patterns).is_ok());
+
+        let too_many: Vec<String> = (0..65).map(|i| format!("*.tmp{i}")).collect();
+        assert!(matches!(
+            ProfileFilter::new(&too_many, &[]),
+            Err(FilterError::TooManyIncludePatterns(65))
+        ));
+        assert!(matches!(
+            ProfileFilter::new(&[], &too_many),
+            Err(FilterError::TooManyExcludePatterns(65))
+        ));
+
+        // SP-4.2: <= 260 characters per pattern
+        let ok_pattern = "a".repeat(260);
+        assert!(ProfileFilter::new(&[ok_pattern], &[]).is_ok());
+
+        let too_long_pattern = "a".repeat(261);
+        assert!(matches!(
+            ProfileFilter::new(&[too_long_pattern], &[]),
+            Err(FilterError::PatternTooLong { len: 261, .. })
+        ));
+    }
+
+    #[test]
+    fn test_include_folder_recursively_includes_contents_p2_6() {
+        // P2-6: include matching a folder also covers all its contents recursively
+        let filter = ProfileFilter::new(&[r"docs\".to_string()], &[]).unwrap();
+
+        assert!(filter.visible("docs", true));
+        assert!(filter.visible(r"docs\readme.txt", false));
+        assert!(filter.visible(r"docs\specs\arch.pdf", false));
+        assert!(!filter.visible("photos", true));
+        assert!(!filter.visible(r"photos\pic.jpg", false));
+    }
+
+    #[test]
+    fn test_unanchored_matches_basename_any_depth_p3_1() {
+        // P3-1: pattern without slash matches basename at any depth (gitignore style)
+        let pat_unanchored = Pattern::parse("*.log");
+        assert!(pat_unanchored.matches("server.log", false));
+        assert!(pat_unanchored.matches(r"app\logs\server.log", false));
+
+        // Pattern with slash is anchored to root
+        let pat_anchored = Pattern::parse(r"logs\*.log");
+        assert!(pat_anchored.matches(r"logs\server.log", false));
+        assert!(!pat_anchored.matches(r"sub\logs\server.log", false));
+    }
+
+    #[test]
+    fn test_slash_separator_p3_1() {
+        // P3-1: / accepted as separator
+        let pat = Pattern::parse("docs/spec/*.md");
+        assert!(pat.matches(r"docs\spec\design.md", false));
+        assert!(pat.matches("docs/spec/design.md", false));
+    }
+
+    #[test]
     fn test_include_exclude_interplay() {
+        // SP-4.3: Interplay of include and exclude
         let filter = ProfileFilter::new(
             &["*.txt".to_string(), r"docs\**".to_string()],
             &["secret.txt".to_string(), r"docs\private\**".to_string()],
-        );
+        )
+        .unwrap();
 
         // Files
         assert!(filter.visible("readme.txt", false));
