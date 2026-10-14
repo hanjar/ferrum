@@ -1,10 +1,14 @@
-//! Sync engine core modules: plan, settle, and filters (P0.1).
+//! Sync engine for stored Sync Profiles (Automation design §5).
 //!
-//! Pure planning and baseline reconciliation code with TypeScript parity,
-//! plus profile filters and cap controls for directory compare.
+//! - [`plan`], [`settle`] and [`filters`] (P0.1): pure planning and baseline reconciliation code
+//!   with TypeScript parity, plus profile filters and cap controls for directory compare.
+//! - [`roots`] (P0.3): root canonicalization, identity and readiness probes (§5.8).
+//!
+//! The execution pipeline arrives in its own work package as a separate module of this tree.
 
 pub mod filters;
 pub mod plan;
+pub mod roots;
 pub mod settle;
 
 pub use filters::{FilterError, Filters, ProfileFilter, is_builtin_exclude};

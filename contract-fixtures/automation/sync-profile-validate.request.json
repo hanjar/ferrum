@@ -1,0 +1,18 @@
+{
+  "draft": {
+    "name": "Projects backup",
+    "left": "C:\\Users\\you\\Projects",
+    "right": "E:\\Backups\\Projects",
+    "mode": "oneWay",
+    "from": "left",
+    "deletePolicy": "recycleBin",
+    "compare": "sizeAndDate",
+    "include": [],
+    "exclude": ["*.tmp"],
+    "guard": {
+      "enabled": true,
+      "maxCount": 50,
+      "maxPercent": 20
+    }
+  }
+}

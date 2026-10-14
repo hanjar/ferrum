@@ -165,7 +165,9 @@ The runner treats controls as requests subject to the same gate as any trigger; 
 With `FERRUM_PROFILE_DIR=<dir>`, the store is `<dir>\local\automation\` (new `profile::local_data_dir()` and
 `profile::resolve_local_data_dir()` for code without an `AppHandle`). The runner resolves known folders with
 `SHGetKnownFolderPath` and the identifier `dev.ferrum.app`, matching Tauri's resolution; a unit test asserts both
-resolve to the same directory.
+resolve to the same directory. Resolution uses the Known Folder API only: if it fails there is no fallback to the
+temp dir or the environment, and the store is `store_unavailable` (the `LOCALAPPDATA` variable is used by tests solely
+as a cross-check).
 
 The store opens only if the `automation` directory and `automation.db` are not reparse points (fail closed with
 `store_untrusted`).
@@ -530,7 +532,20 @@ engine path; the Tauri command `sync_baseline_save` looks up a manual lease of t
 3. Existing directory → `GetFinalPathNameByHandleW` (handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, following
    junctions), strip `\\?\` / `\\?\UNC\`, uppercase the drive letter.
 4. Identity: `GetVolumeInformationByHandleW` + `GetFileInformationByHandleEx(FileIdInfo)`; network roots record the
-   lowercase `\\host\share` prefix only.
+   lowercase `\\host\share` prefix plus the same ids when the share can be opened.
+5. A folder that does not exist yet (a versioning root) is anchored at the real path of its nearest existing ancestor;
+   `.`/`..`, empty, reserved-device and trailing-dot/space components are refused, as are control and format
+   (bidi) characters anywhere.
+6. Drive kind comes from the VOLUME: `GetVolumePathNameW` then `GetDriveTypeW` on that root. Recycle Bin is allowed
+   only when the volume root is a drive-letter root (`X:\`) and the type is `DRIVE_FIXED`; a volume merely mounted
+   into a folder never qualifies (fail closed, SP-3.1).
+
+**Network roots, intentionally.** Every network I/O step (final path, folder open) has a 900 ms budget so two steps fit
+the 2 s readiness budget, and at most 8 timed-out workers may linger (further work is refused at once). A root that
+cannot be opened is accepted at save time with an UNVERIFIED identity (no ids) and is never Ready: readiness reasons
+`rootOffline` (cannot be opened now; a slow NAS therefore reads as offline and the user can Recheck) and
+`identityUnknown` (saved while offline, not verified since). **The P0.5 UI must map both reasons**, together with
+`rootMissing | identityMismatch | recycleBinUnavailable | versioningRootInvalid | profileInvalid`.
 
 Overlap = equal or component-prefix, compared with `CompareStringOrdinal(..., bIgnoreCase=TRUE)`.
 
@@ -604,7 +619,7 @@ UUID v4 text and are validated with a strict regex before any lookup. String lim
 of derived data. Every command is covered by a contract fixture in `contract-fixtures/automation/`.
 
 Error codes (closed set): `invalid_input`, `not_found`, `stale`, `in_use`, `needs_review`, `needs_attention`,
-`not_ready`, `held`, `lease_busy`, `lease_required`, `store_unavailable`, `store_untrusted`, `store_read_only`,
+`not_ready`, `held`, `busy` (another native confirmation dialog is open: nothing is shown or saved), `lease_busy`, `lease_required`, `store_unavailable`, `store_untrusted`, `store_read_only`,
 `runtime_unavailable`, `register_failed`, `canceled` (only where noted; most user cancels are a normal result).
 
 ### 7.1 Sync profiles (P0)

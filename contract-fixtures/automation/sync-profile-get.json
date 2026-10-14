@@ -1,0 +1,66 @@
+{
+  "id": "3f2a9c1e-5b6d-4c8a-9e0f-1a2b3c4d5e6f",
+  "name": "Photos to NAS",
+  "revision": 4,
+  "policy": {
+    "left": "D:\\Photos",
+    "right": "\\\\nas\\photos",
+    "mode": "mirror",
+    "from": "left",
+    "deletePolicy": "versioning",
+    "versioningRoot": "E:\\Versions",
+    "compare": "sizeAndDate",
+    "include": [],
+    "exclude": [
+      "*.tmp",
+      "node_modules\\"
+    ],
+    "guard": {
+      "enabled": true,
+      "maxCount": 50,
+      "maxPercent": 20
+    }
+  },
+  "identities": {
+    "left": {
+      "kind": "local",
+      "volumeSerial": "1a2b3c4d",
+      "fileId": "0000000000000000000000000000ab12",
+      "fsName": "NTFS",
+      "drive": "fixed"
+    },
+    "right": {
+      "kind": "network",
+      "uncPrefix": "\\\\nas\\photos"
+    }
+  },
+  "changes": [
+    {
+      "revision": 4,
+      "changedMs": 1760000000000,
+      "changes": [
+        {
+          "field": "rightRoot",
+          "from": "\\\\nas\\old\\photos",
+          "to": "\\\\nas\\photos"
+        }
+      ]
+    },
+    {
+      "revision": 3,
+      "changedMs": 1759000000000,
+      "changes": [
+        {
+          "field": "deletePolicy",
+          "from": "Recycle Bin",
+          "to": "Versioning · E:\\Versions"
+        }
+      ]
+    }
+  ],
+  "createdMs": 1758000000000,
+  "updatedMs": 1760000000000,
+  "readiness": {
+    "status": "ready"
+  }
+}

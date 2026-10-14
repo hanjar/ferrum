@@ -7,6 +7,7 @@
 //! - `<dir>/config`   prefs + session (`config.json`), AI provider setup
 //! - `<dir>/data`     AI execution journal, sync baselines
 //! - `<dir>/activity` Activity (Recent/Frequent) database
+//! - `<dir>/local`    local (non-roaming) data — the automation store
 //! - `<dir>/webview`  WebView2 user-data folder (localStorage, caches)
 //!
 //! For tests and measurement scripts only. Empty or unset means the normal OS locations.
@@ -22,6 +23,9 @@ use std::sync::OnceLock;
 
 pub const ENV_VAR: &str = "FERRUM_PROFILE_DIR";
 pub const ACTIVITY_ENV_VAR: &str = "FERRUM_ACTIVITY_DIR";
+
+/// App identifier used for the OS data dirs (must stay in sync with `tauri.conf.json`).
+pub const APP_DIR_ID: &str = "dev.ferrum.app";
 
 /// Validated overrides, fixed once at startup by [`init`].
 struct Active {
@@ -228,6 +232,11 @@ pub fn webview_in(root: &Path) -> PathBuf {
     root.join("webview")
 }
 
+/// Local (non-roaming) data dir under a test-profile root.
+pub fn local_in(root: &Path) -> PathBuf {
+    root.join("local")
+}
+
 /// Config dir (prefs, AI setup): test profile first, else the OS app config dir.
 pub fn config_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
     use tauri::Manager;
@@ -272,6 +281,77 @@ pub fn activity_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<Path
             .ok()
             .map(|dir| dir.join("activity")),
     }
+}
+
+/// Local (non-roaming) data dir (automation store): test profile first, else the OS app local
+/// data dir. Never falls back to the roaming dir: WAL needs a local disk and the store must stay
+/// machine-bound.
+pub fn local_data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    use tauri::Manager;
+    match profile_dir() {
+        Some(root) => Some(local_in(&root)),
+        None => app.path().app_local_data_dir().ok(),
+    }
+}
+
+/// Local data dir without an `AppHandle` (for code the runner shares): the test profile
+/// (`FERRUM_PROFILE_DIR`) first, otherwise the Windows Known Folder `LocalAppData` plus the app
+/// identifier - the same composition as Tauri's `app_local_data_dir`, without trusting the
+/// environment. `None` when the folder cannot be resolved: there is NO fallback to the temp dir
+/// (the store would silently live in a shared, world-writable place).
+pub fn resolve_local_data_dir() -> Option<PathBuf> {
+    resolve_local_data_dir_in(profile_dir().as_deref(), known_local_app_data().as_deref())
+}
+
+/// Pure core of [`resolve_local_data_dir`]: `local_app_data` stands in for the Known Folder
+/// lookup so a unit test can inject it.
+pub(crate) fn resolve_local_data_dir_in(
+    profile: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(root) = profile {
+        return Some(local_in(root));
+    }
+    local_app_data
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(APP_DIR_ID))
+}
+
+/// `SHGetKnownFolderPath(FOLDERID_LocalAppData)`: the user's local (non-roaming) app data folder.
+#[cfg(windows)]
+pub(crate) fn known_local_app_data() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
+    let mut raw: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `raw` receives a CoTaskMem-allocated, NUL-terminated wide string on success; it is
+    // read once and freed below. A null token means the current user.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut raw) };
+    if hr != 0 || raw.is_null() {
+        if !raw.is_null() {
+            // SAFETY: allocated by the API above.
+            unsafe { CoTaskMemFree(raw.cast()) };
+        }
+        return None;
+    }
+    // SAFETY: NUL-terminated per the API contract.
+    let path = unsafe {
+        let mut len = 0usize;
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+        let wide = std::slice::from_raw_parts(raw, len);
+        let os = std::ffi::OsString::from_wide(wide);
+        CoTaskMemFree(raw.cast());
+        PathBuf::from(os)
+    };
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn known_local_app_data() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]
@@ -372,7 +452,56 @@ mod tests {
             activity_in(&root),
             PathBuf::from("X:/probe").join("activity")
         );
+        assert_eq!(local_in(&root), PathBuf::from("X:/probe").join("local"));
         assert_eq!(webview_in(&root), PathBuf::from("X:/probe").join("webview"));
+    }
+
+    /// Automation P0.3: `resolve_local_data_dir` honours `FERRUM_PROFILE_DIR` - the store then
+    /// lives under `<profile>\local`, never in the real user profile.
+    #[test]
+    fn local_data_dir_prefers_the_test_profile() {
+        let root = Path::new(r"X:\probe");
+        assert_eq!(
+            resolve_local_data_dir_in(Some(root), Some(Path::new(r"F:\lad"))),
+            Some(PathBuf::from(r"X:\probe\local"))
+        );
+        assert_eq!(
+            resolve_local_data_dir_in(Some(root), None),
+            Some(PathBuf::from(r"X:\probe\local"))
+        );
+    }
+
+    /// Without a profile the result is the known local-app-data folder plus the app identifier
+    /// (Tauri's `app_local_data_dir` composition). When the folder cannot be resolved (or is not
+    /// absolute) there is no result at all - never the temp dir.
+    #[test]
+    fn local_data_dir_has_no_silent_fallback() {
+        assert_eq!(
+            resolve_local_data_dir_in(None, Some(Path::new(r"F:\lad"))),
+            Some(PathBuf::from(r"F:\lad").join(APP_DIR_ID))
+        );
+        assert_eq!(resolve_local_data_dir_in(None, None), None);
+        assert_eq!(resolve_local_data_dir_in(None, Some(Path::new(""))), None);
+        assert_eq!(
+            resolve_local_data_dir_in(None, Some(Path::new("relative"))),
+            None
+        );
+    }
+
+    /// The Known Folder API names an absolute folder that is the one the environment also names
+    /// (the environment is only used here as a cross-check, never by the code under test).
+    #[cfg(windows)]
+    #[test]
+    fn the_known_folder_is_the_local_app_data_folder() {
+        let known = known_local_app_data().expect("LocalAppData resolves");
+        assert!(known.is_absolute());
+        assert!(known.is_dir());
+        if let Some(env) = std::env::var_os("LOCALAPPDATA") {
+            assert_eq!(
+                known.to_string_lossy().to_lowercase(),
+                PathBuf::from(env).to_string_lossy().to_lowercase()
+            );
+        }
     }
 
     #[cfg(windows)]

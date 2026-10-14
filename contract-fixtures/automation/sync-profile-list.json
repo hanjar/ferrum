@@ -1,0 +1,29 @@
+[
+  {
+    "id": "3f2a9c1e-5b6d-4c8a-9e0f-1a2b3c4d5e6f",
+    "name": "Photos to NAS",
+    "revision": 4,
+    "left": "D:\\Photos",
+    "right": "\\\\nas\\photos",
+    "modeLabel": "Mirror left → right",
+    "deleteLabel": "Versioning · E:\\Versions",
+    "readiness": {
+      "status": "ready"
+    },
+    "usedBy": 0
+  },
+  {
+    "id": "9e0f1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "name": "Projects backup",
+    "revision": 1,
+    "left": "C:\\Users\\you\\Projects",
+    "right": "E:\\Backups\\Projects",
+    "modeLabel": "Update left → right",
+    "deleteLabel": "Recycle Bin",
+    "readiness": {
+      "status": "notReady",
+      "reason": "identityMismatch"
+    },
+    "usedBy": 0
+  }
+]

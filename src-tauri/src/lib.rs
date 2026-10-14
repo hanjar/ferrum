@@ -15,6 +15,7 @@ pub mod archive_rar;
 pub mod archive_rar_tool;
 pub mod archive_sevenz;
 pub mod archive_zip;
+pub mod automation;
 pub mod branch_view;
 pub mod codecs;
 pub mod comments;
@@ -36,6 +37,7 @@ pub mod media_meta;
 pub mod media_protocol;
 pub mod move_engine;
 pub mod mutations;
+pub mod native_dialog;
 pub mod office_text;
 pub mod ops;
 pub mod path_guard;
@@ -240,7 +242,12 @@ pub fn run() {
             hotlist::hotlist_check_location,
             hotlist::hotlist_set_location,
             hotlist::hotlist_import_preview,
-            hotlist::hotlist_run_command
+            hotlist::hotlist_run_command,
+            automation::commands::sync_profile_list,
+            automation::commands::sync_profile_get,
+            automation::commands::sync_profile_validate,
+            automation::commands::sync_profile_save,
+            automation::commands::sync_profile_delete
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())
@@ -313,6 +320,10 @@ pub fn run() {
                 log::warn!("activity store unavailable; activity recording disabled");
             }
             app.handle().manage(ActivityHandle(service));
+            // Automation store (P0.3): SQLite under the local (non-roaming) data dir. Opening
+            // failures are remembered in the state and reported per command; a newer store
+            // schema opens read-only (LC-3).
+            app.handle().manage(automation::commands::AutomationState::open());
             Ok(())
         })
         .run(context)
