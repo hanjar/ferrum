@@ -2780,6 +2780,49 @@ pub async fn open_external(window: tauri::Window, path: String) -> Result<(), Fs
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
 }
 
+/// File name of the third-party notices installed next to the app (FER-554, `bundle.resources`).
+const THIRD_PARTY_NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
+
+/// Location of the installed third-party notices inside `resource_dir`. The path comes only from
+/// the backend's own resource directory and a fixed file name; the webview supplies nothing.
+fn bundled_notices_path(resource_dir: &Path) -> Result<String, FsError> {
+    let path = resource_dir.join(THIRD_PARTY_NOTICES_FILE);
+    if !path.is_file() {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::NotFound,
+            "The third-party notices file is not installed with this build",
+        ));
+    }
+    let text = path.to_string_lossy().into_owned();
+    // The resource dir can come back in extended-length form; the launch layer wants a plain path.
+    if text.starts_with(r"\\?\UNC\") {
+        return Ok(text);
+    }
+    Ok(text
+        .strip_prefix(r"\\?\")
+        .map(str::to_owned)
+        .unwrap_or(text))
+}
+
+/// Open the installed third-party notices (a plain text file) with the OS default association
+/// (FER-554). Takes no path: it is fixed by the backend, so the webview cannot use this command
+/// to open anything else.
+#[tauri::command]
+pub async fn open_third_party_notices(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<(), FsError> {
+    let dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?;
+    let path = bundled_notices_path(&dir)?;
+    let owner = window_hwnd(&window);
+    spawn_blocking(move || crate::shell_open::open_external_in(owner, &path))
+        .await
+        .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+}
+
 /// Open a terminal at `cwd` (F2-25). `program` is the persisted per-OS
 /// preference (`auto` | `wt` | `cmd` | `powershell`); a missing executable
 /// surfaces as a structured `notFound` error for the UI to prompt.
@@ -3245,5 +3288,22 @@ mod fer512_ipc_gate_tests {
         assert_eq!(dummy_ticks(10_000), 200);
         assert_eq!(dummy_ticks(60_000), 200, "capped at 10 s");
         assert_eq!(dummy_ticks(u64::MAX), 200);
+    }
+}
+
+#[cfg(test)]
+mod third_party_notices_tests {
+    use super::*;
+
+    #[test]
+    fn notices_path_is_fixed_name_in_resource_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = bundled_notices_path(dir.path()).unwrap_err();
+        assert_eq!(err.code, crate::domain::ErrorCode::NotFound);
+
+        std::fs::write(dir.path().join(THIRD_PARTY_NOTICES_FILE), "notices").unwrap();
+        let path = bundled_notices_path(dir.path()).unwrap();
+        assert!(path.ends_with(THIRD_PARTY_NOTICES_FILE));
+        assert!(!path.starts_with(r"\\?\"));
     }
 }

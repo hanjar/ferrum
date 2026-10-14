@@ -1,4 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const openThirdPartyNotices = vi.fn();
+vi.mock('../ipc/shellOpen', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ipc/shellOpen')>()),
+  openThirdPartyNotices: () => openThirdPartyNotices(),
+}));
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import SettingsDialog from './SettingsDialog.svelte';
 import { ui, TABS_DEFAULTS, PREVIEW_DEFAULTS } from '../uiState.svelte';
@@ -219,5 +225,12 @@ describe('SettingsDialog build info (FER-548)', () => {
     expect(copiedText).toContain('Commit: test000');
     expect(copiedText).toContain('Status: clean');
     expect(copiedText).toContain('Built: 2026-10-14 00:00:00 UTC');
+  });
+
+  it('opens the installed third-party notices from the sidebar footer', async () => {
+    openThirdPartyNotices.mockResolvedValue(undefined);
+    const { host } = renderDialog();
+    await fireEvent.click(host.getByRole('button', { name: /Third-party notices/i }));
+    expect(openThirdPartyNotices).toHaveBeenCalledTimes(1);
   });
 });

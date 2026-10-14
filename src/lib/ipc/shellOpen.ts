@@ -41,6 +41,14 @@ export function openExternal(path: string): Promise<void> {
 }
 
 /**
+ * Open the third-party notices installed with the app (FER-554). The backend fixes the file, so the
+ * webview passes no path.
+ */
+export function openThirdPartyNotices(): Promise<void> {
+  return launch('open_third_party_notices', {});
+}
+
+/**
  * Open the OS "Associate With…" picker for one file. The user decides in
  * the picker; Ferrum never changes a system association by itself.
  */

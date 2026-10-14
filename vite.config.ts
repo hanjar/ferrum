@@ -107,7 +107,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['src/test-setup.ts'],
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'],
     coverage: {
       provider: 'v8',
       // Coverage measures logic modules; components gain tests from task 05

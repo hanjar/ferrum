@@ -39,7 +39,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../THIRD-PARTY-NOTICES.md", "../licenses/*"],
+    "resources": {
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
+      "../LICENSE-MIT": "LICENSE-MIT",
+      "../LICENSE-APACHE": "LICENSE-APACHE",
+      "../licenses/*": "licenses/"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

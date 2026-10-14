@@ -39,6 +39,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Third-party notices up to date
+        run: node scripts/generate-third-party-notices.mjs --check
+
       - name: Check code formatting (Prettier)
         run: npx prettier --check .
 

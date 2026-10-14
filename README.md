@@ -139,4 +139,6 @@ Ferrum is dual-licensed under either:
 
 at your option.
 
-Third-party libraries, fonts, and tools incorporated into or used by Ferrum are subject to their respective licenses. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for full attribution and licensing details.
+Third-party libraries, fonts, and tools incorporated into or used by Ferrum are subject to their respective licenses. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for a summary and [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) for the complete generated notice (also installed with the app and opened from Settings, "Third-party notices").
+
+The generated notice is refreshed with `node scripts/generate-third-party-notices.mjs` after any change to `package-lock.json` or `src-tauri/Cargo.lock`; CI runs the same script with `--check`.
