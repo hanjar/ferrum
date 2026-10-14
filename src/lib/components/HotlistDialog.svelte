@@ -39,8 +39,19 @@
   let inited = false;
   let sel = $state<TreePath | null>(null);
   let treeEl = $state<HTMLElement>();
-  /** Folded submenus, by index-path key. Cleared whenever the tree structure changes. */
-  let folded = $state<Record<string, true>>({});
+  /**
+   * Folded submenus, by fold id. The id lives on the item itself under a symbol key, so it survives
+   * copies made by moves (object spread keeps symbol keys) and is ignored by JSON/structuredClone.
+   */
+  const FOLD = Symbol('fold');
+  let nextFoldId = 1;
+  let folded = $state<Record<number, true>>({});
+  const foldIdOf = (it: HotItem): number | undefined =>
+    (it as unknown as Record<symbol, number | undefined>)[FOLD];
+  const isFolded = (it: HotItem): boolean => {
+    const id = foldIdOf(it);
+    return id !== undefined && folded[id] === true;
+  };
   // Pointer drag: `press` is a pressed row that has not moved past DRAG_THRESHOLD px yet.
   type DropZone = 'before' | 'after' | 'into';
   let press: { path: TreePath; id: number; x: number; y: number } | null = null;
@@ -66,7 +77,7 @@
       items.forEach((item, i) => {
         const path = [...prefix, i];
         out.push({ path, item, depth });
-        if (item.type === 'submenu' && !folded[key(path)]) walk(item.items, path, depth + 1);
+        if (item.type === 'submenu' && !isFolded(item)) walk(item.items, path, depth + 1);
       });
     };
     walk(draft, [], 0);
@@ -123,10 +134,20 @@
     if (hotlist.configureOpen) void tick().then(() => treeEl?.focus());
   });
 
-  function edit(next: HotItem[] | null, nextSel?: TreePath | null, keepFolds = false) {
+  function edit(next: HotItem[] | null, nextSel?: TreePath | null) {
     if (!next) return;
     draft = next;
-    if (!keepFolds) folded = {}; // index paths shift when the structure changes
+    // Never leave the selection inside a folded submenu (e.g. after a drop into one).
+    const at = nextSel !== undefined ? nextSel : sel;
+    if (at) {
+      const open = { ...folded };
+      for (let n = 1; n < at.length; n++) {
+        const anc = getAt(next, at.slice(0, n));
+        const id = anc ? foldIdOf(anc) : undefined;
+        if (id !== undefined) delete open[id];
+      }
+      folded = open;
+    }
     dirty = true;
     if (nextSel !== undefined) sel = nextSel;
   }
@@ -188,21 +209,32 @@
   }
 
   function setFold(path: TreePath, fold: boolean) {
-    const k = key(path);
+    const item = getAt(draft, path);
+    if (!item || item.type !== 'submenu') return;
+    let id = foldIdOf(item);
+    if (id === undefined) {
+      if (!fold) return;
+      id = nextFoldId++;
+      const tagged = replaceAt(draft, path, { ...item, [FOLD]: id } as HotItem);
+      if (!tagged) return;
+      draft = tagged; // not an edit: nothing to save
+    }
     if (fold) {
-      folded = { ...folded, [k]: true };
+      folded = { ...folded, [id]: true };
       // Keep the selection on a visible row.
-      if (sel && sel.length > path.length && key(sel.slice(0, path.length)) === k) sel = path;
+      if (sel && sel.length > path.length && key(sel.slice(0, path.length)) === key(path)) {
+        sel = path;
+      }
     } else {
       const rest = { ...folded };
-      delete rest[k];
+      delete rest[id];
       folded = rest;
     }
   }
 
   function setField(patch: Record<string, unknown>) {
     if (!sel || !selected || selected.type === 'separator') return;
-    edit(replaceAt(draft, sel, { ...selected, ...patch } as HotItem), undefined, true);
+    edit(replaceAt(draft, sel, { ...selected, ...patch } as HotItem));
   }
 
   function onTreeKey(e: KeyboardEvent) {
@@ -293,6 +325,14 @@
     return null;
   }
 
+  /** Fold toggle. Handled on pointerdown: the row captures the pointer, which retargets `click`. */
+  function onGlyphDown(row: FlatRow, e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.stopPropagation(); // no drag start, no capture
+    setFold(row.path, !isFolded(row.item));
+    sel = row.path;
+  }
+
   function onRowDown(row: FlatRow, e: PointerEvent) {
     if (e.button !== 0) return;
     press = { path: row.path, id: e.pointerId, x: e.clientX, y: e.clientY };
@@ -306,6 +346,12 @@
       sel = press.path;
     }
     if (!dragFrom) return;
+    if (treeEl) {
+      // Scroll the list while the pointer is near its top or bottom edge.
+      const box = treeEl.getBoundingClientRect();
+      if (e.clientY < box.top + 20) treeEl.scrollTop -= 14;
+      else if (e.clientY > box.bottom - 20) treeEl.scrollTop += 14;
+    }
     const h = hit(e.clientY);
     dropAt = h ? { key: key(h.row.path), zone: h.zone } : null;
   }
@@ -509,6 +555,7 @@
               role="treeitem"
               aria-level={row.depth + 1}
               aria-selected={sel !== null && key(sel) === key(row.path)}
+              aria-expanded={row.item.type === 'submenu' ? !isFolded(row.item) : undefined}
               class:sel={sel !== null && key(sel) === key(row.path)}
               style:padding-left="{row.depth * 16 + 8}px"
               class:drop-before={dropAt?.key === key(row.path) && dropAt.zone === 'before'}
@@ -521,15 +568,16 @@
               {#if row.item.type === 'separator'}
                 <span class="dim">— separator —</span>
               {:else}
+                <!-- Mouse convenience only: keyboard and screen readers use aria-expanded and Left/Right. -->
                 <span
                   class="glyph"
                   class:fold={row.item.type === 'submenu'}
                   aria-hidden="true"
-                  onclick={row.item.type === 'submenu'
-                    ? () => setFold(row.path, !folded[key(row.path)])
+                  onpointerdown={row.item.type === 'submenu'
+                    ? (e) => onGlyphDown(row, e)
                     : undefined}
                   >{row.item.type === 'submenu'
-                    ? folded[key(row.path)]
+                    ? isFolded(row.item)
                       ? '▸'
                       : '▾'
                     : row.item.type === 'command'

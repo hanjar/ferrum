@@ -251,4 +251,23 @@ test.describe('nested hotlist (FER-458)', () => {
     expect(dummy?.items?.map((i) => i.title)).toEqual(['&Downloads']);
     expect(saved.doc.items.some((i) => i.title === '&Downloads')).toBe(false);
   });
+
+  test('Configure: clicking the submenu arrow folds and unfolds it (real pointer capture)', async ({
+    page,
+  }) => {
+    await page.keyboard.press('Control+d');
+    await page.getByRole('menuitem', { name: 'Configure…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Configure Directory Hotlist' });
+    await expect(dialog).toBeVisible();
+    const bob = dialog.getByRole('treeitem', { name: /Bob/ });
+    const personal = dialog.getByRole('treeitem', { name: /^&6. personal$/ });
+    await expect(bob).toBeVisible();
+    await expect(personal).toHaveAttribute('aria-expanded', 'true');
+    await personal.locator('.glyph').click();
+    await expect(bob).toBeHidden();
+    await expect(personal).toHaveAttribute('aria-expanded', 'false');
+    await personal.locator('.glyph').click();
+    await expect(bob).toBeVisible();
+    await expect(personal).toHaveAttribute('aria-expanded', 'true');
+  });
 });

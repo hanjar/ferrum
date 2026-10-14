@@ -470,8 +470,51 @@ describe('HotlistDialog moving items (pointer drag, indent/outdent, add into sub
     expect(item(/Full/).textContent).toContain('▸');
     await fireEvent.keyDown(tree, { key: 'ArrowRight' });
     expect(screen.queryAllByRole('treeitem')).toHaveLength(5);
-    await fireEvent.click(item(/Full/).querySelector('.glyph')!);
+    await fireEvent.pointerDown(item(/Full/).querySelector('.glyph')!, { button: 0, pointerId: 1 });
     expect(screen.queryAllByRole('treeitem')).toHaveLength(4);
+  });
+
+  it('exposes aria-expanded on submenu rows only', async () => {
+    render(HotlistDialog);
+    await openDialog(TREE);
+    expect(item(/Full/).getAttribute('aria-expanded')).toBe('true');
+    expect(item(C).hasAttribute('aria-expanded')).toBe(false);
+    await fireEvent.click(item(/Full/));
+    await fireEvent.keyDown(screen.getByRole('tree'), { key: 'ArrowLeft' });
+    expect(item(/Full/).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('a folded submenu stays folded after moves, adds and indent/outdent elsewhere', async () => {
+    render(HotlistDialog);
+    await openDialog(TREE);
+    const tree = screen.getByRole('tree');
+    await fireEvent.click(item(/Full/));
+    await fireEvent.keyDown(tree, { key: 'ArrowLeft' }); // fold Full
+    expect(screen.queryAllByRole('treeitem')).toHaveLength(4);
+    await fireEvent.click(item(C));
+    await fireEvent.keyDown(tree, { key: 'ArrowRight', ctrlKey: true }); // C into Zoom
+    await fireEvent.keyDown(tree, { key: 'ArrowLeft', ctrlKey: true }); // and back out
+    await fireEvent.click(item(D));
+    await fireEvent.click(screen.getByRole('button', { name: 'Up' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add separator' }));
+    expect(item(/Full/).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('treeitem', { name: /F1/ })).toBeNull();
+    // Moving Full itself (it is copied by the move) keeps it folded.
+    await fireEvent.click(item(/Full/));
+    await fireEvent.click(screen.getByRole('button', { name: 'Up' }));
+    expect(item(/Full/).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('dropping into a folded submenu unfolds it so the moved item stays visible', async () => {
+    render(HotlistDialog);
+    await openDialog(TREE);
+    stubRows();
+    await fireEvent.click(item(/Full/));
+    await fireEvent.keyDown(screen.getByRole('tree'), { key: 'ArrowLeft' });
+    await drag(C, at(3)); // rows: Zoom, C, D, Full (folded)
+    expect(item(/Full/).getAttribute('aria-expanded')).toBe('true');
+    expect(item(C).getAttribute('aria-level')).toBe('2');
+    expect(item(C).getAttribute('aria-selected')).toBe('true');
   });
 
   it('explains the item kinds next to the buttons', async () => {
