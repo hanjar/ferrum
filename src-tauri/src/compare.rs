@@ -3501,7 +3501,9 @@ mod tests {
         assert!(rep.entries.iter().any(|e| e.name == "docs/api"));
         assert!(rep.entries.iter().any(|e| e.name == "docs/api/spec.json"));
 
-        assert!(rep.entries.iter().all(|e| !e.name.starts_with("other")));
+        // An unanchored `docs\` can match at any depth, so `other` is walked (visible as a
+        // folder), but none of its files are included.
+        assert!(rep.entries.iter().all(|e| !e.name.starts_with("other/")));
 
         let _ = fs::remove_dir_all(&tmp_l);
         let _ = fs::remove_dir_all(&tmp_r);

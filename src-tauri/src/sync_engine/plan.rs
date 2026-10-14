@@ -7,7 +7,7 @@
 //! SP-2.3 extension: two-way deletion propagation is reachable only when
 //! `propagate_deletes` is true on two-way sync.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,8 +75,11 @@ pub enum SyncDecision {
     Skip,
 }
 
+/// One planned action. Unknown fields (for example the retired `deleteIfEmpty`
+/// flag) are rejected on deserialize so stale plans can never silently lose a
+/// safety flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SyncPlanItem {
     pub name: String,
     pub state: DirDiffState,
@@ -93,6 +96,14 @@ pub struct SyncPlanItem {
     pub right_path: Option<String>,
 }
 
+/// Options for [`build_sync_plan`].
+///
+/// `propagate_deletes` is valid only together with `profile = true`. When
+/// `profile` is `false` (the serde default), `propagate_deletes` is treated as
+/// `false`, so the ad-hoc path behaves exactly like the TypeScript planner,
+/// which has no deletion propagation. Deletion propagation never produces a
+/// recursive folder action in any mode: folders get `RemoveEmptyDir*` or a
+/// conflict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncOptions {
@@ -157,6 +168,8 @@ pub fn classify_detailed(
     trusted: Option<&BaselineDto>,
 ) -> Classification {
     let both = opts.direction == SyncDirection::Both;
+    // Deletion propagation is valid only in profile mode (see `SyncOptions`).
+    let propagate = opts.propagate_deletes && opts.profile;
     let base = if both {
         trusted.and_then(|t| t.entries.get(&entry.name))
     } else {
@@ -210,7 +223,7 @@ pub fn classify_detailed(
                         action: SyncAction::Conflict,
                         reason: Some(SyncConflictReason::ModifyDelete),
                     };
-                } else if opts.propagate_deletes {
+                } else if propagate {
                     // SP-2.3: right deleted, left unchanged -> delete left
                     return Classification {
                         action: if opts.profile && entry.is_dir {
@@ -226,7 +239,7 @@ pub fn classify_detailed(
                         reason: Some(SyncConflictReason::DeletedRight),
                     };
                 }
-            } else if both && opts.propagate_deletes && trusted.is_none() {
+            } else if both && propagate && trusted.is_none() {
                 // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
                 // If baseline is trusted and entry is new, it proceeds to CopyToRight / CreateDirRight below.
                 return Classification {
@@ -265,7 +278,7 @@ pub fn classify_detailed(
                         action: SyncAction::Conflict,
                         reason: Some(SyncConflictReason::ModifyDelete),
                     };
-                } else if opts.propagate_deletes {
+                } else if propagate {
                     // SP-2.3: left deleted, right unchanged -> delete right
                     return Classification {
                         action: if opts.profile && entry.is_dir {
@@ -281,7 +294,7 @@ pub fn classify_detailed(
                         reason: Some(SyncConflictReason::DeletedLeft),
                     };
                 }
-            } else if both && opts.propagate_deletes && trusted.is_none() {
+            } else if both && propagate && trusted.is_none() {
                 // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
                 // If baseline is trusted and entry is new, it proceeds to CopyToLeft / CreateDirLeft below.
                 return Classification {
@@ -398,6 +411,24 @@ pub fn build_sync_plan(
     let trusted =
         baseline.filter(|b| is_baseline_trusted(b, &report.left_root, &report.right_root));
 
+    // P1-C: in profile two-way mode, folders recorded in the trusted baseline that
+    // exist on one side only were deleted by the user on the other side. Anything
+    // new below such a folder must never be copied back (that would recreate the
+    // folder), with or without deletion propagation.
+    let deleted_dirs: HashSet<&str> = match trusted {
+        Some(t) if opts.profile && opts.direction == SyncDirection::Both => report
+            .entries
+            .iter()
+            .filter(|e| {
+                e.is_dir
+                    && matches!(e.state, DirDiffState::LeftOnly | DirDiffState::RightOnly)
+                    && t.entries.contains_key(&e.name)
+            })
+            .map(|e| e.name.as_str())
+            .collect(),
+        _ => HashSet::new(),
+    };
+
     let mut by_fold: HashMap<String, usize> = HashMap::new();
     for entry in &report.entries {
         let key = entry.name.to_lowercase();
@@ -414,6 +445,16 @@ pub fn build_sync_plan(
                 entry.name.clone()
             };
             let mut class = classify_detailed(entry, opts, trusted);
+            if !deleted_dirs.is_empty()
+                && class.action != SyncAction::Skip
+                && !trusted.is_some_and(|t| t.entries.contains_key(&entry.name))
+                && has_deleted_ancestor(&entry.name, &deleted_dirs)
+            {
+                class = Classification {
+                    action: SyncAction::Conflict,
+                    reason: Some(SyncConflictReason::NoBaseline),
+                };
+            }
             if class.action != SyncAction::Skip
                 && by_fold
                     .get(&entry.name.to_lowercase())
@@ -438,27 +479,54 @@ pub fn build_sync_plan(
         })
         .collect();
 
-    // P2-1 / P2-2: In profile mode, folder items never receive recursive copy or delete actions.
     if opts.profile {
-        for item in &items {
-            if item.is_dir {
-                debug_assert!(
-                    !matches!(
-                        item.action,
-                        SyncAction::DeleteLeft
-                            | SyncAction::DeleteRight
-                            | SyncAction::CopyToLeft
-                            | SyncAction::CopyToRight
-                    ),
-                    "Profile plan folder item '{}' must never have recursive action, got {:?}",
-                    item.name,
-                    item.action
-                );
-            }
-        }
+        assert_profile_plan_invariants(&items);
     }
 
     items
+}
+
+fn has_deleted_ancestor(name: &str, deleted_dirs: &HashSet<&str>) -> bool {
+    let mut end = 0;
+    while let Some(i) = name[end..].find('/') {
+        end += i;
+        if deleted_dirs.contains(&name[..end]) {
+            return true;
+        }
+        end += 1;
+    }
+    false
+}
+
+/// Folder items that violate the profile contract: a folder must never get a
+/// recursive `Delete*` or `CopyTo*` action. Returns one message per violation.
+pub fn profile_plan_violations(plan: &[SyncPlanItem]) -> Vec<String> {
+    plan.iter()
+        .filter(|item| {
+            item.is_dir
+                && matches!(
+                    item.action,
+                    SyncAction::DeleteLeft
+                        | SyncAction::DeleteRight
+                        | SyncAction::CopyToLeft
+                        | SyncAction::CopyToRight
+                )
+        })
+        .map(|item| {
+            format!(
+                "profile plan folder item '{}' must never have a recursive action, got {:?}",
+                item.name, item.action
+            )
+        })
+        .collect()
+}
+
+/// Global guard for profile plans: `debug_assert!` that no folder item has a
+/// recursive action. Called at the end of `build_sync_plan` (profile) and
+/// `apply_decisions` (profile mode).
+pub fn assert_profile_plan_invariants(plan: &[SyncPlanItem]) {
+    let violations = profile_plan_violations(plan);
+    debug_assert!(violations.is_empty(), "{}", violations.join("; "));
 }
 
 /// Build a profile sync plan enforcing profile non-recursive folder actions.
@@ -609,27 +677,25 @@ pub fn is_resolvable(item: &SyncPlanItem) -> bool {
         )
 }
 
-pub fn apply_profile_decisions(
-    plan: &[SyncPlanItem],
-    decisions: &HashMap<String, SyncDecision>,
-) -> Vec<SyncPlanItem> {
-    apply_decisions_mode(plan, decisions, true)
+/// How decisions map onto folder items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanMode {
+    /// Ad-hoc plan (TypeScript parity): folder decisions may map to whole-folder
+    /// `Delete*` / `CopyTo*`.
+    Adhoc,
+    /// Profile plan: folder decisions map only to `CreateDir*`, `RemoveEmptyDir*`
+    /// or skip, never to `Delete*` / `CopyTo*`.
+    Profile,
 }
 
+/// Apply user decisions to conflicts. The mode is explicit; it is never guessed
+/// from the plan content.
 pub fn apply_decisions(
     plan: &[SyncPlanItem],
     decisions: &HashMap<String, SyncDecision>,
+    mode: PlanMode,
 ) -> Vec<SyncPlanItem> {
-    let is_profile = plan.iter().any(|i| {
-        matches!(
-            i.action,
-            SyncAction::CreateDirLeft
-                | SyncAction::CreateDirRight
-                | SyncAction::RemoveEmptyDirLeft
-                | SyncAction::RemoveEmptyDirRight
-        )
-    });
-    apply_decisions_mode(plan, decisions, is_profile)
+    apply_decisions_mode(plan, decisions, mode == PlanMode::Profile)
 }
 
 fn apply_decisions_mode(
@@ -700,22 +766,7 @@ fn apply_decisions_mode(
         .collect();
 
     if profile {
-        for item in &result {
-            if item.is_dir {
-                debug_assert!(
-                    !matches!(
-                        item.action,
-                        SyncAction::DeleteLeft
-                            | SyncAction::DeleteRight
-                            | SyncAction::CopyToLeft
-                            | SyncAction::CopyToRight
-                    ),
-                    "Profile folder item '{}' must never receive recursive action after apply_decisions, got {:?}",
-                    item.name,
-                    item.action
-                );
-            }
-        }
+        assert_profile_plan_invariants(&result);
     }
 
     result
@@ -771,27 +822,6 @@ pub fn is_plan_stale(
         return true;
     }
     a.iter().zip(b.iter()).any(|(x, y)| x != y)
-}
-
-/// Helper to assert that no directory in a profile plan has a recursive action.
-#[cfg(test)]
-pub fn assert_profile_plan_invariants(plan: &[SyncPlanItem]) {
-    for item in plan {
-        if item.is_dir {
-            assert!(
-                !matches!(
-                    item.action,
-                    SyncAction::DeleteLeft
-                        | SyncAction::DeleteRight
-                        | SyncAction::CopyToLeft
-                        | SyncAction::CopyToRight
-                ),
-                "Profile plan folder item '{}' must never have recursive action, got {:?}",
-                item.name,
-                item.action
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -897,7 +927,7 @@ mod tests {
             }
 
             if let Some(ref decisions) = fix.decisions {
-                let resolved = apply_decisions(&items, decisions);
+                let resolved = apply_decisions(&items, decisions, PlanMode::Adhoc);
                 let expected_resolved = fix
                     .expected
                     .resolved_items
@@ -918,9 +948,11 @@ mod tests {
     fn test_profile_sync_plan_fixtures() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixtures_dir = manifest_dir.join("../contract-fixtures/sync-plan-profile");
-        if !fixtures_dir.exists() {
-            return;
-        }
+        assert!(
+            fixtures_dir.is_dir(),
+            "profile fixtures dir missing: {}",
+            fixtures_dir.display()
+        );
         let mut entries: Vec<_> = fs::read_dir(&fixtures_dir)
             .expect("read profile fixtures dir")
             .filter_map(|e| e.ok())
@@ -929,9 +961,11 @@ mod tests {
             .collect();
         entries.sort();
 
-        if entries.is_empty() {
-            return;
-        }
+        assert!(
+            !entries.is_empty(),
+            "profile fixtures should not be empty: {}",
+            fixtures_dir.display()
+        );
 
         for path in entries {
             let content = fs::read_to_string(&path).expect("read profile fixture file");
@@ -958,7 +992,7 @@ mod tests {
             );
 
             if let Some(ref decisions) = fix.decisions {
-                let resolved = apply_profile_decisions(&items, decisions);
+                let resolved = apply_decisions(&items, decisions, PlanMode::Profile);
                 let expected_resolved = fix
                     .expected
                     .resolved_items
@@ -1025,11 +1059,12 @@ mod tests {
             incremental: None,
         };
 
+        // Deletion propagation is valid only with profile = true.
         let opts_prop = SyncOptions {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
-            profile: false,
+            profile: true,
         };
         let plan_prop = build_sync_plan(&report_del_left, &opts_prop, Some(&baseline));
         assert_eq!(plan_prop[0].action, SyncAction::DeleteRight);
@@ -1093,7 +1128,7 @@ mod tests {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: false,
-            profile: false,
+            profile: true,
         };
         let plan_no_prop = build_sync_plan(&report_del_left, &opts_no_prop, Some(&baseline));
         assert_eq!(plan_no_prop[0].action, SyncAction::Conflict);
@@ -1199,7 +1234,8 @@ mod tests {
         assert_ne!(folder_item.action, SyncAction::DeleteRight);
         assert_profile_plan_invariants(&plan);
 
-        // Non-profile (TS) mode: Folder A is DeleteRight (TS parity), file A/x.txt is ModifyDelete
+        // profile = false with propagate = true: propagate is ignored, so the plan is
+        // identical to propagate = false (TS behavior) and a folder is never deleted.
         let ts_opts = SyncOptions {
             direction: SyncDirection::Both,
             delete_extras: false,
@@ -1208,7 +1244,9 @@ mod tests {
         };
         let plan_ts = build_sync_plan(&report, &ts_opts, Some(&baseline));
         let folder_ts = plan_ts.iter().find(|i| i.name == "A").unwrap();
-        assert_eq!(folder_ts.action, SyncAction::DeleteRight);
+        assert_eq!(folder_ts.action, SyncAction::Conflict);
+        assert_eq!(folder_ts.reason, Some(SyncConflictReason::DeletedLeft));
+        assert_ne!(folder_ts.action, SyncAction::DeleteRight);
         assert_ne!(folder_ts.action, SyncAction::CopyToLeft);
 
         // Two-way without propagate (default): Folder A is conflict DeletedLeft (SP-2.2 parity)
@@ -1311,7 +1349,7 @@ mod tests {
         decisions_left.insert("folder-del-left".to_string(), SyncDecision::KeepLeft);
         decisions_left.insert("folder-del-right".to_string(), SyncDecision::KeepLeft);
 
-        let resolved_left = apply_profile_decisions(&plan, &decisions_left);
+        let resolved_left = apply_decisions(&plan, &decisions_left, PlanMode::Profile);
         // folder-del-left (RightOnly) + KeepLeft -> RemoveEmptyDirRight (remove extra folder on right)
         assert_eq!(resolved_left[0].action, SyncAction::RemoveEmptyDirRight);
         // folder-del-right (LeftOnly) + KeepLeft -> CreateDirRight (create missing folder on right)
@@ -1323,7 +1361,7 @@ mod tests {
         decisions_right.insert("folder-del-left".to_string(), SyncDecision::KeepRight);
         decisions_right.insert("folder-del-right".to_string(), SyncDecision::KeepRight);
 
-        let resolved_right = apply_profile_decisions(&plan, &decisions_right);
+        let resolved_right = apply_decisions(&plan, &decisions_right, PlanMode::Profile);
         // folder-del-left (RightOnly) + KeepRight -> CreateDirLeft (create missing folder on left)
         assert_eq!(resolved_right[0].action, SyncAction::CreateDirLeft);
         // folder-del-right (LeftOnly) + KeepRight -> RemoveEmptyDirLeft (remove extra folder on left)
@@ -1333,7 +1371,7 @@ mod tests {
         // Case 3: Skip
         let mut decisions_skip = HashMap::new();
         decisions_skip.insert("folder-del-left".to_string(), SyncDecision::Skip);
-        let resolved_skip = apply_profile_decisions(&plan, &decisions_skip);
+        let resolved_skip = apply_decisions(&plan, &decisions_skip, PlanMode::Profile);
         assert_eq!(resolved_skip[0].action, SyncAction::Skip);
     }
 
@@ -1402,7 +1440,7 @@ mod tests {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
-            profile: false,
+            profile: true,
         };
         let plan = build_sync_plan(&report, &opts, Some(&baseline));
 
@@ -1413,5 +1451,322 @@ mod tests {
         let right_item = plan.iter().find(|i| i.name == "new_right.txt").unwrap();
         assert_eq!(right_item.action, SyncAction::CopyToLeft);
         assert_eq!(right_item.reason, None);
+    }
+
+    fn test_dir(name: &str, state: DirDiffState) -> DirDiffEntry {
+        let (lm, rm) = match state {
+            DirDiffState::LeftOnly => (1000, 0),
+            _ => (0, 1000),
+        };
+        DirDiffEntry {
+            name: name.to_string(),
+            is_dir: true,
+            state,
+            left_size: 0,
+            left_modified_ms: lm,
+            right_size: 0,
+            right_modified_ms: rm,
+        }
+    }
+
+    fn test_file(name: &str, state: DirDiffState, size: u64, mtime: i64) -> DirDiffEntry {
+        let (ls, lm, rs, rm) = match state {
+            DirDiffState::LeftOnly => (size, mtime, 0, 0),
+            _ => (0, 0, size, mtime),
+        };
+        DirDiffEntry {
+            name: name.to_string(),
+            is_dir: false,
+            state,
+            left_size: ls,
+            left_modified_ms: lm,
+            right_size: rs,
+            right_modified_ms: rm,
+        }
+    }
+
+    fn test_report(entries: Vec<DirDiffEntry>) -> CompareDirsReport {
+        CompareDirsReport {
+            left_root: "C:\\Left".to_string(),
+            right_root: "D:\\Right".to_string(),
+            entries,
+            truncated: false,
+            recursive: true,
+            cancelled: false,
+            errors: Vec::new(),
+            fast_scan: None,
+            journal: None,
+            incremental: None,
+        }
+    }
+
+    fn test_baseline(files: &[(&str, u64)]) -> BaselineDto {
+        let mut entries = std::collections::BTreeMap::new();
+        for (name, size) in files {
+            let f = FactsDto {
+                size: *size,
+                modified_ms: 1000,
+            };
+            entries.insert(
+                name.to_string(),
+                EntryDto {
+                    left: f.clone(),
+                    right: f,
+                },
+            );
+        }
+        BaselineDto {
+            version: 1,
+            left_root: "C:\\Left".to_string(),
+            right_root: "D:\\Right".to_string(),
+            entries,
+            journal: None,
+        }
+    }
+
+    fn opts_both(propagate: bool, profile: bool) -> SyncOptions {
+        SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: propagate,
+            profile,
+        }
+    }
+
+    fn deleted_folder_report() -> CompareDirsReport {
+        // Folder A deleted on left; right still has A/x.txt (unchanged) and a new A/new.txt.
+        test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_file("A/new.txt", DirDiffState::RightOnly, 5, 3000),
+            test_file("A/x.txt", DirDiffState::RightOnly, 100, 1000),
+        ])
+    }
+
+    #[test]
+    fn test_p1c_new_child_of_deleted_folder_with_propagate() {
+        let baseline = test_baseline(&[("A", 0), ("A/x.txt", 100)]);
+        let plan = build_sync_plan(
+            &deleted_folder_report(),
+            &opts_both(true, true),
+            Some(&baseline),
+        );
+        assert_profile_plan_invariants(&plan);
+        let by = |n: &str| plan.iter().find(|i| i.name == n).unwrap();
+        assert_eq!(by("A").action, SyncAction::RemoveEmptyDirRight);
+        assert_eq!(by("A/x.txt").action, SyncAction::DeleteRight);
+        assert_eq!(by("A/new.txt").action, SyncAction::Conflict);
+        assert_eq!(by("A/new.txt").reason, Some(SyncConflictReason::NoBaseline));
+        // Folder A is never created on the left.
+        assert!(
+            !plan
+                .iter()
+                .any(|i| matches!(i.action, SyncAction::CreateDirLeft | SyncAction::CopyToLeft))
+        );
+    }
+
+    #[test]
+    fn test_p1c_new_child_of_deleted_folder_without_propagate() {
+        let baseline = test_baseline(&[("A", 0), ("A/x.txt", 100)]);
+        let plan = build_sync_plan(
+            &deleted_folder_report(),
+            &opts_both(false, true),
+            Some(&baseline),
+        );
+        assert_profile_plan_invariants(&plan);
+        let by = |n: &str| plan.iter().find(|i| i.name == n).unwrap();
+        assert_eq!(by("A").action, SyncAction::Conflict);
+        assert_eq!(by("A").reason, Some(SyncConflictReason::DeletedLeft));
+        assert_eq!(by("A/x.txt").reason, Some(SyncConflictReason::DeletedLeft));
+        assert_eq!(by("A/new.txt").action, SyncAction::Conflict);
+        assert_eq!(by("A/new.txt").reason, Some(SyncConflictReason::NoBaseline));
+        assert!(
+            !plan
+                .iter()
+                .any(|i| matches!(i.action, SyncAction::CreateDirLeft | SyncAction::CopyToLeft))
+        );
+    }
+
+    #[test]
+    fn test_p1c_nested_new_folder_and_deeper_child_under_deleted_folder() {
+        // A/sub (new folder) and A/sub/deep.txt (new file) below deleted A: both conflict.
+        let baseline = test_baseline(&[("A", 0)]);
+        let report = test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_dir("A/sub", DirDiffState::RightOnly),
+            test_file("A/sub/deep.txt", DirDiffState::RightOnly, 1, 2000),
+            test_file("other.txt", DirDiffState::RightOnly, 1, 2000),
+        ]);
+        for propagate in [false, true] {
+            let plan = build_sync_plan(&report, &opts_both(propagate, true), Some(&baseline));
+            assert_profile_plan_invariants(&plan);
+            for n in ["A/sub", "A/sub/deep.txt"] {
+                let it = plan.iter().find(|i| i.name == n).unwrap();
+                assert_eq!(it.action, SyncAction::Conflict, "{n}");
+                assert_eq!(it.reason, Some(SyncConflictReason::NoBaseline), "{n}");
+            }
+            // Unrelated new file outside the deleted folder is still copied.
+            let other = plan.iter().find(|i| i.name == "other.txt").unwrap();
+            assert_eq!(other.action, SyncAction::CopyToLeft);
+        }
+    }
+
+    #[test]
+    fn test_p1d_propagate_without_profile_equals_no_propagate() {
+        // propagate_deletes = true is only valid with profile = true; otherwise ignored.
+        let baseline = test_baseline(&[("A", 0), ("A/x.txt", 100), ("f.txt", 10)]);
+        let report = test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_file("A/x.txt", DirDiffState::RightOnly, 100, 1000),
+            test_file("f.txt", DirDiffState::LeftOnly, 10, 1000),
+        ]);
+        let with = build_sync_plan(&report, &opts_both(true, false), Some(&baseline));
+        let without = build_sync_plan(&report, &opts_both(false, false), Some(&baseline));
+        assert_eq!(with, without);
+        assert!(
+            with.iter().all(|i| !matches!(
+                i.action,
+                SyncAction::DeleteLeft
+                    | SyncAction::DeleteRight
+                    | SyncAction::RemoveEmptyDirLeft
+                    | SyncAction::RemoveEmptyDirRight
+            )),
+            "no deletion may be planned: {with:?}"
+        );
+        // Without a trusted baseline too.
+        let with = build_sync_plan(&report, &opts_both(true, false), None);
+        let without = build_sync_plan(&report, &opts_both(false, false), None);
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn test_p2a_apply_decisions_profile_conflict_folders_never_delete() {
+        // Plan where every folder is a conflict (two-way, no propagate).
+        let baseline = test_baseline(&[("A", 0), ("B", 0)]);
+        let report = test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_dir("B", DirDiffState::LeftOnly),
+        ]);
+        let plan = build_sync_plan(&report, &opts_both(false, true), Some(&baseline));
+        assert!(plan.iter().all(|i| i.action == SyncAction::Conflict));
+
+        let mut decisions = HashMap::new();
+        decisions.insert("A".to_string(), SyncDecision::KeepLeft);
+        decisions.insert("B".to_string(), SyncDecision::KeepRight);
+        let resolved = apply_decisions(&plan, &decisions, PlanMode::Profile);
+        assert_profile_plan_invariants(&resolved);
+        assert_eq!(resolved[0].action, SyncAction::RemoveEmptyDirRight);
+        assert_eq!(resolved[1].action, SyncAction::RemoveEmptyDirLeft);
+
+        let mut decisions = HashMap::new();
+        decisions.insert("A".to_string(), SyncDecision::KeepRight);
+        decisions.insert("B".to_string(), SyncDecision::KeepLeft);
+        let resolved = apply_decisions(&plan, &decisions, PlanMode::Profile);
+        assert_profile_plan_invariants(&resolved);
+        assert_eq!(resolved[0].action, SyncAction::CreateDirLeft);
+        assert_eq!(resolved[1].action, SyncAction::CreateDirRight);
+
+        // The same plan in explicit ad-hoc mode keeps the TypeScript mapping.
+        let adhoc = apply_decisions(&plan, &decisions, PlanMode::Adhoc);
+        assert_eq!(adhoc[0].action, SyncAction::CopyToLeft);
+    }
+
+    #[test]
+    fn test_guard_detects_folder_recursive_actions() {
+        let report = test_report(vec![test_dir("A", DirDiffState::RightOnly)]);
+        let mut plan = build_sync_plan(&report, &opts_both(false, false), None);
+        // Ad-hoc plans may legitimately copy whole folders; the guard is for profile plans.
+        assert_eq!(plan[0].action, SyncAction::CopyToLeft);
+        assert_eq!(profile_plan_violations(&plan).len(), 1);
+        plan[0].action = SyncAction::CreateDirLeft;
+        assert!(profile_plan_violations(&plan).is_empty());
+        for action in [
+            SyncAction::DeleteLeft,
+            SyncAction::DeleteRight,
+            SyncAction::CopyToLeft,
+            SyncAction::CopyToRight,
+        ] {
+            plan[0].action = action;
+            assert_eq!(profile_plan_violations(&plan).len(), 1, "{action:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must never have a recursive action")]
+    fn test_guard_panics_in_debug_on_violation() {
+        let plan = vec![SyncPlanItem {
+            name: "A".to_string(),
+            state: DirDiffState::RightOnly,
+            action: SyncAction::DeleteRight,
+            reason: None,
+            is_dir: true,
+            decision: None,
+            left_path: None,
+            right_path: None,
+        }];
+        assert_profile_plan_invariants(&plan);
+    }
+
+    #[test]
+    fn test_profile_invariants_hold_for_all_option_combinations() {
+        // Sweep: every direction x delete_extras x propagate with profile = true, trusted
+        // and missing baseline, folders in every one-sided state.
+        let baseline = test_baseline(&[("A", 0), ("A/x.txt", 100), ("B", 0)]);
+        let report = test_report(vec![
+            test_dir("A", DirDiffState::RightOnly),
+            test_file("A/x.txt", DirDiffState::RightOnly, 100, 1000),
+            test_file("A/new.txt", DirDiffState::RightOnly, 5, 3000),
+            test_dir("B", DirDiffState::LeftOnly),
+            test_dir("C", DirDiffState::LeftOnly),
+            test_dir("D", DirDiffState::RightOnly),
+        ]);
+        for direction in [
+            SyncDirection::LeftToRight,
+            SyncDirection::RightToLeft,
+            SyncDirection::Both,
+        ] {
+            for delete_extras in [false, true] {
+                for propagate in [false, true] {
+                    for base in [Some(&baseline), None] {
+                        let opts = SyncOptions {
+                            direction,
+                            delete_extras,
+                            propagate_deletes: propagate,
+                            profile: true,
+                        };
+                        let plan = build_sync_plan(&report, &opts, base);
+                        assert_profile_plan_invariants(&plan);
+                        let mut decisions = HashMap::new();
+                        for it in &plan {
+                            decisions.insert(it.name.clone(), SyncDecision::KeepLeft);
+                        }
+                        assert_profile_plan_invariants(&apply_decisions(
+                            &plan,
+                            &decisions,
+                            PlanMode::Profile,
+                        ));
+                        for it in &mut decisions {
+                            *it.1 = SyncDecision::KeepRight;
+                        }
+                        assert_profile_plan_invariants(&apply_decisions(
+                            &plan,
+                            &decisions,
+                            PlanMode::Profile,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_plan_item_rejects_unknown_fields() {
+        let ok = r#"{"name":"a","state":"leftOnly","action":"copyToRight"}"#;
+        assert!(serde_json::from_str::<SyncPlanItem>(ok).is_ok());
+
+        let legacy = r#"{"name":"A","state":"rightOnly","action":"deleteRight","isDir":true,"deleteIfEmpty":true}"#;
+        assert!(serde_json::from_str::<SyncPlanItem>(legacy).is_err());
+
+        let other = r#"{"name":"a","state":"leftOnly","action":"copyToRight","bogus":1}"#;
+        assert!(serde_json::from_str::<SyncPlanItem>(other).is_err());
     }
 }

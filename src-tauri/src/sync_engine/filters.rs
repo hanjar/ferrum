@@ -172,7 +172,9 @@ impl Pattern {
                 let seg_refs: Vec<&str> = self.segments.iter().map(|s| s.as_str()).collect();
                 prefix_could_lead(&seg_refs, dir_segments)
             } else {
-                false
+                // Unanchored folder-only pattern (`docs\`) matches at any depth, so
+                // any directory may lead to a match.
+                true
             }
         } else if !self.anchored {
             // An unanchored file pattern (e.g. *.txt) can match at any depth in any directory
@@ -547,8 +549,28 @@ mod tests {
         assert!(filter.visible("docs", true));
         assert!(filter.visible(r"docs\readme.txt", false));
         assert!(filter.visible(r"docs\specs\arch.pdf", false));
-        assert!(!filter.visible("photos", true));
+        // An unanchored `docs\` can match at any depth, so other folders stay visible
+        // (they are walked to look for nested `docs`), but their files do not.
+        assert!(filter.visible("photos", true));
         assert!(!filter.visible(r"photos\pic.jpg", false));
+    }
+
+    #[test]
+    fn test_include_unanchored_folder_matches_nested() {
+        // Include `docs\` without anchor matches at any depth, like exclude.
+        let filter = ProfileFilter::new(&[r"docs\".to_string()], &[]).unwrap();
+
+        assert!(filter.visible("a", true)); // must be descended to reach a\docs
+        assert!(filter.visible(r"a\docs", true));
+        assert!(filter.visible(r"a\docs\readme.txt", false));
+        assert!(filter.visible(r"a\b\docs\specs\arch.pdf", false));
+        assert!(!filter.visible(r"a\b\photos\pic.jpg", false));
+        assert!(!filter.visible(r"a\docs", false)); // a file named docs is not a folder
+
+        // An anchored folder include stays root-only.
+        let anchored = ProfileFilter::new(&[r"x\docs\".to_string()], &[]).unwrap();
+        assert!(anchored.visible(r"x\docs\f.txt", false));
+        assert!(!anchored.visible(r"y\x\docs\f.txt", false));
     }
 
     #[test]
