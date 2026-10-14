@@ -1,0 +1,57 @@
+{
+  "name": "Baseline untrusted because root does not match",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "file.txt",
+        "state": "sizeDifferent",
+        "leftSize": 200,
+        "leftModifiedMs": 2000,
+        "rightSize": 100,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both"
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Other",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "file.txt": {
+        "left": { "size": 100, "modifiedMs": 1000 },
+        "right": { "size": 100, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "file.txt",
+        "state": "sizeDifferent",
+        "action": "conflict",
+        "reason": "noBaseline",
+        "leftPath": "C:\\Left\\file.txt",
+        "rightPath": "D:\\Right\\file.txt"
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "toRight": 0,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 0,
+      "conflicts": 1,
+      "skipped": 0,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

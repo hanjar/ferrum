@@ -1,0 +1,159 @@
+{
+  "name": "Profile two-way sync with deletion propagation: folders become removeEmptyDir and createDir, never recursive",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "docs",
+        "state": "rightOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "docs/guide.md",
+        "state": "rightOnly",
+        "isDir": false,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 200,
+        "rightModifiedMs": 2000
+      },
+      {
+        "name": "new-folder",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "new-folder/file.txt",
+        "state": "leftOnly",
+        "isDir": false,
+        "leftSize": 50,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "src",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "src/mod.rs",
+        "state": "leftOnly",
+        "isDir": false,
+        "leftSize": 200,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "both",
+    "deleteExtras": false,
+    "propagateDeletes": true,
+    "profile": true
+  },
+  "baseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "docs": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      },
+      "docs/guide.md": {
+        "left": { "size": 100, "modifiedMs": 1000 },
+        "right": { "size": 100, "modifiedMs": 1000 }
+      },
+      "src": {
+        "left": { "size": 0, "modifiedMs": 1000 },
+        "right": { "size": 0, "modifiedMs": 1000 }
+      },
+      "src/mod.rs": {
+        "left": { "size": 200, "modifiedMs": 1000 },
+        "right": { "size": 200, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "expected": {
+    "items": [
+      {
+        "name": "docs",
+        "state": "rightOnly",
+        "action": "removeEmptyDirRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\docs",
+        "rightPath": "D:\\Right\\docs"
+      },
+      {
+        "name": "docs/guide.md",
+        "state": "rightOnly",
+        "action": "conflict",
+        "reason": "modifyDelete",
+        "isDir": false,
+        "leftPath": "C:\\Left\\docs\\guide.md",
+        "rightPath": "D:\\Right\\docs\\guide.md"
+      },
+      {
+        "name": "new-folder",
+        "state": "leftOnly",
+        "action": "createDirRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\new-folder",
+        "rightPath": "D:\\Right\\new-folder"
+      },
+      {
+        "name": "new-folder/file.txt",
+        "state": "leftOnly",
+        "action": "copyToRight",
+        "isDir": false,
+        "leftPath": "C:\\Left\\new-folder\\file.txt",
+        "rightPath": "D:\\Right\\new-folder\\file.txt"
+      },
+      {
+        "name": "src",
+        "state": "leftOnly",
+        "action": "removeEmptyDirLeft",
+        "isDir": true,
+        "leftPath": "C:\\Left\\src",
+        "rightPath": "D:\\Right\\src"
+      },
+      {
+        "name": "src/mod.rs",
+        "state": "leftOnly",
+        "action": "deleteLeft",
+        "isDir": false,
+        "leftPath": "C:\\Left\\src\\mod.rs",
+        "rightPath": "D:\\Right\\src\\mod.rs"
+      }
+    ],
+    "summary": {
+      "total": 6,
+      "toRight": 2,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 3,
+      "conflicts": 1,
+      "skipped": 0,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "name": "Reconcile baseline on successful run",
+  "previous": null,
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "eq.txt",
+        "state": "same",
+        "leftSize": 20,
+        "leftModifiedMs": 1000,
+        "rightSize": 20,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "ok.txt",
+        "state": "same",
+        "leftSize": 10,
+        "leftModifiedMs": 1000,
+        "rightSize": 10,
+        "rightModifiedMs": 1500
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "plan": [
+    {
+      "name": "ok.txt",
+      "state": "leftOnly",
+      "action": "copyToRight"
+    },
+    {
+      "name": "eq.txt",
+      "state": "same",
+      "action": "skip"
+    }
+  ],
+  "outcomes": {
+    "ok.txt": "ok"
+  },
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "eq.txt": {
+        "left": { "size": 20, "modifiedMs": 1000 },
+        "right": { "size": 20, "modifiedMs": 1000 }
+      },
+      "ok.txt": {
+        "left": { "size": 10, "modifiedMs": 1000 },
+        "right": { "size": 10, "modifiedMs": 1500 }
+      }
+    }
+  },
+  "provesFullSync": true
+}

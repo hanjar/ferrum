@@ -77,3 +77,44 @@ class ContextMenuStore {
 }
 
 export const contextMenu = new ContextMenuStore();
+
+export interface MenuFocusReturn<T = string> {
+  activeId: T | null;
+  setOpener(el: HTMLElement | undefined, id?: T | null): void;
+  clear(): void;
+}
+
+/**
+ * Shared helper for components opening contextMenu from trigger buttons (e.g. action dropdowns).
+ * Retains the trigger element and restores focus to it when the menu closes,
+ * tracking the currently active item id for aria-expanded states.
+ */
+export function createMenuFocusReturn<T = string>(): MenuFocusReturn<T> {
+  let opener: HTMLElement | undefined;
+  let activeId = $state<T | null>(null);
+
+  $effect(() => {
+    if (contextMenu.isOpen) return;
+    activeId = null;
+    const el = opener;
+    opener = undefined;
+    if (el?.isConnected) el.focus();
+  });
+
+  return {
+    get activeId(): T | null {
+      return activeId;
+    },
+    set activeId(v: T | null) {
+      activeId = v;
+    },
+    setOpener(el: HTMLElement | undefined, id?: T | null): void {
+      opener = el;
+      if (id !== undefined) activeId = id;
+    },
+    clear(): void {
+      opener = undefined;
+      activeId = null;
+    },
+  };
+}

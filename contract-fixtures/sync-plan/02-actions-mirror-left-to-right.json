@@ -1,0 +1,92 @@
+{
+  "name": "Mirror sync actions leftToRight (deleteRight, updateRight, copyToRight, skip)",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "copy.txt",
+        "state": "leftOnly",
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "update.txt",
+        "state": "sizeDifferent",
+        "leftSize": 250,
+        "leftModifiedMs": 1000,
+        "rightSize": 200,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "same.txt",
+        "state": "same",
+        "leftSize": 300,
+        "leftModifiedMs": 1000,
+        "rightSize": 300,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "extra.txt",
+        "state": "rightOnly",
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 400,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "leftToRight",
+    "deleteExtras": true
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "copy.txt",
+        "state": "leftOnly",
+        "action": "copyToRight",
+        "leftPath": "C:\\Left\\copy.txt",
+        "rightPath": "D:\\Right\\copy.txt"
+      },
+      {
+        "name": "update.txt",
+        "state": "sizeDifferent",
+        "action": "updateRight",
+        "leftPath": "C:\\Left\\update.txt",
+        "rightPath": "D:\\Right\\update.txt"
+      },
+      {
+        "name": "same.txt",
+        "state": "same",
+        "action": "skip",
+        "leftPath": "C:\\Left\\same.txt",
+        "rightPath": "D:\\Right\\same.txt"
+      },
+      {
+        "name": "extra.txt",
+        "state": "rightOnly",
+        "action": "deleteRight",
+        "leftPath": "C:\\Left\\extra.txt",
+        "rightPath": "D:\\Right\\extra.txt"
+      }
+    ],
+    "summary": {
+      "total": 4,
+      "toRight": 2,
+      "toLeft": 0,
+      "overwrites": 1,
+      "deletes": 1,
+      "conflicts": 0,
+      "skipped": 1,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}

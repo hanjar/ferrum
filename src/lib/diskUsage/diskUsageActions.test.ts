@@ -288,6 +288,27 @@ describe('context menu items — no auto-clean, root stays read-only', () => {
   });
 });
 
+describe('file row context menu items (FER-540) — no auto-clean', () => {
+  it('offers Reveal, Copy path, Properties, Move, Delete', () => {
+    const onreveal = vi.fn();
+    const oncopy = vi.fn();
+    const items = duActions.duFileRowActionItems(diskUsage, target, {
+      onreveal,
+      oncopy,
+    });
+    const labels = items.map((i) => ('separator' in i ? '—' : i.label));
+    expect(labels).toEqual(['Reveal', 'Copy path', 'Properties', 'Move…', 'Delete…']);
+    for (const it of items) {
+      if ('label' in it) expect(it.label).not.toMatch(/clean|wipe|auto/i);
+    }
+  });
+
+  it('Reveal is disabled when onreveal is not provided', () => {
+    const items = duActions.duFileRowActionItems(diskUsage, target);
+    expect(items[0]).toMatchObject({ label: 'Reveal', disabled: true });
+  });
+});
+
 describe('no auto-clean surface (contract §2.3/§2.5)', () => {
   it('the module exports exactly the audited action surface', async () => {
     const mod = await import('./diskUsageActions.svelte');
@@ -295,6 +316,7 @@ describe('no auto-clean surface (contract §2.3/§2.5)', () => {
       'DU_SIZE_NOTE',
       'copyScanPath',
       'deleteScanEntryWithConfirm',
+      'duFileRowActionItems',
       'duRowActionItems',
       'moveScanEntryToOtherPane',
       'openPropertiesFor',
