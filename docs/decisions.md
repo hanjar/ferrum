@@ -5,7 +5,7 @@ dokumen ini dan menambah entri bila ada keputusan baru. Format: tanggal, keputus
 
 ## Konteks
 
-Handover 27 September 2026: file manager desktop dual-pane, Rust untuk I/O filesystem,
+Brief awal 27 September 2026: file manager desktop dual-pane, Rust untuk I/O filesystem,
 Svelte untuk UI, IPC eksplisit bertipe.
 
 ## Desain awal
@@ -60,7 +60,7 @@ atau tidak menampilkannya sama sekali sampai task-nya ada.
   lokasi arbitrer (file manager sejati), validasi path hanya untuk bentuk path yang sah
   (bukan path kosong/invalid), bukan sandbox.
 - Bahasa UI: Inggris (sesuai prototipe). Bahasa dokumentasi proyek: campuran
-  Indonesia/Inggris mengikuti dokumen handover.
+  Indonesia/Inggris mengikuti brief awal.
 
 ## Keputusan F2-25/F2-27 (28 September 2026)
 

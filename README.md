@@ -40,8 +40,16 @@ Features in Ferrum are designed with safety, reliability, and keyboard productiv
   - **Disk Usage Workspace (`Alt+Shift+D`)**: Fast volume and folder space breakdown.
   - **File Tools**: Generate and verify checksums (MD5, SHA-1, SHA-256), split and combine files, and encode/decode (Base64, UUE, XXE).
 
+- **AI Assistant (optional, off until configured)**:
+  - Chat assistant that turns a typed request (for example creating an archive or planning a directory sync) into a plan you review. Nothing runs before you approve it, and results are reported from the engine, not from the model.
+  - You bring your own provider: any OpenAI-compatible chat endpoint (HTTPS, or `localhost` with an explicit port) configured in Settings > AI. The API key is stored in Windows Credential Manager and read only by the backend. The endpoint is validated and locked to your saved setup, and sensitive actions ask for a native Windows confirmation.
+  - Privacy: your typed request goes to the endpoint you configured, together with minimal context (active pane, item counts). File names, paths and file contents are not sent for archive and sync planning. See [docs/ai/provider.md](docs/ai/provider.md).
+  - Optional external agent CLIs (for example Claude Code or Codex, if you have them installed): ask a read-only question about attached files, or open an agent in a terminal at the current folder. Each launch requires your confirmation. See [docs/ai/agent-cli.md](docs/ai/agent-cli.md).
+
+- **Automation (in development)**: a headless Sync Profile engine exists in the codebase, but there is no user interface, scheduling or folder watching yet, and it is not a finished feature. Design and status: [docs/specs/automation/](docs/specs/automation/design.md).
+
 - **Personalization & Keyboard Focus**:
-  - Six color palettes (Violet, Emerald, etc.) with dark, light, and system theme auto-switching.
+  - Six color palettes (Pop Violet, Electric, Aqua Signal, Fresh Mint, Sunshine, Tangerine) with dark, light, and system theme auto-switching.
   - Configurable interface font scaling (S, M, L, XL), row density, and icon styles.
   - Command Palette (`Ctrl+K`) for fast action execution, plus custom keybar.
   - Privacy-conscious Activity tracking: recent and frequent folders with private session mode and full data clearing.
@@ -56,7 +64,7 @@ To build Ferrum from source:
 
 - **Operating System**: Windows 10/11 x64
 - **Node.js**: v20 or newer
-- **Rust**: 1.80+ with the MSVC toolchain (`x86_64-pc-windows-msvc`)
+- **Rust**: 1.98.1 (pinned by `rust-toolchain.toml`, installed automatically by `rustup`) with the MSVC toolchain (`x86_64-pc-windows-msvc`)
 - **C++ Build Tools**: Visual Studio 2022 Build Tools (with C++ Desktop development and Windows SDK)
 
 ---

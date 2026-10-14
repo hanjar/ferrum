@@ -14,7 +14,7 @@ Status: **BEKU** untuk gelombang implementasi APP-01/02/03/06/07/08. Sumber nila
 | `orange`   | Tangerine   | #FF6A00                |
 
 - Mode TERPISAH dari palet: `theme: 'dark'|'light'|'system'`; dokumen selalu menerima `data-theme` EFEKTIF (`dark|light`) + `data-palette`.
-- Green variant emerald/lime **tidak ada** fase ini (keputusan handover; default v3 = blok green standar).
+- Green variant emerald/lime **tidak ada** fase ini (keputusan desain; default v3 = blok green standar).
 
 ## 2. Atribut dokumen (satu titik kebenaran: `ui.applyToDocument()`)
 
