@@ -2009,7 +2009,7 @@ pub async fn shell_open(
                     crate::shell_open::native_confirm,
                 )
             },
-            shell_execute,
+            crate::shell_open::shell_execute_target,
         )
     })
     .await
@@ -2048,41 +2048,6 @@ mod shell_open_record_tests {
         assert!(!shell_open_records(false, Some(true)));
         assert!(!shell_open_records(false, None));
     }
-}
-
-#[cfg(target_os = "windows")]
-fn shell_execute(path: &str) -> Result<bool, FsError> {
-    use windows_sys::Win32::System::Com::CoInitializeEx;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-    unsafe {
-        // ShellExecuteW requires a COM thread; ignore change-mode races with
-        // the host runtime and never uninitialize (thread lives on).
-        const COINIT_APARTMENTTHREADED: u32 = 2;
-        let _ = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
-        let verb = wide("open");
-        let file = wide(path);
-        let result = ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, // SW_SHOWNORMAL
-        );
-        Ok((result as isize) > 32)
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn shell_execute(_path: &str) -> Result<bool, FsError> {
-    Err(FsError::new(
-        crate::domain::ErrorCode::Unsupported,
-        "OS open is Windows-only in this milestone",
-    ))
 }
 
 // ── F2-17: bounded safe preview ──────────────────────────────────────────

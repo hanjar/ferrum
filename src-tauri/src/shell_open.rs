@@ -240,56 +240,226 @@ impl LaunchVerb {
 }
 
 #[cfg(windows)]
-pub fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+#[derive(Debug)]
+pub struct Pidl(pub *mut windows_sys::Win32::UI::Shell::Common::ITEMIDLIST);
+
+#[cfg(windows)]
+unsafe impl Send for Pidl {}
+#[cfg(windows)]
+unsafe impl Sync for Pidl {}
+
+#[cfg(windows)]
+impl Drop for Pidl {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::System::Com::CoTaskMemFree(self.0 as _);
+            }
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LaunchTarget {
+    #[cfg(windows)]
+    pub pidl: Pidl,
+    pub resolved_path: String,
+}
+
+impl LaunchTarget {
+    pub fn resolved_path(&self) -> &str {
+        &self.resolved_path
+    }
+
+    #[cfg(windows)]
+    pub fn pidl(&self) -> &Pidl {
+        &self.pidl
+    }
+}
+
+impl std::ops::Deref for LaunchTarget {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.resolved_path
+    }
+}
+
+impl AsRef<str> for LaunchTarget {
+    fn as_ref(&self) -> &str {
+        &self.resolved_path
+    }
+}
+
+impl AsRef<std::path::Path> for LaunchTarget {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.resolved_path)
+    }
+}
+
+#[cfg(windows)]
+pub fn ensure_com_initialized() {
+    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    unsafe {
+        let _ = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED as u32);
+    }
+}
+
+#[cfg(windows)]
+pub fn parse_pidl(path: &str) -> Result<Pidl, FsError> {
+    use windows_sys::Win32::UI::Shell::SHParseDisplayName;
+    let wide = to_wide(path);
+    let mut pidl = std::ptr::null_mut();
+    let hr = unsafe {
+        SHParseDisplayName(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &mut pidl,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if hr != 0 || pidl.is_null() {
+        return Err(FsError::new(
+            ErrorCode::NotFound,
+            format!("Gagal me-resolve target '{path}': HRESULT 0x{hr:08X}"),
+        )
+        .with_path(path));
+    }
+    Ok(Pidl(pidl))
+}
+
+#[cfg(windows)]
+pub fn get_resolved_path_from_pidl(pidl: &Pidl) -> Result<String, FsError> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{SHGetNameFromIDList, SIGDN_FILESYSPATH};
+
+    let mut name_ptr = std::ptr::null_mut();
+    let hr = unsafe { SHGetNameFromIDList(pidl.0 as _, SIGDN_FILESYSPATH, &mut name_ptr) };
+    if hr != 0 || name_ptr.is_null() {
+        return Err(FsError::new(
+            ErrorCode::InvalidPath,
+            format!("Gagal mendapatkan path dari IDList: HRESULT 0x{hr:08X}"),
+        ));
+    }
+    let mut len = 0;
+    unsafe {
+        while *name_ptr.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { std::slice::from_raw_parts(name_ptr, len) };
+    let path = String::from_utf16_lossy(slice);
+    unsafe {
+        CoTaskMemFree(name_ptr as _);
+    }
+    Ok(path)
+}
+
+#[cfg(windows)]
+pub fn resolve_target(path: &str) -> Result<LaunchTarget, FsError> {
+    ensure_com_initialized();
+    let checked = external_target(path)?;
+    let pidl = parse_pidl(&checked)?;
+    let resolved = get_resolved_path_from_pidl(&pidl)?;
+    if resolved
+        .chars()
+        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
+    {
+        return Err(refused_target());
+    }
+    if has_ads(&resolved) {
+        return Err(refused_target());
+    }
+    Ok(LaunchTarget {
+        pidl,
+        resolved_path: resolved,
+    })
+}
+
+#[cfg(not(windows))]
+pub fn resolve_target(path: &str) -> Result<LaunchTarget, FsError> {
+    let checked = external_target(path)?;
+    if checked
+        .chars()
+        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
+    {
+        return Err(refused_target());
+    }
+    if has_ads(&checked) {
+        return Err(refused_target());
+    }
+    Ok(LaunchTarget {
+        resolved_path: checked,
+    })
+}
+
+#[cfg(windows)]
+pub fn shell_execute_pidl(verb: LaunchVerb, target: &LaunchTarget) -> Result<(), FsError> {
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
+        ShellExecuteExW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let verb_wide = to_wide(verb.as_str());
-    let file_wide = to_wide(path);
-    // std::ptr::null_mut for HWND and the parameter/directory fields: no
-    // parent window, no arguments, file's own directory.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb_wide.as_ptr(),
-            file_wide.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    let code = result as isize;
-    if code > 32 {
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    let mut mask = SEE_MASK_INVOKEIDLIST | SEE_MASK_NOASYNC;
+    if verb != LaunchVerb::OpenAs {
+        mask |= SEE_MASK_FLAG_NO_UI;
+    }
+    sei.fMask = mask;
+    sei.hwnd = std::ptr::null_mut();
+    sei.lpVerb = verb_wide.as_ptr();
+    sei.lpFile = std::ptr::null();
+    sei.lpParameters = std::ptr::null();
+    sei.lpDirectory = std::ptr::null();
+    sei.nShow = SW_SHOWNORMAL;
+    sei.lpIDList = target.pidl.0 as _;
+
+    let ok = unsafe { ShellExecuteExW(&mut sei) };
+    if ok != 0 {
         Ok(())
     } else {
-        Err(se_err(code, verb.as_str(), path))
+        let err = std::io::Error::last_os_error();
+        let code = err.raw_os_error().unwrap_or(0);
+        Err(se_err(code as isize, verb.as_str(), target.resolved_path()))
     }
 }
 
 #[cfg(not(windows))]
-pub fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
+pub fn shell_execute_pidl(verb: LaunchVerb, target: &LaunchTarget) -> Result<(), FsError> {
     match verb {
         LaunchVerb::OpenAs | LaunchVerb::Print => Err(FsError::new(
             ErrorCode::Unsupported,
             format!("The {} action is only available on Windows", verb.as_str()),
         )
-        .with_path(path)),
+        .with_path(target.resolved_path())),
         LaunchVerb::Open => {
-            // Structured argv via xdg-open / open — never a shell string.
             let mut cmd = if cfg!(target_os = "macos") {
                 let mut c = std::process::Command::new("open");
-                c.arg(path);
+                c.arg(target.resolved_path());
                 c
             } else {
                 let mut c = std::process::Command::new("xdg-open");
-                c.arg(path);
+                c.arg(target.resolved_path());
                 c
             };
             cmd.spawn()
                 .map(|_| ())
-                .map_err(|e| FsError::from(e).with_path(path))
+                .map_err(|e| FsError::from(e).with_path(target.resolved_path()))
         }
     }
+}
+
+pub fn shell_execute(verb: LaunchVerb, path: &str) -> Result<(), FsError> {
+    let target = resolve_target(path)?;
+    shell_execute_pidl(verb, &target)
+}
+
+pub fn shell_execute_target(target: &LaunchTarget) -> Result<bool, FsError> {
+    shell_execute_pidl(LaunchVerb::Open, target).map(|_| true)
 }
 
 /// FER-467 R5: the only things `open_external`, Associate With, print and `shell_open` hand to
@@ -394,6 +564,32 @@ pub const RISKY_EXTENSIONS: &[&str] = &[
     "iqy",
     "slk",
     "website",
+    // Python / script associations (FER-513 Rework 1)
+    "py",
+    "pyw",
+    "pyc",
+    "pyo",
+    "pyz",
+    "pyzw",
+    // Shell & deployment associations (FER-513 Rework 1)
+    "wsb",
+    "theme",
+    "themepack",
+    "deskthemepack",
+    "msu",
+    "appinstaller",
+    "jnlp",
+    // Database / Access / Office executable associations (FER-513 Rework 1)
+    "mdb",
+    "mde",
+    "accdb",
+    "accde",
+    "accda",
+    "ade",
+    "adp",
+    // XAML / ClickOnce / VSTO (FER-513 Rework 1)
+    "xbap",
+    "vsto",
 ];
 
 fn has_ads(path: &str) -> bool {
@@ -423,9 +619,6 @@ pub fn is_risky_target(path: impl AsRef<std::path::Path>) -> Result<bool, FsErro
     if has_ads(&s) {
         return Err(refused_target());
     }
-    if std::fs::symlink_metadata(p).is_ok_and(|meta| meta.is_dir()) {
-        return Ok(false);
-    }
     let file_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => name,
         None => return Ok(false),
@@ -449,8 +642,16 @@ pub fn is_risky_target(path: impl AsRef<std::path::Path>) -> Result<bool, FsErro
 
 /// Text for the native confirmation dialog before launching risky targets.
 pub fn confirm_prompt_text(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let trimmed = file_name.trim_end_matches(['.', ' ']);
+    let ext = if let Some(dot_idx) = trimmed.rfind('.') {
+        &trimmed[dot_idx + 1..]
+    } else {
+        ""
+    };
     format!(
-        "Jalankan program ini?\n\n{path}\n\nProgram dapat mengubah sistem atau file Anda. Jalankan hanya jika Anda memercayai file ini."
+        "Jalankan program ini?\n\nNama: {file_name}\nJenis: .{ext}\nPath: {path}\n\nProgram dapat mengubah sistem atau file Anda. Jalankan hanya jika Anda memercayai file ini."
     )
 }
 
@@ -530,17 +731,17 @@ pub fn shell_open_with<C, L>(
 ) -> Result<bool, FsError>
 where
     C: FnOnce(isize, &str) -> Result<bool, FsError>,
-    L: FnOnce(&str) -> Result<bool, FsError>,
+    L: FnOnce(&LaunchTarget) -> Result<bool, FsError>,
 {
-    let target = external_target(path)?;
-    let is_risky = is_risky_target(&target)?;
+    let target = resolve_target(path)?;
+    let is_risky = is_risky_target(target.resolved_path())?;
     if is_risky {
-        let prompt_text = confirm_prompt_text(&target);
+        let prompt_text = confirm_prompt_text(target.resolved_path());
         let confirmed = confirm(owner, &prompt_text)?;
         if !confirmed {
             return Err(
                 FsError::new(ErrorCode::Cancelled, "Operasi dibatalkan oleh pengguna")
-                    .with_path(&target),
+                    .with_path(target.resolved_path()),
             );
         }
     }
@@ -556,7 +757,7 @@ pub fn open_external_with<C, L>(
 ) -> Result<(), FsError>
 where
     C: FnOnce(isize, &str) -> Result<bool, FsError>,
-    L: FnOnce(LaunchVerb, &str) -> Result<(), FsError>,
+    L: FnOnce(LaunchVerb, &LaunchTarget) -> Result<(), FsError>,
 {
     shell_open_with(owner, path, confirm, |target| {
         launcher(LaunchVerb::Open, target).map(|_| true)
@@ -570,7 +771,7 @@ pub fn open_external_in(owner: isize, path: &str) -> Result<(), FsError> {
         owner,
         path,
         |o, text| native_confirm_with_guard(o, text, native_confirm),
-        shell_execute,
+        shell_execute_pidl,
     )
 }
 
@@ -657,20 +858,21 @@ pub fn launch_program(command: &str, args: &[String]) -> Result<(), FsError> {
 /// Open the OS "Associate With…" picker for one file. The picker is the
 /// explicit user action — Ferrum itself never writes an association.
 pub fn associate_with(path: &str) -> Result<(), FsError> {
-    shell_execute(LaunchVerb::OpenAs, &external_target(path)?)
+    let target = resolve_target(path)?;
+    shell_execute_pidl(LaunchVerb::OpenAs, &target)
 }
 
 /// Hand a file to its associated application's print verb (F2-27).
 pub fn print_file(path: &str) -> Result<(), FsError> {
-    let target = external_target(path)?;
-    if is_risky_target(&target)? {
+    let target = resolve_target(path)?;
+    if is_risky_target(target.resolved_path())? {
         return Err(FsError::new(
             ErrorCode::Unsupported,
             "Printing executable or risky targets is not supported",
         )
-        .with_path(&target));
+        .with_path(target.resolved_path()));
     }
-    shell_execute(LaunchVerb::Print, &target)
+    shell_execute_pidl(LaunchVerb::Print, &target)
 }
 
 #[cfg(test)]
@@ -991,7 +1193,8 @@ mod tests {
         assert!(!is_risky_target(dir.path()).unwrap());
         let folder_exe = dir.path().join("folder.exe");
         std::fs::create_dir(&folder_exe).unwrap();
-        assert!(!is_risky_target(&folder_exe).unwrap());
+        // FER-513 Rework 1: folders named with risky extensions (like *.exe) are risky
+        assert!(is_risky_target(&folder_exe).unwrap());
 
         // ADS is completely rejected
         for ads in [
@@ -1030,6 +1233,8 @@ mod tests {
             |_owner, text| {
                 asked.set(true);
                 assert!(text.contains("Jalankan program ini?"));
+                assert!(text.contains("Nama: program.exe"));
+                assert!(text.contains("Jenis: .exe"));
                 assert!(text.contains(&exe_str));
                 Ok(false) // user cancelled
             },
@@ -1063,10 +1268,12 @@ mod tests {
             |_owner, text| {
                 asked.set(true);
                 assert!(text.contains("Jalankan program ini?"));
+                assert!(text.contains("Nama: program.exe"));
+                assert!(text.contains("Jenis: .exe"));
                 Ok(true) // user confirmed
             },
             |target| {
-                *launched_path.borrow_mut() = Some(target.to_string());
+                *launched_path.borrow_mut() = Some(target.resolved_path().to_string());
                 Ok(true)
             },
         );
@@ -1096,7 +1303,7 @@ mod tests {
                 panic!("non-risky file must never trigger confirmation dialog");
             },
             |target| {
-                *launched_path.borrow_mut() = Some(target.to_string());
+                *launched_path.borrow_mut() = Some(target.resolved_path().to_string());
                 Ok(true)
             },
         );
@@ -1147,5 +1354,227 @@ mod tests {
 
         let err = print_file(&exe_str).expect_err("print verb on risky target must fail");
         assert_eq!(err.code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn test_shell_open_nonexistent_target_with_sibling_bat_fails_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let bat = dir.path().join("foo.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let foo_str = dir.path().join("foo").to_string_lossy().into_owned();
+
+        let asked = std::cell::Cell::new(false);
+        let launched = std::cell::Cell::new(false);
+
+        let res = shell_open_with(
+            0,
+            &foo_str,
+            |_owner, _text| {
+                asked.set(true);
+                Ok(true)
+            },
+            |_target| {
+                launched.set(true);
+                Ok(true)
+            },
+        );
+
+        assert!(res.is_err(), "nonexistent target must fail to parse");
+        assert!(!asked.get(), "confirm must not be called when parse fails");
+        assert!(
+            !launched.get(),
+            "launcher must not be called when parse fails"
+        );
+    }
+
+    #[test]
+    fn test_shell_open_nonexistent_trailing_dot_with_sibling_bat_fails_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let bat = dir.path().join("foo.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let foo_dot = format!("{}.", dir.path().join("foo").to_string_lossy());
+
+        let asked = std::cell::Cell::new(false);
+        let launched = std::cell::Cell::new(false);
+
+        let res = shell_open_with(
+            0,
+            &foo_dot,
+            |_owner, _text| {
+                asked.set(true);
+                Ok(true)
+            },
+            |_target| {
+                launched.set(true);
+                Ok(true)
+            },
+        );
+
+        assert!(res.is_err(), "trailing-dot nonexistent target must fail");
+        assert!(!asked.get(), "confirm must not be called");
+        assert!(!launched.get(), "launcher must not be called");
+    }
+
+    #[test]
+    fn test_shell_open_folder_with_sibling_bat_resolves_to_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let bar_dir = dir.path().join("bar");
+        std::fs::create_dir(&bar_dir).unwrap();
+        let bat = dir.path().join("bar.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let bar_str = bar_dir.to_string_lossy().into_owned();
+
+        let asked = std::cell::Cell::new(false);
+        let launched_target = std::cell::RefCell::new(None);
+
+        let res = shell_open_with(
+            0,
+            &bar_str,
+            |_owner, _text| {
+                asked.set(true);
+                Ok(true)
+            },
+            |target| {
+                #[cfg(windows)]
+                assert!(!target.pidl().0.is_null());
+                *launched_target.borrow_mut() = Some(target.resolved_path().to_string());
+                Ok(true)
+            },
+        );
+
+        assert!(res.unwrap());
+        assert!(!asked.get(), "plain folder must never ask confirmation");
+        let launched = launched_target.borrow().clone().unwrap();
+        assert!(
+            launched.ends_with("bar") && !launched.ends_with("bar.bat"),
+            "resolved target must be the folder 'bar', not 'bar.bat': got {launched}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_shell_open_short_name_8dot3_resolves_to_long_path_and_is_risky() {
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let dir = tempfile::tempdir().unwrap();
+        let long_file = dir.path().join("longname.appref-ms");
+        std::fs::write(&long_file, b"test").unwrap();
+        let long_str = long_file.to_string_lossy().into_owned();
+
+        let long_wide = to_wide(&long_str);
+        let mut short_buf = vec![0u16; 1024];
+        let len = unsafe {
+            GetShortPathNameW(
+                long_wide.as_ptr(),
+                short_buf.as_mut_ptr(),
+                short_buf.len() as u32,
+            )
+        };
+        if len == 0 || (len as usize) >= short_buf.len() {
+            println!("Skipping 8.3 short name test: GetShortPathNameW failed");
+            return;
+        }
+        let short_str = String::from_utf16_lossy(&short_buf[..len as usize]);
+        if short_str.eq_ignore_ascii_case(&long_str) {
+            println!("Skipping 8.3 short name test: volume does not generate short 8.3 names");
+            return;
+        }
+
+        let asked = std::cell::Cell::new(false);
+        let launched_target = std::cell::RefCell::new(None);
+
+        let res = shell_open_with(
+            0,
+            &short_str,
+            |_owner, text| {
+                asked.set(true);
+                assert!(
+                    text.contains("longname.appref-ms"),
+                    "dialog must display the resolved long name: {text}"
+                );
+                assert!(
+                    text.contains("Jenis: .appref-ms"),
+                    "dialog must display the resolved extension: {text}"
+                );
+                Ok(true)
+            },
+            |target| {
+                *launched_target.borrow_mut() = Some(target.resolved_path().to_string());
+                Ok(true)
+            },
+        );
+
+        assert!(res.unwrap());
+        assert!(
+            asked.get(),
+            "8.3 short name resolving to risky target must trigger dialog"
+        );
+        let launched = launched_target.borrow().clone().unwrap();
+        assert!(
+            launched.ends_with("longname.appref-ms"),
+            "launcher must receive resolved long path: got {launched}"
+        );
+    }
+
+    #[test]
+    fn test_shell_open_folder_named_exe_triggers_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder_exe = dir.path().join("x.exe");
+        std::fs::create_dir(&folder_exe).unwrap();
+        let folder_str = folder_exe.to_string_lossy().into_owned();
+
+        let asked = std::cell::Cell::new(false);
+        let launched = std::cell::Cell::new(false);
+
+        // Declined by user
+        let res = shell_open_with(
+            0,
+            &folder_str,
+            |_owner, text| {
+                asked.set(true);
+                assert!(text.contains("Nama: x.exe"));
+                assert!(text.contains("Jenis: .exe"));
+                Ok(false) // user cancelled
+            },
+            |_target| {
+                launched.set(true);
+                Ok(true)
+            },
+        );
+
+        assert_eq!(res.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(
+            asked.get(),
+            "folder named x.exe must trigger confirmation dialog"
+        );
+        assert!(
+            !launched.get(),
+            "launcher must not be called when cancelled"
+        );
+
+        // Accepted by user
+        let res_ok = shell_open_with(
+            0,
+            &folder_str,
+            |_owner, _text| Ok(true),
+            |_target| {
+                launched.set(true);
+                Ok(true)
+            },
+        );
+
+        assert!(res_ok.unwrap());
+        assert!(launched.get(), "launcher must be called when confirmed");
+    }
+
+    #[test]
+    fn test_confirm_prompt_text_format() {
+        let sample = r"C:\path\to\malicious.exe";
+        let prompt = confirm_prompt_text(sample);
+        assert!(prompt.contains("Jalankan program ini?"));
+        assert!(prompt.contains("Nama: malicious.exe"));
+        assert!(prompt.contains("Jenis: .exe"));
+        assert!(prompt.contains(r"Path: C:\path\to\malicious.exe"));
+        assert!(prompt.contains("Program dapat mengubah sistem atau file Anda. Jalankan hanya jika Anda memercayai file ini."));
     }
 }

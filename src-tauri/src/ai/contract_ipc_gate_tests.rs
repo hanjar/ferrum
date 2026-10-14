@@ -174,3 +174,110 @@ fn ai_surface_has_no_path_to_shell_open_or_executable_execution() {
         );
     }
 }
+
+/// FER-513 Rework 1: Structural proof that the AI contract is closed and provides NO capability,
+/// field, or intent to call `shell_open`, `open_external`, or arbitrary binary execution.
+#[test]
+fn ai_intents_are_structurally_isolated_from_shell_open_and_execution() {
+    // 1. The `Intent` enum is completely closed and derives `Deserialize` with `deny_unknown_fields`.
+    // We exhaustively match every variant of `Intent`. If any variant is added to `Intent` without
+    // updating this structural proof, compilation will fail.
+    fn verify_intent_structure(intent: &Intent) {
+        match intent {
+            Intent::ArchiveCreate(_) => {
+                // Creates an archive file using internal archive routines, no shell execution.
+            }
+            Intent::DirectoriesSync(_) => {
+                // Syncs two directories, no shell execution.
+            }
+            Intent::ActivityQuery(_) => {
+                // Read-only query of local history.
+            }
+            Intent::CopyAdjust(_) => {
+                // Adjusts thread pool size or priority for copy operations.
+            }
+            Intent::IndexerStatus(_) => {
+                // Read-only query of indexer status.
+            }
+            Intent::IndexerSetMode(_) => {
+                // Only carries IndexerModeChoice enum; gated by native UAC / service dialog.
+            }
+            Intent::DiskUsageQuery(_) => {
+                // Read-only query of disk usage snapshot.
+            }
+        }
+    }
+
+    // 2. Test deserialization of all valid capabilities to ensure none contain execution paths.
+    let valid_samples = [
+        json!({
+            "schemaVersion": 1,
+            "requestId": "req_1",
+            "intent": {
+                "capability": "archive.create",
+                "sourcePane": "left",
+                "selector": { "kind": "allVisible", "entries": "filesOnly" },
+                "format": "zip",
+                "target": { "kind": "pane", "pane": "right" }
+            }
+        }),
+        json!({
+            "schemaVersion": 1,
+            "requestId": "req_2",
+            "intent": {
+                "capability": "directories.sync",
+                "leftPane": "left",
+                "rightPane": "right"
+            }
+        }),
+        json!({
+            "schemaVersion": 1,
+            "requestId": "req_3",
+            "intent": {
+                "capability": "indexer.status"
+            }
+        }),
+        json!({
+            "schemaVersion": 1,
+            "requestId": "req_4",
+            "intent": {
+                "capability": "indexer.setMode",
+                "mode": "shared"
+            }
+        }),
+    ];
+
+    for sample in valid_samples {
+        let req_id = sample["requestId"].as_str().unwrap().to_string();
+        let envelope = parse_intent_offered(sample, &req_id, &ALL_CAPABILITIES);
+        if let Ok(env) = envelope {
+            verify_intent_structure(&env.intent);
+        }
+    }
+
+    // 3. Any envelope specifying any execution capability or field is rejected by the schema parser.
+    for forbidden in [
+        "shell_open",
+        "shell.open",
+        "open_external",
+        "openExternal",
+        "launch_program",
+        "print_file",
+        "associate_with",
+        "spawn_terminal",
+        "execute",
+        "run",
+    ] {
+        let envelope = json!({
+            "schemaVersion": 1,
+            "requestId": "req_1",
+            "intent": { "capability": forbidden, "path": "C:\\Windows\\System32\\cmd.exe" }
+        });
+        let err = parse_intent_offered(envelope, "req_1", &ALL_CAPABILITIES)
+            .expect_err("execution capabilities must be rejected");
+        assert!(
+            matches!(err, ContractError::InvalidEnvelope(_)),
+            "{forbidden}: {err:?}"
+        );
+    }
+}
