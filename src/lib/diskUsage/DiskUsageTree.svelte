@@ -503,12 +503,24 @@
   // One mounted ContextMenu per component; a private token keeps the hidden
   // FileList's instance from rendering this menu (FileList convention).
   const menuOwner = {};
+  let menuOpener: HTMLElement | undefined;
+  let activeRowMenuId = $state<string | null>(null);
+
+  $effect(() => {
+    if (contextMenu.isOpen) return;
+    activeRowMenuId = null;
+    const el = menuOpener;
+    menuOpener = undefined;
+    if (el?.isConnected) el.focus();
+  });
 
   function rowTarget(row: TreeRow): DuScanTarget {
     return { path: row.id, kind: row.kind, logicalBytes: row.logicalBytes };
   }
 
-  function openRowMenu(row: TreeRow, x: number, y: number): void {
+  function openRowMenu(row: TreeRow, x: number, y: number, opener?: HTMLElement): void {
+    menuOpener = opener;
+    activeRowMenuId = row.id;
     contextMenu.open(
       x,
       y,
@@ -519,14 +531,18 @@
 
   function rowContextMenu(row: TreeRow, e: MouseEvent): void {
     e.preventDefault();
-    openRowMenu(row, e.clientX, e.clientY);
+    const tr = (e.currentTarget as HTMLElement).closest('.row');
+    const btn = tr?.querySelector<HTMLButtonElement>('.ctxBtn') ?? undefined;
+    openRowMenu(row, e.clientX, e.clientY, btn);
   }
 
   /** ⋯ affordance (mouse/keyboard reachable alternative to right-click). */
   function rowMenuButton(row: TreeRow, e: MouseEvent): void {
     e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    openRowMenu(row, rect.left, rect.bottom + 2);
+    const btn =
+      (e.currentTarget as HTMLElement).closest('button') ?? (e.currentTarget as HTMLElement);
+    const rect = btn.getBoundingClientRect();
+    openRowMenu(row, rect.left, rect.bottom + 2, btn);
   }
 
   function bytesText(row: TreeRow): string {
@@ -667,6 +683,8 @@
               type="button"
               class="ctxBtn"
               tabindex="-1"
+              aria-haspopup="menu"
+              aria-expanded={contextMenu.isOpen && activeRowMenuId === row.id}
               aria-label={`Aksi untuk ${row.name}`}
               title={`Aksi baris via dialog existing (revalidasi dulu) — ${DU_SIZE_NOTE}`}
               onclick={(e) => rowMenuButton(row, e)}

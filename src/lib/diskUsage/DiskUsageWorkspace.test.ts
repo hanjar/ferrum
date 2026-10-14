@@ -329,9 +329,13 @@ describe('DiskUsageWorkspace — Reveal into the ENTRY pane', () => {
       seq: 1,
     };
     const { container } = render(DiskUsageWorkspace);
-    const reveal = [...container.querySelectorAll('button')].find(
-      (b) => b.textContent?.trim() === 'Reveal',
-    );
+    const actBtn = container.querySelector<HTMLButtonElement>('.actBtn')!;
+    expect(actBtn).toBeTruthy();
+    actBtn.click();
+    await tick();
+    const reveal = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    ).find((b) => b.textContent?.trim() === 'Reveal');
     expect(reveal).toBeTruthy();
     reveal!.click();
     await tick();
