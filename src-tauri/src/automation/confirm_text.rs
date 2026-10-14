@@ -6,6 +6,7 @@
 //! with an ellipsis in the middle, and the whole text stays within [`PROMPT_MAX_CHARS`].
 
 use crate::automation::model::{ProfilePolicy, SyncMode, delete_label, mode_label, shorten_middle};
+use crate::hotlist::model::is_format_char;
 
 /// One part of a prompt is at most this many characters (§10.3).
 pub const PART_MAX_CHARS: usize = 120;
@@ -31,8 +32,21 @@ pub struct Prompt {
     pub text: String,
 }
 
+/// One bounded part of the text. Every part is already validated (no control or format
+/// characters get past profile validation); as defence in depth any such character that still
+/// arrives is shown as a visible `<U+XXXX>` marker, so nothing can reorder or hide the text.
 fn part(s: &str) -> String {
-    shorten_middle(s, PART_MAX_CHARS)
+    let visible: String = s
+        .chars()
+        .map(|c| {
+            if c.is_control() || is_format_char(c) {
+                format!("<U+{:04X}>", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    shorten_middle(&visible, PART_MAX_CHARS)
 }
 
 /// Prompt for saving a profile whose delete policy is `permanent` (new, or changed to) and/or
@@ -183,5 +197,19 @@ mod tests {
         let p = save_profile_prompt("N", None, &policy(DeletePolicy::RecycleBin, true));
         assert!(p.text.starts_with("Save sync profile"));
         assert!(!p.text.contains("WARNING"));
+    }
+
+    /// P2-3 (defence in depth): even if a control or bidi character reached the prompt builder,
+    /// it is shown as a visible marker instead of reordering the text.
+    #[test]
+    fn control_and_bidi_characters_are_made_visible_never_passed_through() {
+        let mut p = policy(DeletePolicy::Permanent, true);
+        p.right.path = "D:\\B\u{202E}gpj.exe".into();
+        let prompt = save_profile_prompt("Night\u{200E}ly\u{7}", Some(2), &p);
+        assert!(!prompt.text.contains('\u{202E}'));
+        assert!(!prompt.text.contains('\u{200E}'));
+        assert!(!prompt.text.contains('\u{7}'));
+        assert!(prompt.text.contains("<U+202E>"), "{}", prompt.text);
+        assert!(prompt.text.contains("Night<U+200E>ly<U+0007>"));
     }
 }

@@ -792,38 +792,9 @@ pub fn confirm_prompt_text(path: &str, item_name: &str) -> String {
     )
 }
 
-static DIALOG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Guard ensuring only one native confirmation dialog is active at a time.
-#[derive(Debug)]
-pub struct DialogGuard;
-
-impl DialogGuard {
-    pub fn try_acquire() -> Result<Self, FsError> {
-        if DIALOG_ACTIVE
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_ok()
-        {
-            Ok(DialogGuard)
-        } else {
-            Err(FsError::new(
-                ErrorCode::Busy,
-                "Konfirmasi lain masih terbuka",
-            ))
-        }
-    }
-}
-
-impl Drop for DialogGuard {
-    fn drop(&mut self) {
-        DIALOG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
+/// The single app-wide one-dialog guard now lives in `native_dialog` (shared by every native
+/// confirmation: hotlist, RAR path, AI endpoint, indexer mode, shell open, automation).
+pub use crate::native_dialog::DialogGuard;
 
 pub fn native_confirm_with_guard<F>(
     owner: isize,
@@ -837,26 +808,9 @@ where
     Ok(confirm_fn(owner, text))
 }
 
-#[cfg(windows)]
+/// The raw message box (the caller already holds the guard, see [`native_confirm_with_guard`]).
 pub fn native_confirm(owner: isize, text: &str) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
-    };
-    let text_wide = to_wide(text);
-    let caption_wide = to_wide("Konfirmasi menjalankan program");
-    unsafe {
-        MessageBoxW(
-            owner as _,
-            text_wide.as_ptr(),
-            caption_wide.as_ptr(),
-            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
-        ) == IDOK
-    }
-}
-
-#[cfg(not(windows))]
-pub fn native_confirm(_owner: isize, _text: &str) -> bool {
-    false
+    crate::native_dialog::message_box(owner, "Konfirmasi menjalankan program", text)
 }
 
 /// Core launch function with injectable confirmation and launcher seams.
@@ -1482,6 +1436,10 @@ mod tests {
 
     #[test]
     fn test_dialog_guard_busy_when_already_open() {
+        // The guard is process-wide: serialize with the other tests that take it.
+        let _serial = crate::native_dialog::GUARD_TESTS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let guard1 = DialogGuard::try_acquire().expect("first acquire should succeed");
         let err = DialogGuard::try_acquire().expect_err("second acquire must fail");
         assert_eq!(err.code, ErrorCode::Busy);

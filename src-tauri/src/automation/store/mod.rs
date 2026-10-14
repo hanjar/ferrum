@@ -74,6 +74,28 @@ impl Store {
         }
     }
 
+    /// A store that could not be set up at all (for example no local data folder could be
+    /// resolved): every command reports `store_unavailable`.
+    pub fn unavailable() -> Store {
+        Store {
+            inner: Mutex::new(Inner {
+                conn: None,
+                mode: OpenMode::Failed(StoreError::Unavailable),
+            }),
+        }
+    }
+
+    /// Whether writes are possible right now. Commands ask this BEFORE showing a native dialog,
+    /// so the user is never prompted for a change that would be refused anyway (LC-3).
+    pub fn check_writable(&self) -> Result<(), StoreError> {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.mode {
+            OpenMode::Write => Ok(()),
+            OpenMode::ReadOnly => Err(StoreError::ReadOnly),
+            OpenMode::Failed(e) => Err(e),
+        }
+    }
+
     /// Read access (also available on a read-only, newer-schema store, LC-3). The closure may
     /// use its own error type; store failures convert into it.
     pub fn with_read<T, E>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E>
@@ -108,36 +130,134 @@ impl Store {
 }
 
 fn open_connection(dir: &Path, app_version: &str) -> Result<(Connection, OpenMode), StoreError> {
-    std::fs::create_dir_all(dir).map_err(|_| StoreError::Unavailable)?;
-    // SE-5 (threat T3): the store must live in plain folders — the `automation` directory (and
-    // every folder above it that exists), plus the database file itself, may not be a reparse
-    // point, or a junction could move the whole store elsewhere.
+    // SE-5 (threat T3): the store must live in plain folders - the `automation` directory and
+    // every folder above it that exists may not be a reparse point, or a junction could move the
+    // whole store elsewhere. Existing ancestors are checked BEFORE anything is created, so no
+    // folder is ever made inside a junction's target.
     ensure_plain_path(dir)?;
-    let db = dir.join("automation.db");
-    if db.exists() && is_reparse(&db) {
-        return Err(StoreError::Untrusted);
-    }
+    std::fs::create_dir_all(dir).map_err(|_| StoreError::Unavailable)?;
+    ensure_plain_path(dir)?;
+    ensure_plain_store_files(dir)?;
+    let db = dir.join(DB_FILE);
     let conn = Connection::open(&db).map_err(|_| StoreError::Unavailable)?;
-    let _: String = conn
-        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+    // The wait for another opener (a second Ferrum process, the runner) comes first: the very
+    // first statement already contends for the lock on a brand-new store.
+    conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|_| StoreError::Unavailable)?;
-    conn.execute_batch(
-        "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-    )
-    .map_err(|_| StoreError::Unavailable)?;
+    enable_wal(&conn)?;
+    conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
+        .map_err(|_| StoreError::Unavailable)?;
+    // SQLite has just created the sidecar files: they are checked too (re-check after open).
+    ensure_plain_store_files(dir)?;
     let from: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| StoreError::Unavailable)?;
     let mode = if from > SCHEMA_VERSION {
-        // LC-3: a newer store is read by this older binary but never written.
+        // LC-3: a newer store is read by this older binary but never written - the connection
+        // itself refuses writes, not only the wrapper.
+        conn.pragma_update(None, "query_only", true)
+            .map_err(|_| StoreError::Unavailable)?;
         OpenMode::ReadOnly
     } else {
         if from < SCHEMA_VERSION {
+            // `from` is only a hint: the migration re-reads the version under its lock.
             migrate::run(&conn, dir, from, app_version)?;
         }
         OpenMode::Write
     };
     Ok((conn, mode))
+}
+
+/// Switching a fresh database to WAL can answer "busy" immediately even with a busy timeout (two
+/// openers racing to be the one that converts it), so the switch is retried within the same
+/// patience as every other wait.
+fn enable_wal(conn: &Connection) -> Result<(), StoreError> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0)) {
+            Ok(_) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            Err(_) => return Err(StoreError::Unavailable),
+        }
+    }
+}
+
+const DB_FILE: &str = "automation.db";
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The database, its WAL/SHM sidecars, the migration lock and every migration backup must be
+/// plain files: no reparse point, no extra hard link (SE-5, threat T3).
+fn ensure_plain_store_files(dir: &Path) -> Result<(), StoreError> {
+    for name in [
+        DB_FILE,
+        "automation.db-wal",
+        "automation.db-shm",
+        migrate::LOCK_FILE,
+    ] {
+        ensure_plain_file(&dir.join(name))?;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("automation.db.bak-v")
+            {
+                ensure_plain_file(&entry.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An existing file that is a reparse point or has more than one hard link makes the store
+/// untrusted; a missing file is fine.
+pub(crate) fn ensure_plain_file(path: &Path) -> Result<(), StoreError> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    if is_reparse(path) || link_count(path).is_some_and(|n| n > 1) {
+        return Err(StoreError::Untrusted);
+    }
+    Ok(())
+}
+
+/// Number of hard links of an existing file (`None` when it cannot be asked).
+#[cfg(windows)]
+fn link_count(path: &Path) -> Option<u32> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // Share everything and ask for no access: this only reads attributes of a file another
+    // connection may hold open.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(7)
+        .open(path)
+        .ok()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: valid handle; zeroed POD out-parameter.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return None;
+    }
+    Some(info.nNumberOfLinks)
+}
+
+#[cfg(not(windows))]
+fn link_count(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| m.nlink() as u32)
 }
 
 /// Refuse when `path` or any existing folder above it is a reparse point.
@@ -396,6 +516,162 @@ mod tests {
                 .with_read(|_| -> Result<(), StoreError> { Ok(()) })
                 .unwrap_err(),
             StoreError::Unavailable
+        );
+    }
+
+    // ── Rework 1 ──
+
+    fn names(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// P2-6: two openers of a brand-new store at the same moment both succeed, one waits for the
+    /// other, the schema is created exactly once, and no backup or lock file is left behind
+    /// (a migration that really happened cleans up its own backup).
+    #[test]
+    fn p2_6_two_openers_of_a_new_store_both_succeed_and_leave_no_backup() {
+        for round in 0..15 {
+            let dir = tempfile::tempdir().unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = dir.path().to_path_buf();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Store::open(&path, "0.2.0")
+                    })
+                })
+                .collect();
+            let stores: Vec<Store> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            for store in &stores {
+                store
+                    .check_writable()
+                    .unwrap_or_else(|e| panic!("round {round}: {e:?}"));
+                store
+                    .with_read(|conn| -> Result<(), StoreError> {
+                        let version: i64 = conn
+                            .pragma_query_value(None, "user_version", |r| r.get(0))
+                            .map_err(|_| StoreError::Unavailable)?;
+                        assert_eq!(version, SCHEMA_VERSION);
+                        let metas: i64 = conn
+                            .query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))
+                            .map_err(|_| StoreError::Unavailable)?;
+                        assert_eq!(metas, 4, "the schema was created exactly once");
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let left = names(dir.path());
+            assert!(
+                left.iter()
+                    .all(|n| !n.contains(".bak-") && !n.ends_with(".lock")),
+                "round {round}: {left:?}"
+            );
+        }
+    }
+
+    /// P2-6: an opener whose pre-read said "old" but who finds the store already current under
+    /// the lock does nothing at all: no backup, no second CREATE TABLE.
+    #[test]
+    fn p2_6_a_stale_version_hint_under_the_lock_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        Store::open(dir.path(), "0.2.0");
+        let conn = Connection::open(dir.path().join("automation.db")).unwrap();
+        // The caller still believes the store is at version 0.
+        migrate::run(&conn, dir.path(), 0, "0.2.0").unwrap();
+        assert!(names(dir.path()).iter().all(|n| !n.contains(".bak-")));
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='profiles'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
+    }
+
+    /// P3 item 1: a hard link on the database file makes the store untrusted.
+    #[cfg(windows)]
+    #[test]
+    fn a_hard_linked_database_file_is_untrusted() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("automation");
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "0.2.0");
+        std::fs::hard_link(dir.join("automation.db"), base.path().join("elsewhere.db")).unwrap();
+        assert_eq!(
+            Store::open(&dir, "0.2.0").check_writable().unwrap_err(),
+            StoreError::Untrusted
+        );
+    }
+
+    /// P3 item 1: the WAL/SHM sidecars and a migration backup as reparse points are untrusted too.
+    #[cfg(windows)]
+    #[test]
+    fn reparse_sidecars_and_backups_are_untrusted() {
+        for name in [
+            "automation.db-wal",
+            "automation.db-shm",
+            "automation.db.bak-v0",
+            migrate::LOCK_FILE,
+        ] {
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("automation");
+            std::fs::create_dir_all(&dir).unwrap();
+            let target = base.path().join("elsewhere");
+            std::fs::create_dir_all(&target).unwrap();
+            assert!(junction(&dir.join(name), &target), "junction {name}");
+            assert_eq!(
+                Store::open(&dir, "0.2.0").check_writable().unwrap_err(),
+                StoreError::Untrusted,
+                "{name}"
+            );
+        }
+    }
+
+    /// P3 item 2: an existing ancestor that is a junction is rejected BEFORE anything is created,
+    /// so no folder appears inside the junction's target.
+    #[cfg(windows)]
+    #[test]
+    fn nothing_is_created_below_a_junction_ancestor() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("via-junction");
+        assert!(junction(&link, &real), "junction created");
+        let store = Store::open(&link.join("deeper").join("automation"), "0.2.0");
+        assert_eq!(store.check_writable().unwrap_err(), StoreError::Untrusted);
+        assert!(
+            std::fs::read_dir(&real).unwrap().next().is_none(),
+            "the junction target stays empty"
+        );
+    }
+
+    /// P3 item 8 + LC-3: on a newer-schema store the connection itself refuses writes, so even a
+    /// closure that went through `with_read` cannot change anything.
+    #[test]
+    fn a_read_only_store_connection_cannot_write_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        Store::open(dir.path(), "0.2.0");
+        {
+            let conn = Connection::open(dir.path().join("automation.db")).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+        let store = Store::open(dir.path(), "0.2.0");
+        assert_eq!(store.check_writable().unwrap_err(), StoreError::ReadOnly);
+        let wrote = store.with_read(|conn| -> Result<usize, StoreError> {
+            Ok(conn
+                .execute("INSERT INTO meta(key, value) VALUES ('sneaky', '1')", [])
+                .unwrap_or(0))
+        });
+        assert_eq!(
+            wrote.unwrap(),
+            0,
+            "the insert was refused by the connection"
         );
     }
 }

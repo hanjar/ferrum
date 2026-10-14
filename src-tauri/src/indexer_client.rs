@@ -200,27 +200,9 @@ pub fn set_mode_with_confirm(
 /// FER-512: native Windows message box owned by the Ferrum window (hotlist
 /// pattern, copied locally). The webview can neither draw it nor answer it.
 /// Cancel is the default button, so a held Enter key cannot change the mode.
-#[cfg(windows)]
 fn native_confirm(owner: isize, text: &str) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
-    };
-    let text = crate::shell_open::to_wide(text);
-    let caption = crate::shell_open::to_wide("Konfirmasi mode FerrumIndexer");
-    // SAFETY: both strings are NUL-terminated UTF-16; `owner` is the window handle or 0.
-    unsafe {
-        MessageBoxW(
-            owner as _,
-            text.as_ptr(),
-            caption.as_ptr(),
-            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
-        ) == IDOK
-    }
-}
-
-#[cfg(not(windows))]
-fn native_confirm(_owner: isize, _text: &str) -> bool {
-    false
+    // One native dialog at a time across the whole app; a busy guard answers "no" (nothing changed).
+    crate::native_dialog::confirm(owner, "Konfirmasi mode FerrumIndexer", text)
 }
 
 #[tauri::command]

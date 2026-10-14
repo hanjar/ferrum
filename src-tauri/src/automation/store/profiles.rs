@@ -212,8 +212,11 @@ pub fn update(conn: &mut Connection, up: &UpdateProfile) -> Result<i64, StoreErr
         ],
     )
     .map_err(unavailable)?;
-    // SP-6.4: everything that runs this profile becomes Needs review, in this same transaction.
-    mark_dependants_needs_review(&tx, &up.id, new_revision, &up.changes)?;
+    // SP-6.4: everything that runs this profile becomes Needs review, in this same transaction -
+    // only for a policy change; a rename alone must not disturb the automations using it.
+    if up.policy_changed {
+        mark_dependants_needs_review(&tx, &up.id, new_revision, &up.changes)?;
+    }
     tx.commit().map_err(unavailable)?;
     Ok(new_revision)
 }
@@ -269,9 +272,27 @@ pub fn mark_dependants_needs_review(
     _changes: &str,
 ) -> Result<usize, StoreError> {
     let _ = conn;
+    #[cfg(test)]
+    DEPENDANTS_HOOK_CALLS.with(|c| c.set(c.get() + 1));
     // P1.1: UPDATE automation_runtime ... , DELETE queue entries, INSERT events (one per
     // automation), all in this transaction.
     Ok(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    static DEPENDANTS_HOOK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test probe: how often the SP-6.4 hook ran on this thread since the last reset.
+#[cfg(test)]
+pub fn dependants_hook_calls() -> usize {
+    DEPENDANTS_HOOK_CALLS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub fn reset_dependants_hook_calls() {
+    DEPENDANTS_HOOK_CALLS.with(|c| c.set(0));
 }
 
 #[cfg(test)]

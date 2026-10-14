@@ -122,7 +122,11 @@ running totals (`scannedFiles/Dirs/Symlinks`, `knownLogicalBytes`,
 ## Sync profiles (automation P0.3)
 
 Source of truth: `src-tauri/src/automation/` + `src/lib/ipc/syncProfiles.ts`; fixtures in
-`contract-fixtures/automation/` (both test suites read them). The store lives only under the
+`contract-fixtures/automation/` (both test suites read them). The request payloads are flat
+top-level arguments (Tauri passes each one to the matching camelCase parameter, so `sync_profile_save`
+receives `id`, `expectedRevision` and `draft` as three parameters, never one nested object); the
+`*.request.json` fixtures are asserted by the TypeScript wrappers and against the Rust command
+signatures. The store lives only under the
 local (non-roaming) app data dir (`…\dev.ferrum.app\automation\automation.db`); commands refuse
 reparse points (`store_untrusted`) and an older binary never writes a newer store
 (`store_read_only`).
@@ -141,9 +145,12 @@ deletePolicy: 'recycleBin'|'versioning'|'permanent', versioningRoot?, compare:
 maxPercent } }`; unknown fields are refused (SE-1: no input may behave like a `confirmed` flag).
 
 Errors cross as `{ code, message }` with a closed-set code (`invalid_input`, `not_found`,
-`stale`, `in_use`, `store_unavailable`, `store_untrusted`, `store_read_only`, `needs_review`)
+`stale`, `in_use`, `busy`, `store_unavailable`, `store_untrusted`, `store_read_only`,
+`needs_review`); `busy` means another native confirmation dialog is open, so nothing was shown or saved
 and never contain user paths. Ids are lowercase UUID v4 text, validated before any lookup.
 `readiness` is `{ status: 'ready' } | { status: 'checking' } | { status: 'notReady', reason }`
-with reasons `rootMissing | identityMismatch | recycleBinUnavailable | versioningRootInvalid |
-profileInvalid`. The revision changes list shows, per revision, `{ field, from, to }` display
+with reasons `rootMissing | rootOffline | identityUnknown | identityMismatch |
+recycleBinUnavailable | versioningRootInvalid | profileInvalid`. A network (UNC) root that cannot be
+opened is saved with an unverified identity (no `volumeSerial`/`fileId`) and reports `rootOffline`;
+one saved that way stays `identityUnknown` until it is saved again while reachable. The revision changes list shows, per revision, `{ field, from, to }` display
 values (SP-6.3); the newest 50 revisions are kept.

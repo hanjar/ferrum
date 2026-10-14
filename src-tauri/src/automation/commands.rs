@@ -35,15 +35,21 @@ pub struct AutomationState {
 
 impl AutomationState {
     pub fn open() -> Self {
+        let store = match store_dir() {
+            Some(dir) => Store::open(&dir, env!("CARGO_PKG_VERSION")),
+            // No resolvable local data folder: the store is unavailable, never relocated.
+            None => Store::unavailable(),
+        };
         Self {
-            store: Arc::new(Store::open(&store_dir(), env!("CARGO_PKG_VERSION"))),
+            store: Arc::new(store),
         }
     }
 }
 
-/// `<local data>/automation` (design §4.1) — the only location the store may live in.
-pub fn store_dir() -> std::path::PathBuf {
-    profile::resolve_local_data_dir().join("automation")
+/// `<local data>/automation` (design §4.1) - the only location the store may live in. `None`
+/// when the OS cannot name the local app data folder (no silent fallback elsewhere).
+pub fn store_dir() -> Option<std::path::PathBuf> {
+    profile::resolve_local_data_dir().map(|dir| dir.join("automation"))
 }
 
 // ── Error shape ──
@@ -227,6 +233,10 @@ pub struct DeleteResultDto {
 /// Reason strings for [`ReadinessDto::NotReady`], camelCase for the UI.
 mod reasons {
     pub const ROOT_MISSING: &str = "rootMissing";
+    /// A network root that cannot be opened now (offline, share gone, no answer in time).
+    pub const ROOT_OFFLINE: &str = "rootOffline";
+    /// A network root saved while offline: its identity was never verified.
+    pub const IDENTITY_UNKNOWN: &str = "identityUnknown";
     pub const IDENTITY_MISMATCH: &str = "identityMismatch";
     pub const RECYCLE_BIN_UNAVAILABLE: &str = "recycleBinUnavailable";
     pub const VERSIONING_ROOT_INVALID: &str = "versioningRootInvalid";
@@ -244,17 +254,37 @@ fn kind_of(identity: &RootIdentity) -> String {
 }
 
 /// One live root: still there, still the same folder it was saved for (SP-7.2), within the
-/// probe budget. A slower answer means `checking`, never "treat as empty" (SP-8, WA-5.1).
+/// probe budget. A slower answer means `checking`, never "treat as empty" (SP-8, WA-5.1). A
+/// network root that cannot be opened is offline; one saved without verified ids stays not ready.
 fn root_verdict(
     spec: &model::RootSpec,
     probe: &ProbeArc<dyn RootProbe>,
     budget: Duration,
 ) -> Result<(), String> {
+    let network = crate::sync_engine::roots::is_unc(&spec.path);
     match probe_with(probe.clone(), &spec.path, budget) {
         RootProbeOutcome::Ready {
             canonical,
             identity,
         } => {
+            if matches!(
+                &identity,
+                RootIdentity::Network {
+                    volume_serial: None,
+                    ..
+                }
+            ) {
+                return Err(reasons::ROOT_OFFLINE.into());
+            }
+            if matches!(
+                &spec.identity,
+                RootIdentity::Network {
+                    volume_serial: None,
+                    ..
+                }
+            ) {
+                return Err(reasons::IDENTITY_UNKNOWN.into());
+            }
             if canonical != spec.path || identity != spec.identity {
                 Err(reasons::IDENTITY_MISMATCH.into())
             } else {
@@ -262,9 +292,12 @@ fn root_verdict(
             }
         }
         RootProbeOutcome::Checking => Err("checking".into()),
-        RootProbeOutcome::Missing | RootProbeOutcome::Unavailable => {
-            Err(reasons::ROOT_MISSING.into())
+        RootProbeOutcome::Missing | RootProbeOutcome::Unavailable => Err(if network {
+            reasons::ROOT_OFFLINE
+        } else {
+            reasons::ROOT_MISSING
         }
+        .into()),
         RootProbeOutcome::Invalid => Err(reasons::PROFILE_INVALID.into()),
     }
 }
@@ -379,7 +412,7 @@ fn parse_policy(json: &str) -> Result<ProfilePolicy, CommandError> {
 fn summary_of(
     rec: &profiles::ProfileRecord,
     policy: &ProfilePolicy,
-    probe: &ProbeArc<dyn RootProbe>,
+    readiness: ReadinessDto,
 ) -> ProfileSummaryDto {
     ProfileSummaryDto {
         id: rec.id.clone(),
@@ -389,17 +422,22 @@ fn summary_of(
         right: policy.right.path.clone(),
         mode_label: model::mode_label(&policy.mode),
         delete_label: model::delete_label(&policy.delete_policy),
-        readiness: readiness_dto(policy, probe, READINESS_BUDGET),
+        readiness,
         used_by: 0, // P1.1: automations using this profile (SP-9.5).
     }
 }
 
-fn dto_of(
-    conn: &rusqlite::Connection,
-    rec: &profiles::ProfileRecord,
-    policy: &ProfilePolicy,
-    probe: &ProbeArc<dyn RootProbe>,
-) -> Result<ProfileDto, CommandError> {
+/// What the store gives for one profile; readiness is added AFTER the store lock is released
+/// (a live probe can take seconds and must never block other store users).
+struct LoadedProfile {
+    rec: profiles::ProfileRecord,
+    policy: ProfilePolicy,
+    changes: Vec<RevisionChangesDto>,
+}
+
+fn load_profile(conn: &rusqlite::Connection, id: &str) -> Result<LoadedProfile, CommandError> {
+    let rec = profiles::get(conn, id)?.ok_or(CommandError::from(StoreError::NotFound))?;
+    let policy = parse_policy(&rec.policy)?;
     let changes = profiles::revisions(conn, &rec.id)?
         .into_iter()
         .map(|r| RevisionChangesDto {
@@ -408,54 +446,90 @@ fn dto_of(
             changes: serde_json::from_str(&r.changes).unwrap_or_default(),
         })
         .collect();
-    Ok(ProfileDto {
-        id: rec.id.clone(),
-        name: rec.name.clone(),
-        revision: rec.revision,
-        policy: policy_draft_of(policy),
-        identities: IdentitiesDto {
-            left: Some(policy.left.identity.clone()),
-            right: Some(policy.right.identity.clone()),
-        },
+    Ok(LoadedProfile {
+        rec,
+        policy,
         changes,
-        created_ms: rec.created_ms,
-        updated_ms: rec.updated_ms,
-        readiness: readiness_dto(policy, probe, READINESS_BUDGET),
     })
 }
 
+fn dto_of(loaded: LoadedProfile, probe: &ProbeArc<dyn RootProbe>) -> ProfileDto {
+    let readiness = readiness_dto(&loaded.policy, probe, READINESS_BUDGET);
+    ProfileDto {
+        id: loaded.rec.id.clone(),
+        name: loaded.rec.name.clone(),
+        revision: loaded.rec.revision,
+        policy: policy_draft_of(&loaded.policy),
+        identities: IdentitiesDto {
+            left: Some(loaded.policy.left.identity.clone()),
+            right: Some(loaded.policy.right.identity.clone()),
+        },
+        changes: loaded.changes,
+        created_ms: loaded.rec.created_ms,
+        updated_ms: loaded.rec.updated_ms,
+        readiness,
+    }
+}
+
 // ── Tauri-free command cores (test seam, design §13.1) ──
+
+/// Profiles per wave of parallel readiness probes (each probe is bounded by the shared worker
+/// cap in `sync_engine::roots`).
+const READINESS_WAVE: usize = 8;
 
 pub fn list_in(
     store: &Store,
     probe: &ProbeArc<dyn RootProbe>,
 ) -> Result<Vec<ProfileSummaryDto>, CommandError> {
-    store
-        .with_read(profiles::list)
-        .map_err(CommandError::from)
-        .and_then(|records| {
-            records
+    // The store lock is held only for the read; the live probes run after it is released.
+    let records = store.with_read(profiles::list)?;
+    let mut out = Vec::with_capacity(records.len());
+    for wave in records.chunks(READINESS_WAVE) {
+        let summaries: Vec<ProfileSummaryDto> = std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
                 .iter()
-                .map(|rec| match parse_policy(&rec.policy) {
-                    Ok(policy) => Ok(summary_of(rec, &policy, probe)),
-                    // An invalid stored row is never fixed silently (design §4.4): it shows as a
-                    // profile that needs review.
-                    Err(_) => Ok(ProfileSummaryDto {
-                        id: rec.id.clone(),
-                        name: rec.name.clone(),
-                        revision: rec.revision,
-                        left: String::new(),
-                        right: String::new(),
-                        mode_label: String::new(),
-                        delete_label: String::new(),
-                        readiness: ReadinessDto::NotReady {
-                            reason: reasons::PROFILE_INVALID.into(),
-                        },
-                        used_by: 0,
-                    }),
-                })
+                .map(|rec| scope.spawn(move || summary_row(rec, probe)))
+                .collect();
+            handles
+                .into_iter()
+                .zip(wave)
+                .map(|(handle, rec)| handle.join().unwrap_or_else(|_| invalid_summary(rec)))
                 .collect()
-        })
+        });
+        out.extend(summaries);
+    }
+    Ok(out)
+}
+
+fn summary_row(
+    rec: &profiles::ProfileRecord,
+    probe: &ProbeArc<dyn RootProbe>,
+) -> ProfileSummaryDto {
+    match parse_policy(&rec.policy) {
+        Ok(policy) => {
+            let readiness = readiness_dto(&policy, probe, READINESS_BUDGET);
+            summary_of(rec, &policy, readiness)
+        }
+        // An invalid stored row is never fixed silently (design §4.4): it shows as a profile
+        // that needs review.
+        Err(_) => invalid_summary(rec),
+    }
+}
+
+fn invalid_summary(rec: &profiles::ProfileRecord) -> ProfileSummaryDto {
+    ProfileSummaryDto {
+        id: rec.id.clone(),
+        name: rec.name.clone(),
+        revision: rec.revision,
+        left: String::new(),
+        right: String::new(),
+        mode_label: String::new(),
+        delete_label: String::new(),
+        readiness: ReadinessDto::NotReady {
+            reason: reasons::PROFILE_INVALID.into(),
+        },
+        used_by: 0,
+    }
 }
 
 pub fn get_in(
@@ -464,11 +538,8 @@ pub fn get_in(
     probe: &ProbeArc<dyn RootProbe>,
 ) -> Result<ProfileDto, CommandError> {
     require_profile_id(id)?;
-    store.with_read(|conn| -> Result<ProfileDto, CommandError> {
-        let rec = profiles::get(conn, id)?.ok_or(CommandError::from(StoreError::NotFound))?;
-        let policy = parse_policy(&rec.policy)?;
-        dto_of(conn, &rec, &policy, probe)
-    })
+    let loaded = store.with_read(|conn| load_profile(conn, id))?;
+    Ok(dto_of(loaded, probe))
 }
 
 /// Validate a draft with no side effects (design §7.1). Also reports the identities and drive
@@ -496,8 +567,9 @@ pub fn validate_in(draft: Draft, probe: &dyn RootProbe) -> ValidateResultDto {
     }
 }
 
-/// Input of `sync_profile_save`. `deny_unknown_fields` is part of SE-1: no extra input field
-/// (in particular anything like `confirmed`) can ride along.
+/// The input of a save, assembled from the command's separate IPC parameters
+/// (`id`, `expectedRevision`, `draft` - the documented wire shape). `deny_unknown_fields` is
+/// part of SE-1 for any caller that deserializes the whole request at once.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SaveRequest {
@@ -506,6 +578,31 @@ pub struct SaveRequest {
     #[serde(default)]
     pub expected_revision: Option<i64>,
     pub draft: Draft,
+}
+
+/// The answer of a native confirmation as the command core sees it. `Busy` = another native
+/// dialog is open: nothing was shown and nothing is saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAnswer {
+    Yes,
+    No,
+    Busy,
+}
+
+impl From<bool> for ConfirmAnswer {
+    fn from(yes: bool) -> Self {
+        if yes { Self::Yes } else { Self::No }
+    }
+}
+
+impl From<Result<bool, crate::domain::FsError>> for ConfirmAnswer {
+    fn from(answer: Result<bool, crate::domain::FsError>) -> Self {
+        match answer {
+            Ok(yes) => yes.into(),
+            Err(e) if e.code == crate::domain::ErrorCode::Busy => Self::Busy,
+            Err(_) => Self::No,
+        }
+    }
 }
 
 /// SP-3.3 + SP-5.1: a native confirmation is needed when the policy deletes `permanent` (new
@@ -518,18 +615,22 @@ pub fn confirm_needed(is_new: bool, old: Option<&ProfilePolicy>, new: &ProfilePo
     permanent_changed || guard_turned_off
 }
 
-/// Save (create or update). Order: validate → stale check → native confirm when needed →
-/// store in one transaction with the revision re-checked inside (design §8.2 shape).
-pub fn save_in(
+/// Save (create or update). Order: id shape → store writable → validate → existence and stale
+/// check → native confirm when needed → store in one transaction with the revision re-checked
+/// inside (design §8.2 shape). Every refusal that does not depend on the user's answer happens
+/// BEFORE the dialog, so nobody is asked about a change that cannot happen.
+pub fn save_in<A: Into<ConfirmAnswer>>(
     store: &Store,
     req: SaveRequest,
     probe: &ProbeArc<dyn RootProbe>,
-    confirm: impl FnOnce(&Prompt) -> bool,
+    confirm: impl FnOnce(&Prompt) -> A,
     now_ms: i64,
 ) -> Result<SaveResultDto, CommandError> {
     if let Some(id) = &req.id {
         require_profile_id(id)?;
     }
+    // LC-3: a read-only or unavailable store refuses before any probe or dialog.
+    store.check_writable()?;
     let validated = req
         .draft
         .validate(probe.as_ref())
@@ -542,6 +643,10 @@ pub fn save_in(
             }
         },
     )?;
+    // An update of a profile that does not exist is refused before any dialog.
+    if req.id.is_some() && existing.is_none() {
+        return Err(StoreError::NotFound.into());
+    }
     // SP-6.2 stale check before the dialog: no native prompt for a dead edit.
     if let Some(rec) = &existing
         && req.expected_revision != Some(rec.revision)
@@ -553,14 +658,22 @@ pub fn save_in(
         None => None,
     };
     if confirm_needed(existing.is_none(), old_policy.as_ref(), &validated.policy) {
+        // The text is built from the validated values only (no control/format characters).
         let prompt = confirm_text::save_profile_prompt(
             &validated.name,
             existing.as_ref().map(|r| r.revision),
             &validated.policy,
         );
-        if !confirm(&prompt) {
+        match confirm(&prompt).into() {
+            ConfirmAnswer::Yes => {}
             // Cancel = nothing saved (SP-3.3).
-            return Ok(SaveResultDto::Canceled);
+            ConfirmAnswer::No => return Ok(SaveResultDto::Canceled),
+            ConfirmAnswer::Busy => {
+                return Err(CommandError::new(
+                    "busy",
+                    "Another confirmation is open; nothing was saved",
+                ));
+            }
         }
     }
     let id = match &req.id {
@@ -603,13 +716,9 @@ pub fn save_in(
             .map(|()| 1),
         }
     })?;
-    let profile = store.with_read(|conn| -> Result<ProfileDto, CommandError> {
-        let rec = profiles::get(conn, &id)?.ok_or(CommandError::from(StoreError::NotFound))?;
-        let policy = parse_policy(&rec.policy)?;
-        dto_of(conn, &rec, &policy, probe)
-    })?;
+    let loaded = store.with_read(|conn| load_profile(conn, &id))?;
     Ok(SaveResultDto::Saved {
-        profile: Box::new(profile),
+        profile: Box::new(dto_of(loaded, probe)),
     })
 }
 
@@ -639,12 +748,12 @@ fn require_profile_id(id: &str) -> Result<(), CommandError> {
 // ── Tauri command wrappers ──
 
 #[cfg(windows)]
-fn owner_hwnd(window: &tauri::Window) -> isize {
+fn owner_hwnd<R: tauri::Runtime>(window: &tauri::Window<R>) -> isize {
     window.hwnd().map(|h| h.0 as isize).unwrap_or(0)
 }
 
 #[cfg(not(windows))]
-fn owner_hwnd(_window: &tauri::Window) -> isize {
+fn owner_hwnd<R: tauri::Runtime>(_window: &tauri::Window<R>) -> isize {
     0
 }
 
@@ -679,13 +788,24 @@ pub async fn sync_profile_validate(draft: Draft) -> Result<ValidateResultDto, Co
         .map_err(|_| internal())
 }
 
+/// `sync_profile_save` takes the documented top-level IPC arguments `{ id?, expectedRevision?,
+/// draft }` (docs/ipc.md; contract fixture `sync-profile-save.request.json` is read by Rust and
+/// TypeScript tests). Tauri reads each parameter by its camelCase name; unknown extra keys are
+/// ignored and never interpreted, in particular nothing can act as a `confirmed` flag (SE-1).
 #[tauri::command]
-pub async fn sync_profile_save(
+pub async fn sync_profile_save<R: tauri::Runtime>(
     state: State<'_, AutomationState>,
-    window: tauri::Window,
-    req: SaveRequest,
+    window: tauri::Window<R>,
+    id: Option<String>,
+    expected_revision: Option<i64>,
+    draft: Draft,
 ) -> Result<SaveResultDto, CommandError> {
     let store = state.store.clone();
+    let req = SaveRequest {
+        id,
+        expected_revision,
+        draft,
+    };
     // The whole flow (validation probes + the native dialog + the store transaction) runs off
     // the async workers; the dialog is owned by the Ferrum window (SE-2).
     let owner = owner_hwnd(&window);
@@ -695,7 +815,7 @@ pub async fn sync_profile_save(
             &store,
             req,
             &probe,
-            |prompt| crate::native_dialog::confirm(owner, prompt.caption, &prompt.text),
+            |prompt| crate::native_dialog::confirm_or_busy(owner, prompt.caption, &prompt.text),
             now_ms(),
         )
     })
@@ -838,7 +958,7 @@ mod tests {
                 draft: temp_draft(&dir, "P"),
             },
             &probe(),
-            |_| panic!("a plain save must not ask"),
+            |_| -> bool { panic!("a plain save must not ask") },
             1_000,
         )
         .unwrap();
@@ -918,7 +1038,7 @@ mod tests {
                 draft: temp_draft(&dir, "P"),
             },
             &probe(),
-            |_| panic!("no confirm needed"),
+            |_| -> bool { panic!("no confirm needed") },
             1_000,
         )
         .unwrap();
@@ -933,7 +1053,7 @@ mod tests {
                 draft: permanent(temp_draft(&dir, "P")),
             },
             &probe(),
-            |_| panic!("stale must not ask"),
+            |_| -> bool { panic!("stale must not ask") },
             2_000,
         )
         .unwrap();
@@ -952,7 +1072,7 @@ mod tests {
                 draft: temp_draft(&dir, "P"),
             },
             &probe(),
-            |_| panic!("no confirm needed"),
+            |_| -> bool { panic!("no confirm needed") },
             1_000,
         )
         .unwrap();
@@ -1003,7 +1123,7 @@ mod tests {
                 draft: draft("P", &left.to_string_lossy(), &right.to_string_lossy()),
             },
             &probe(),
-            |_| panic!("no confirm needed"),
+            |_| -> bool { panic!("no confirm needed") },
             1_000,
         )
         .unwrap();
@@ -1116,7 +1236,7 @@ mod tests {
                 draft: temp_draft(&dir, "Backup"),
             },
             &probe(),
-            |_| panic!("no confirm needed"),
+            |_| -> bool { panic!("no confirm needed") },
             1_000,
         )
         .unwrap();
@@ -1128,7 +1248,7 @@ mod tests {
                 draft: temp_draft(&dir, "backup"),
             },
             &probe(),
-            |_| panic!("no confirm needed"),
+            |_| -> bool { panic!("no confirm needed") },
             1_000,
         )
         .unwrap_err();
@@ -1198,7 +1318,9 @@ mod tests {
         assert_eq!(
             profile.identities.right,
             Some(RootIdentity::Network {
-                unc_prefix: r"\\nas\photos".into()
+                unc_prefix: r"\\nas\photos".into(),
+                volume_serial: None,
+                file_id: None,
             })
         );
         assert_eq!(profile.changes.len(), 2);
@@ -1215,5 +1337,627 @@ mod tests {
         let deleted: DeleteResultDto =
             serde_json::from_str(&read("sync-profile-delete.json")).unwrap();
         assert_eq!(deleted.status, "deleted");
+    }
+
+    // ── Rework 1 (review findings P1-1, P2-1 ... P2-4, P3) ──
+
+    fn busy() -> Result<bool, crate::domain::FsError> {
+        Err(crate::domain::FsError::new(
+            crate::domain::ErrorCode::Busy,
+            "Konfirmasi lain masih terbuka",
+        ))
+    }
+
+    fn create_request(d: Draft) -> SaveRequest {
+        SaveRequest {
+            id: None,
+            expected_revision: None,
+            draft: d,
+        }
+    }
+
+    fn saved(out: SaveResultDto) -> ProfileDto {
+        match out {
+            SaveResultDto::Saved { profile } => *profile,
+            other => panic!("expected saved, got {other:?}"),
+        }
+    }
+
+    /// A store whose schema is newer than this binary (LC-3), opened read-only.
+    fn newer_schema_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        Store::open(dir.path(), "0.2.0");
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("automation.db")).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+        let store = Store::open(dir.path(), "0.2.0");
+        (dir, store)
+    }
+
+    /// P2-4: another native dialog is open - the save answers `busy`, shows nothing and stores
+    /// nothing.
+    #[test]
+    fn p2_4_a_busy_dialog_saves_nothing() {
+        let (dir, store) = store();
+        let d = permanent(temp_draft(&dir, "Nightly"));
+        let err = save_in(&store, create_request(d), &probe(), |_| busy(), 1_000).unwrap_err();
+        assert_eq!(err.code, "busy");
+        assert!(list_in(&store, &probe()).unwrap().is_empty());
+    }
+
+    /// LC-3 at the command level: a newer-schema store refuses saves BEFORE any dialog and
+    /// refuses deletes; reads keep working.
+    #[test]
+    fn lc_3_a_read_only_store_refuses_commands_before_any_dialog() {
+        let (dir, store) = newer_schema_store();
+        let asked = Cell::new(0);
+        for d in [
+            permanent(temp_draft(&dir, "A")),
+            guard_off(temp_draft(&dir, "B")),
+            temp_draft(&dir, "C"),
+        ] {
+            let err = save_in(
+                &store,
+                create_request(d),
+                &probe(),
+                |_| {
+                    asked.set(asked.get() + 1);
+                    true
+                },
+                1_000,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, "store_read_only");
+        }
+        assert_eq!(asked.get(), 0, "no native dialog for a refused save");
+        let id = "3f2a9c1e-5b6d-4c8a-9e0f-1a2b3c4d5e6f";
+        assert_eq!(
+            delete_in(&store, id, 1).unwrap_err().code,
+            "store_read_only"
+        );
+        assert!(list_in(&store, &probe()).unwrap().is_empty());
+    }
+
+    /// An update of a profile that does not exist is refused before the dialog.
+    #[test]
+    fn an_unknown_profile_is_not_found_before_any_dialog() {
+        let (dir, store) = store();
+        let asked = Cell::new(0);
+        let err = save_in(
+            &store,
+            SaveRequest {
+                id: Some("3f2a9c1e-5b6d-4c8a-9e0f-1a2b3c4d5e6f".into()),
+                expected_revision: Some(1),
+                draft: permanent(temp_draft(&dir, "Ghost")),
+            },
+            &probe(),
+            |_| {
+                asked.set(asked.get() + 1);
+                true
+            },
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "not_found");
+        assert_eq!(asked.get(), 0);
+    }
+
+    /// A store that could not be set up (no local data folder) reports `store_unavailable`
+    /// everywhere and never asks.
+    #[test]
+    fn an_unavailable_store_reports_store_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::unavailable();
+        assert_eq!(
+            list_in(&store, &probe()).unwrap_err().code,
+            "store_unavailable"
+        );
+        let err = save_in(
+            &store,
+            create_request(permanent(temp_draft(&dir, "X"))),
+            &probe(),
+            |_| -> bool { panic!("must not ask") },
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "store_unavailable");
+    }
+
+    /// SP-6.1 end to end through `save_in`: a rename keeps the revision, a policy change bumps
+    /// it; and the SP-6.4 dependants hook runs for the policy change only (P3 review item 4).
+    #[test]
+    fn sp_6_1_rename_keeps_the_revision_and_does_not_run_the_dependants_hook() {
+        let (dir, store) = store();
+        let d = temp_draft(&dir, "Photos");
+        let first =
+            saved(save_in(&store, create_request(d.clone()), &probe(), |_| true, 1_000).unwrap());
+        assert_eq!(first.revision, 1);
+        profiles::reset_dependants_hook_calls();
+
+        let mut renamed = d.clone();
+        renamed.name = "Photos renamed".into();
+        let after_rename = saved(
+            save_in(
+                &store,
+                SaveRequest {
+                    id: Some(first.id.clone()),
+                    expected_revision: Some(1),
+                    draft: renamed.clone(),
+                },
+                &probe(),
+                |_| true,
+                2_000,
+            )
+            .unwrap(),
+        );
+        assert_eq!(after_rename.revision, 1, "rename is not a policy change");
+        assert_eq!(after_rename.name, "Photos renamed");
+        assert!(
+            after_rename.changes.is_empty(),
+            "no policy revision recorded"
+        );
+        assert_eq!(profiles::dependants_hook_calls(), 0);
+
+        let mut changed = renamed;
+        changed.policy.exclude = vec!["*.tmp".into()];
+        let after_change = saved(
+            save_in(
+                &store,
+                SaveRequest {
+                    id: Some(first.id.clone()),
+                    expected_revision: Some(1),
+                    draft: changed,
+                },
+                &probe(),
+                |_| true,
+                3_000,
+            )
+            .unwrap(),
+        );
+        assert_eq!(after_change.revision, 2);
+        assert_eq!(profiles::dependants_hook_calls(), 1);
+    }
+
+    /// P3 item 5 (e): a slow live probe never holds the store's mutex. While `get_in` waits on a
+    /// slow root, another store user is served at once.
+    #[test]
+    fn a_slow_readiness_probe_does_not_hold_the_store_lock() {
+        struct SlowProbe;
+        impl RootProbe for SlowProbe {
+            fn canonical(
+                &self,
+                path: &str,
+            ) -> Result<String, crate::sync_engine::roots::RootError> {
+                std::thread::sleep(Duration::from_millis(700));
+                crate::sync_engine::roots::canonical(path)
+            }
+            fn identity(
+                &self,
+                canonical: &str,
+            ) -> Result<RootIdentity, crate::sync_engine::roots::RootError> {
+                crate::sync_engine::roots::identity(canonical)
+            }
+        }
+        let (dir, store) = store();
+        let d = temp_draft(&dir, "Slow");
+        let profile = saved(save_in(&store, create_request(d), &probe(), |_| true, 1_000).unwrap());
+        let slow: ProbeArc<dyn RootProbe> = Arc::new(SlowProbe);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| get_in(&store, &profile.id, &slow));
+            std::thread::sleep(Duration::from_millis(150));
+            let started = std::time::Instant::now();
+            store
+                .with_read(profiles::list)
+                .expect("store readable while a probe runs");
+            assert!(
+                started.elapsed() < Duration::from_millis(400),
+                "the store was blocked for {:?}",
+                started.elapsed()
+            );
+            assert!(reader.join().unwrap().is_ok());
+        });
+    }
+
+    /// P2-1: a UNC root that cannot be opened is accepted at save time (the share may be offline)
+    /// but recorded as UNVERIFIED, and the profile is honestly not ready (offline).
+    #[test]
+    fn p2_1_an_unreachable_unc_root_saves_but_is_not_ready() {
+        let (dir, store) = store();
+        let left = dir.path().join("left");
+        std::fs::create_dir_all(&left).unwrap();
+        let d = draft(
+            "Remote",
+            &left.to_string_lossy(),
+            r"\\localhost\no-such-share-ferrum-p03\data",
+        );
+        let profile = saved(save_in(&store, create_request(d), &probe(), |_| true, 1_000).unwrap());
+        assert_eq!(
+            profile.identities.right,
+            Some(RootIdentity::Network {
+                unc_prefix: r"\\localhost\no-such-share-ferrum-p03".into(),
+                volume_serial: None,
+                file_id: None,
+            })
+        );
+        assert_eq!(
+            profile.readiness,
+            ReadinessDto::NotReady {
+                reason: "rootOffline".into()
+            }
+        );
+        let listed = list_in(&store, &probe()).unwrap();
+        assert_eq!(
+            listed[0].readiness,
+            ReadinessDto::NotReady {
+                reason: "rootOffline".into()
+            }
+        );
+    }
+
+    /// The readiness verdicts for network roots, driven by an injected probe: a live share that
+    /// answers with ids is ready; one that cannot be opened is offline; a profile saved while
+    /// the share was offline stays not ready even when it answers now (identity never verified);
+    /// different ids are a mismatch.
+    #[test]
+    fn network_readiness_verdicts() {
+        struct NetProbe(Option<(&'static str, &'static str)>);
+        impl RootProbe for NetProbe {
+            fn canonical(
+                &self,
+                path: &str,
+            ) -> Result<String, crate::sync_engine::roots::RootError> {
+                Ok(path.to_string())
+            }
+            fn identity(
+                &self,
+                canonical: &str,
+            ) -> Result<RootIdentity, crate::sync_engine::roots::RootError> {
+                Ok(RootIdentity::Network {
+                    unc_prefix: canonical.to_lowercase(),
+                    volume_serial: self.0.map(|(v, _)| v.to_string()),
+                    file_id: self.0.map(|(_, f)| f.to_string()),
+                })
+            }
+        }
+        let net = |ids: Option<(&str, &str)>| RootSpec {
+            path: r"\\nas\data".into(),
+            identity: RootIdentity::Network {
+                unc_prefix: r"\\nas\data".into(),
+                volume_serial: ids.map(|(v, _)| v.to_string()),
+                file_id: ids.map(|(_, f)| f.to_string()),
+            },
+        };
+        let live = |ids| -> ProbeArc<dyn RootProbe> { Arc::new(NetProbe(ids)) };
+        let b = Duration::from_secs(2);
+        let ids = Some(("0000000a", "bb"));
+        let right_only =
+            |spec: &RootSpec, probe: &ProbeArc<dyn RootProbe>| root_verdict(spec, probe, b);
+        assert_eq!(right_only(&net(ids), &live(ids)), Ok(()));
+        assert_eq!(
+            right_only(&net(ids), &live(None)),
+            Err("rootOffline".to_string())
+        );
+        assert_eq!(
+            right_only(&net(None), &live(ids)),
+            Err("identityUnknown".to_string())
+        );
+        assert_eq!(
+            right_only(&net(ids), &live(Some(("0000000a", "cc")))),
+            Err("identityMismatch".to_string())
+        );
+    }
+
+    use crate::automation::model::RootSpec;
+
+    fn versioning_draft(dir: &tempfile::TempDir, versioning_root: &std::path::Path) -> Draft {
+        let mut d = temp_draft(dir, "Versioned");
+        d.policy.mode = WireMode::Mirror;
+        d.policy.delete_policy = WireDeletePolicy::Versioning;
+        d.policy.versioning_root = Some(versioning_root.to_string_lossy().into_owned());
+        d
+    }
+
+    fn field_codes(draft: Draft) -> Vec<(String, String)> {
+        validate_in(draft, &FsProbe)
+            .errors
+            .into_iter()
+            .map(|e| (e.field, e.code))
+            .collect()
+    }
+
+    fn junction(link: &std::path::Path, target: &std::path::Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// P2-2: a versioning root reached through `..` is refused outright.
+    #[test]
+    fn p2_2_a_versioning_root_with_dot_dot_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        let tricky = dir
+            .path()
+            .join("other")
+            .join("..")
+            .join("left")
+            .join(".versions");
+        let codes = field_codes(versioning_draft(&dir, &tricky));
+        assert!(
+            codes.contains(&("versioningRoot".into(), "versioning_root_invalid".into())),
+            "{codes:?}"
+        );
+    }
+
+    /// P2-2: a junction on a parent of a not-yet-existing versioning root is resolved to its real
+    /// target, so a versioning root that really sits inside a sync root is refused.
+    #[cfg(windows)]
+    #[test]
+    fn p2_2_a_junction_on_the_parent_cannot_hide_a_versioning_root_inside_a_sync_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        std::fs::create_dir_all(&left).unwrap();
+        let alias = dir.path().join("alias");
+        assert!(junction(&alias, &left), "junction created");
+        let via_alias = alias.join(".versions");
+        let codes = field_codes(versioning_draft(&dir, &via_alias));
+        assert!(
+            codes.contains(&("versioningRoot".into(), "versioning_root_overlap".into())),
+            "{codes:?}"
+        );
+    }
+
+    /// SP-3.2: a versioning root equal to, inside, or containing a sync root is refused; a
+    /// sibling folder that does not exist yet is accepted.
+    #[test]
+    fn sp_3_2_versioning_root_overlap_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        for bad in [left.clone(), left.join("v"), dir.path().to_path_buf()] {
+            let codes = field_codes(versioning_draft(&dir, &bad));
+            assert!(
+                codes.contains(&("versioningRoot".into(), "versioning_root_overlap".into())),
+                "{bad:?}: {codes:?}"
+            );
+        }
+        let ok = dir.path().join("versions").join("sub");
+        assert!(field_codes(versioning_draft(&dir, &ok)).is_empty());
+    }
+
+    /// P2-3: control and format (bidi) characters are refused in the name, in filters and in
+    /// every path (SE-2, threat T4).
+    #[test]
+    fn p2_3_format_characters_are_refused_everywhere_text_reaches_a_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let bidi = "\u{202E}";
+        let mut d = temp_draft(&dir, &format!("Nightly{bidi}tnenamreP"));
+        assert!(field_codes(d.clone()).contains(&("name".into(), "name_control".into())));
+        d = temp_draft(&dir, "ok");
+        d.policy.exclude = vec![format!("*.tmp{bidi}")];
+        assert!(field_codes(d.clone()).contains(&("exclude".into(), "filter_control".into())));
+        d = temp_draft(&dir, "ok");
+        d.policy.include = vec!["a\u{200E}b".into()];
+        assert!(field_codes(d.clone()).contains(&("include".into(), "filter_control".into())));
+        d = temp_draft(&dir, "ok");
+        d.policy.right = format!("{}{bidi}", d.policy.right);
+        assert!(field_codes(d.clone()).contains(&("right".into(), "root_invalid".into())));
+        let versions = dir.path().join(format!("v{bidi}x"));
+        let codes = field_codes(versioning_draft(&dir, &versions));
+        assert!(
+            codes.contains(&("versioningRoot".into(), "versioning_root_invalid".into())),
+            "{codes:?}"
+        );
+    }
+
+    /// The same checks hold for the real path resolution: a folder whose real name carries a
+    /// format character can never become a root, even when typed without it.
+    #[test]
+    fn p2_3_the_prompt_is_built_from_validated_values_only() {
+        let (dir, store) = store();
+        let bidi = "\u{202E}";
+        let err = save_in(
+            &store,
+            create_request(permanent(temp_draft(&dir, &format!("N{bidi}x")))),
+            &probe(),
+            |_| -> bool { panic!("a refused draft never reaches the dialog") },
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+    }
+
+    // ── IPC contract (P1-1): request fixtures shared with the TypeScript tests. ──
+
+    mod ipc {
+        //! The wire contract of the request side (P1-1). The webview calls a command with a flat
+        //! object `{ id, expectedRevision, draft }`; Tauri hands each Rust parameter the value
+        //! under its camelCase name. The Rust wrappers and the TypeScript wrappers are both held
+        //! to the same request fixtures: TypeScript asserts it sends exactly the fixture, and
+        //! here every fixture key must be a parameter of the command (and the other way round),
+        //! and every value must deserialize into that parameter's type.
+        use super::*;
+
+        const SOURCE: &str = include_str!("commands.rs");
+
+        fn fixture(name: &str) -> serde_json::Value {
+            let dir = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../contract-fixtures/automation/"
+            );
+            let text = std::fs::read_to_string(format!("{dir}{name}"))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            serde_json::from_str(&text).unwrap()
+        }
+
+        fn camel(snake: &str) -> String {
+            let mut out = String::new();
+            let mut upper = false;
+            for c in snake.chars() {
+                if c == '_' {
+                    upper = true;
+                } else if upper {
+                    out.push(c.to_ascii_uppercase());
+                    upper = false;
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        /// The IPC argument keys of a command: its parameters minus the injected ones (state,
+        /// window, app handle), camelCased the way Tauri names them.
+        fn wire_keys(command: &str) -> Vec<String> {
+            let start = SOURCE
+                .find(&format!("pub async fn {command}"))
+                .unwrap_or_else(|| panic!("{command} is defined"));
+            let open = start + SOURCE[start..].find('(').unwrap();
+            let mut depth = 0i32;
+            let mut end = open;
+            for (i, c) in SOURCE[open..].char_indices() {
+                match c {
+                    '(' | '<' => depth += 1,
+                    ')' | '>' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    end = open + i;
+                    break;
+                }
+            }
+            let params = &SOURCE[open + 1..end];
+            let mut keys = Vec::new();
+            let mut depth = 0i32;
+            let mut current = String::new();
+            let mut parts = Vec::new();
+            for c in params.chars() {
+                match c {
+                    '<' | '(' => depth += 1,
+                    '>' | ')' => depth -= 1,
+                    _ => {}
+                }
+                if c == ',' && depth == 0 {
+                    parts.push(std::mem::take(&mut current));
+                } else {
+                    current.push(c);
+                }
+            }
+            parts.push(current);
+            for part in parts {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let (name, ty) = part.split_once(':').expect("name: Type");
+                let ty = ty.trim();
+                if ty.starts_with("State<")
+                    || ty.starts_with("tauri::Window")
+                    || ty.starts_with("tauri::AppHandle")
+                {
+                    continue;
+                }
+                keys.push(camel(name.trim()));
+            }
+            keys.sort();
+            keys
+        }
+
+        fn fixture_keys(value: &serde_json::Value) -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+
+        #[test]
+        fn every_request_fixture_names_exactly_the_command_parameters() {
+            for (command, name) in [
+                ("sync_profile_get", "sync-profile-get.request.json"),
+                (
+                    "sync_profile_validate",
+                    "sync-profile-validate.request.json",
+                ),
+                ("sync_profile_save", "sync-profile-save.request.json"),
+                ("sync_profile_save", "sync-profile-save-update.request.json"),
+                ("sync_profile_delete", "sync-profile-delete.request.json"),
+            ] {
+                assert_eq!(
+                    wire_keys(command),
+                    fixture_keys(&fixture(name)),
+                    "{command} vs {name}"
+                );
+            }
+            // No argument at all for the list command.
+            assert!(wire_keys("sync_profile_list").is_empty());
+        }
+
+        /// The old nested shape (`{ req: { ... } }`) is exactly what P1-1 was: it must no longer
+        /// match the command parameters.
+        #[test]
+        fn the_nested_req_shape_does_not_match_the_command() {
+            let nested = serde_json::json!({ "req": fixture("sync-profile-save.request.json") });
+            assert_ne!(wire_keys("sync_profile_save"), fixture_keys(&nested));
+            assert!(!wire_keys("sync_profile_save").contains(&"req".to_string()));
+        }
+
+        #[test]
+        fn fixture_values_deserialize_into_the_parameter_types() {
+            for name in [
+                "sync-profile-save.request.json",
+                "sync-profile-save-update.request.json",
+            ] {
+                let body = fixture(name);
+                let id: Option<String> = serde_json::from_value(body["id"].clone()).unwrap();
+                let rev: Option<i64> =
+                    serde_json::from_value(body["expectedRevision"].clone()).unwrap();
+                let draft: Draft = serde_json::from_value(body["draft"].clone()).unwrap();
+                assert_eq!(draft.name, "Projects backup");
+                assert_eq!(
+                    id.is_some(),
+                    rev.is_some(),
+                    "{name}: id and revision go together"
+                );
+            }
+            let get = fixture("sync-profile-get.request.json");
+            let _: String = serde_json::from_value(get["id"].clone()).unwrap();
+            let del = fixture("sync-profile-delete.request.json");
+            let _: String = serde_json::from_value(del["id"].clone()).unwrap();
+            let _: i64 = serde_json::from_value(del["expectedRevision"].clone()).unwrap();
+            let validate = fixture("sync-profile-validate.request.json");
+            let _: Draft = serde_json::from_value(validate["draft"].clone()).unwrap();
+        }
+
+        /// The create fixture drives the real core with real folders and saves; the update fixture
+        /// addresses a profile that is not there and gets `not_found`.
+        #[test]
+        fn the_save_fixtures_drive_the_core() {
+            let (dir, store) = store();
+            let mut body = fixture("sync-profile-save.request.json");
+            let temp = temp_draft(&dir, "Projects backup");
+            body["draft"]["left"] = temp.policy.left.clone().into();
+            body["draft"]["right"] = temp.policy.right.clone().into();
+            let req = SaveRequest {
+                id: serde_json::from_value(body["id"].clone()).unwrap(),
+                expected_revision: serde_json::from_value(body["expectedRevision"].clone())
+                    .unwrap(),
+                draft: serde_json::from_value(body["draft"].clone()).unwrap(),
+            };
+            let profile = saved(save_in(&store, req, &probe(), |_| true, 1_000).unwrap());
+            assert_eq!(profile.name, "Projects backup");
+            assert_eq!(profile.revision, 1);
+
+            let update = fixture("sync-profile-save-update.request.json");
+            let req = SaveRequest {
+                id: serde_json::from_value(update["id"].clone()).unwrap(),
+                expected_revision: serde_json::from_value(update["expectedRevision"].clone())
+                    .unwrap(),
+                draft: serde_json::from_value(body["draft"].clone()).unwrap(),
+            };
+            let err = save_in(&store, req, &probe(), |_| true, 2_000).unwrap_err();
+            assert_eq!(err.code, "not_found");
+        }
     }
 }

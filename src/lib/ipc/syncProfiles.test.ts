@@ -91,6 +91,49 @@ describe('sync profile IPC wrappers', () => {
     });
   });
 
+  it('sends exactly the request fixtures that the Rust command tests are held to', async () => {
+    fakeTauri();
+    type Body = { id?: string | null; expectedRevision?: number | null; draft: typeof DRAFT };
+    // Flat top-level arguments - never wrapped in { req: ... } (the shape Tauri maps per
+    // parameter name). The Rust side asserts the same fixtures against the command signature.
+    const create = fixture('sync-profile-save.request.json') as Body;
+    invokeMock.mockResolvedValueOnce({ status: 'stale' });
+    await defaultBackend().save({ draft: create.draft });
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_save', create);
+
+    const update = fixture('sync-profile-save-update.request.json') as Body;
+    invokeMock.mockResolvedValueOnce({ status: 'stale' });
+    await defaultBackend().save({
+      id: update.id as string,
+      expectedRevision: update.expectedRevision as number,
+      draft: update.draft,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_save', update);
+
+    const validate = fixture('sync-profile-validate.request.json') as Body;
+    invokeMock.mockResolvedValueOnce(fixture('sync-profile-validate.json'));
+    await defaultBackend().validate(validate.draft);
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_validate', validate);
+
+    const get = fixture('sync-profile-get.request.json') as { id: string };
+    invokeMock.mockResolvedValueOnce(fixture('sync-profile-get.json'));
+    await defaultBackend().get(get.id);
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_get', get);
+
+    const del = fixture('sync-profile-delete.request.json') as {
+      id: string;
+      expectedRevision: number;
+    };
+    invokeMock.mockResolvedValueOnce(fixture('sync-profile-delete.json'));
+    await defaultBackend().delete(del.id, del.expectedRevision);
+    expect(invokeMock).toHaveBeenLastCalledWith('sync_profile_delete', del);
+
+    for (const call of invokeMock.mock.calls) {
+      expect(Object.keys(call[1] ?? {})).not.toContain('req');
+      expect(JSON.stringify(call)).not.toMatch(/confirm/i);
+    }
+  });
+
   it('sends the id and the expected revision to delete (SP-9.5 guarded in the backend)', async () => {
     fakeTauri();
     invokeMock.mockResolvedValueOnce(fixture('sync-profile-delete.json'));

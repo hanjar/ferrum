@@ -6,7 +6,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hotlist::model::is_format_char;
 use crate::sync_engine::roots::{RootError, RootProbe, overlap};
+
+/// Control characters and Unicode format (bidi, zero-width) characters can reorder or hide text
+/// in a native dialog (SE-2, threat T4): they are refused in names, filters and paths.
+fn has_unsafe_char(s: &str) -> bool {
+    s.chars().any(|c| c.is_control() || is_format_char(c))
+}
 
 // ── Limits (requirements SP-1.3, SP-1.4, SP-4.2, SP-5.1) ──
 
@@ -36,8 +43,16 @@ pub enum RootIdentity {
         fs_name: String,
         drive: DriveKind,
     },
+    /// A UNC root. The ids are recorded when the share could be opened at save time; both absent
+    /// means the identity is UNKNOWN (offline share): the profile is never Ready on that basis.
     #[serde(rename_all = "camelCase")]
-    Network { unc_prefix: String },
+    Network {
+        unc_prefix: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        volume_serial: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,7 +273,7 @@ impl Draft {
         } else if name.chars().count() > NAME_MAX_CHARS {
             errors.push(fe("name", "name_too_long"));
         }
-        if self.name.chars().any(char::is_control) {
+        if has_unsafe_char(&self.name) {
             errors.push(fe("name", "name_control"));
         }
 
@@ -350,7 +365,7 @@ impl Draft {
                     errors.push(fe(field, "filter_too_long"));
                     break;
                 }
-                if pattern.chars().any(char::is_control) {
+                if has_unsafe_char(pattern) {
                     errors.push(fe(field, "filter_control"));
                     break;
                 }
@@ -417,6 +432,10 @@ fn root_facts(
         errors.push(fe(field, "root_too_long"));
         return None;
     }
+    if has_unsafe_char(trimmed) {
+        errors.push(fe(field, "root_invalid"));
+        return None;
+    }
     let canonical = match probe.canonical(trimmed) {
         Ok(c) => c,
         Err(RootError::Invalid) => {
@@ -474,6 +493,10 @@ fn versioning_facts(
     };
     if raw.chars().count() > ROOT_MAX_CHARS {
         errors.push(fe("versioningRoot", "root_too_long"));
+        return None;
+    }
+    if has_unsafe_char(raw) {
+        errors.push(fe("versioningRoot", "versioning_root_invalid"));
         return None;
     }
     let canonical = match probe.canonical(raw) {
@@ -575,7 +598,15 @@ fn identity_display(identity: &RootIdentity) -> String {
             file_id,
             ..
         } => format!("vol {volume_serial} · id {}", shorten_middle(file_id, 12)),
-        RootIdentity::Network { unc_prefix } => unc_prefix.clone(),
+        RootIdentity::Network {
+            unc_prefix,
+            volume_serial: Some(serial),
+            file_id: Some(file_id),
+        } => format!(
+            "{unc_prefix} · vol {serial} · id {}",
+            shorten_middle(file_id, 12)
+        ),
+        RootIdentity::Network { unc_prefix, .. } => format!("{unc_prefix} · unverified"),
     }
 }
 
@@ -761,6 +792,8 @@ mod tests {
             if canonical.starts_with(r"\\") {
                 return Ok(RootIdentity::Network {
                     unc_prefix: canonical.to_lowercase(),
+                    volume_serial: Some("00000002".into()),
+                    file_id: Some("a".repeat(32)),
                 });
             }
             Ok(RootIdentity::Local {

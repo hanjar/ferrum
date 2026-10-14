@@ -1,11 +1,15 @@
 //! Forward-only store migrations (Automation design §4.5, LC-5).
 //!
-//! A migration runs under `BEGIN EXCLUSIVE`, takes a backup of the previous schema file first
-//! (`automation.db.bak-v<from>`, after a `wal_checkpoint(TRUNCATE)` so the copy is complete),
-//! applies the steps `from+1..=SCHEMA_VERSION`, and deletes the backup only on success. On
-//! failure the transaction rolls back, the backup stays and the original store is untouched.
+//! Openers are serialized by an exclusive lock FILE (`automation.migrate.lock`, held for the
+//! whole check-backup-migrate sequence, so two processes opening a fresh store take turns). Under
+//! that lock the schema version is read AGAIN: an opener that lost the race finds the store
+//! current and does nothing (no backup, no second `CREATE TABLE`). Only a real migration takes a
+//! backup of the previous schema (`automation.db.bak-v<from>`, a consistent `VACUUM INTO`
+//! snapshot), applies the steps `from+1..=SCHEMA_VERSION` inside `BEGIN EXCLUSIVE` (version
+//! re-read once more inside it), and deletes the backup only on success. On failure the
+//! transaction rolls back, the backup stays and the original store is untouched.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
@@ -15,40 +19,75 @@ use super::StoreError;
 /// later packages bump it and add one step each.
 pub const SCHEMA_VERSION: i64 = 1;
 
-/// Migrate `from` → [`SCHEMA_VERSION`]. A no-op when already current.
-pub fn run(conn: &Connection, dir: &Path, from: i64, app_version: &str) -> Result<(), StoreError> {
-    run_with_failure_at(conn, dir, from, app_version, None)
-}
+/// Name of the migration lock file inside the store directory.
+pub const LOCK_FILE: &str = "automation.migrate.lock";
 
-/// Core migration; `fail_at` injects a failure right before the given schema step is applied
-/// (LC-5 backup test).
-pub fn run_with_failure_at(
+/// How long an opener waits for another opener's migration.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Migrate to [`SCHEMA_VERSION`]. `hint_from` is the version the caller saw before locking; the
+/// migration re-reads the real version under its lock. A no-op when already current.
+pub fn run(
     conn: &Connection,
     dir: &Path,
-    from: i64,
+    hint_from: i64,
+    app_version: &str,
+) -> Result<(), StoreError> {
+    run_inner(conn, dir, hint_from, app_version, None)
+}
+
+/// Core migration with a failure injected right before the given schema step (LC-5 backup test).
+#[cfg(test)]
+pub(super) fn run_with_failure_at(
+    conn: &Connection,
+    dir: &Path,
+    hint_from: i64,
     app_version: &str,
     fail_at: Option<i64>,
 ) -> Result<(), StoreError> {
+    run_inner(conn, dir, hint_from, app_version, fail_at)
+}
+
+fn user_version(conn: &Connection) -> Result<i64, StoreError> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| StoreError::Unavailable)
+}
+
+fn run_inner(
+    conn: &Connection,
+    dir: &Path,
+    hint_from: i64,
+    app_version: &str,
+    fail_at: Option<i64>,
+) -> Result<(), StoreError> {
+    if hint_from >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let _lock = MigrationLock::acquire(dir)?;
+    // Under the lock: the version another opener may just have written.
+    let from = user_version(conn)?;
     if from >= SCHEMA_VERSION {
         return Ok(());
     }
-    let db = dir.join("automation.db");
     let backup = dir.join(format!("automation.db.bak-v{from}"));
-    // The backup must not carry un-checkpointed WAL frames.
-    let _: i64 = conn
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
-        .unwrap_or(0);
-    std::fs::copy(&db, &backup).map_err(|_| StoreError::Unavailable)?;
+    take_backup(conn, &backup)?;
 
     conn.execute_batch("BEGIN EXCLUSIVE")
         .map_err(|_| StoreError::Unavailable)?;
-    let outcome = (from + 1..=SCHEMA_VERSION).try_for_each(|version| {
-        if fail_at == Some(version) {
+    let outcome = user_version(conn).and_then(|inside| {
+        if inside != from {
+            // Someone changed the schema between the snapshot and the lock: never migrate on a
+            // stale view. The caller's next open sees the new state.
             return Err(StoreError::Unavailable);
         }
-        apply_step(conn, version, app_version)?;
-        conn.pragma_update(None, "user_version", version)
-            .map_err(|_| StoreError::Unavailable)
+        (from + 1..=SCHEMA_VERSION).try_for_each(|version| {
+            if fail_at == Some(version) {
+                return Err(StoreError::Unavailable);
+            }
+            apply_step(conn, version, app_version)?;
+            conn.pragma_update(None, "user_version", version)
+                .map_err(|_| StoreError::Unavailable)
+        })
     });
     match outcome {
         Ok(()) => {
@@ -63,6 +102,61 @@ pub fn run_with_failure_at(
             // The backup stays and the original is intact (LC-5).
             Err(e)
         }
+    }
+}
+
+/// A consistent snapshot of the committed state (`VACUUM INTO` cannot run in a transaction and
+/// refuses an existing target, so a leftover backup of an earlier failed run is replaced).
+fn take_backup(conn: &Connection, backup: &Path) -> Result<(), StoreError> {
+    super::ensure_plain_file(backup)?;
+    let _ = std::fs::remove_file(backup);
+    let target: PathBuf = backup.to_path_buf();
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
+        .map(|_| ())
+        .map_err(|_| StoreError::Unavailable)
+}
+
+/// Exclusive lock file for the migration sequence; deleted when released.
+struct MigrationLock {
+    _file: Option<std::fs::File>,
+}
+
+impl MigrationLock {
+    #[cfg(windows)]
+    fn acquire(dir: &Path) -> Result<Self, StoreError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let path = dir.join(LOCK_FILE);
+        super::ensure_plain_file(&path)?;
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            // share_mode(0): while one opener holds the handle no other can open the file.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .share_mode(0)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(&path)
+            {
+                Ok(file) => return Ok(Self { _file: Some(file) }),
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_ACCESS_DENIED)
+                    ) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => return Err(StoreError::Unavailable),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn acquire(_dir: &Path) -> Result<Self, StoreError> {
+        Ok(Self { _file: None })
     }
 }
 

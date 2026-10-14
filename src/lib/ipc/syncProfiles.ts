@@ -44,7 +44,13 @@ export type RootIdentity =
       fsName: string;
       drive: 'fixed' | 'removable';
     }
-  | { kind: 'network'; uncPrefix: string };
+  | {
+      kind: 'network';
+      uncPrefix: string;
+      /** Present only when the share could be opened at save time; absent = never verified. */
+      volumeSerial?: string;
+      fileId?: string;
+    };
 
 export type Readiness =
   { status: 'ready' } | { status: 'checking' } | { status: 'notReady'; reason: string };
