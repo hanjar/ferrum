@@ -1,0 +1,52 @@
+{
+  "name": "Reconcile baseline keeps entry if delete was ok but entry is still present in after report",
+  "previous": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "del.txt": {
+        "left": { "size": 50, "modifiedMs": 1000 },
+        "right": { "size": 50, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "del.txt",
+        "state": "same",
+        "leftSize": 50,
+        "leftModifiedMs": 1000,
+        "rightSize": 50,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "plan": [
+    {
+      "name": "del.txt",
+      "state": "rightOnly",
+      "action": "deleteRight"
+    }
+  ],
+  "outcomes": {
+    "del.txt": "ok"
+  },
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "del.txt": {
+        "left": { "size": 50, "modifiedMs": 1000 },
+        "right": { "size": 50, "modifiedMs": 1000 }
+      }
+    }
+  },
+  "provesFullSync": true
+}

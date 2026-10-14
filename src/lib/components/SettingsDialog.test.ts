@@ -190,3 +190,34 @@ describe('SettingsDialog category nav (FER-429)', () => {
     }
   });
 });
+
+describe('SettingsDialog build info (FER-548)', () => {
+  it('displays full build label and detailed tooltip in sidebar footer', () => {
+    const { host } = renderDialog();
+    const label = host.container.querySelector('.buildLabelText') as HTMLElement;
+    expect(label).not.toBeNull();
+    expect(label.textContent?.trim()).toBe('Ferrum · 0.2.0 · test000 · 14 Okt');
+    expect(label.getAttribute('title')).toContain('Ferrum 0.2.0');
+    expect(label.getAttribute('title')).toContain('Commit: test000');
+  });
+
+  it('copies build detail to clipboard when "Salin info build" button is clicked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const { host } = renderDialog();
+    const btn = host.getByRole('button', { name: /Salin info build/i });
+    expect(btn.getAttribute('title')).toContain('Ferrum 0.2.0');
+    await fireEvent.click(btn);
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copiedText = writeText.mock.calls[0][0];
+    expect(copiedText).toContain('Ferrum 0.2.0');
+    expect(copiedText).toContain('Commit: test000');
+    expect(copiedText).toContain('Status: clean');
+    expect(copiedText).toContain('Built: 2026-10-14 00:00:00 UTC');
+  });
+});

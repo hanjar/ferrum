@@ -16,3 +16,12 @@ declare module 'pdfjs-dist/build/pdf.worker.mjs' {
 declare module 'pdfjs-dist/legacy/build/pdf.worker.mjs' {
   export const WorkerMessageHandler: unknown;
 }
+
+interface FerrumBuildInfo {
+  version: string;
+  commit: string;
+  dirty: boolean;
+  date: string;
+}
+
+declare const __FERRUM_BUILD__: FerrumBuildInfo;

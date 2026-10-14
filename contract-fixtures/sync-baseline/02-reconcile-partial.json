@@ -1,0 +1,88 @@
+{
+  "name": "Reconcile baseline preserves previous entries on partial failure",
+  "previous": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "conf.txt": {
+        "left": { "size": 6, "modifiedMs": 600 },
+        "right": { "size": 6, "modifiedMs": 600 }
+      },
+      "fail.txt": {
+        "left": { "size": 5, "modifiedMs": 500 },
+        "right": { "size": 5, "modifiedMs": 500 }
+      }
+    }
+  },
+  "after": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "cancel.txt",
+        "state": "leftOnly",
+        "leftSize": 7,
+        "leftModifiedMs": 700,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "conf.txt",
+        "state": "sizeDifferent",
+        "leftSize": 6,
+        "leftModifiedMs": 600,
+        "rightSize": 8,
+        "rightModifiedMs": 800
+      },
+      {
+        "name": "fail.txt",
+        "state": "sizeDifferent",
+        "leftSize": 9,
+        "leftModifiedMs": 900,
+        "rightSize": 5,
+        "rightModifiedMs": 500
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "plan": [
+    {
+      "name": "cancel.txt",
+      "state": "leftOnly",
+      "action": "copyToRight"
+    },
+    {
+      "name": "conf.txt",
+      "state": "sizeDifferent",
+      "action": "conflict",
+      "reason": "bothChanged"
+    },
+    {
+      "name": "fail.txt",
+      "state": "sizeDifferent",
+      "action": "updateRight"
+    }
+  ],
+  "outcomes": {
+    "cancel.txt": "cancelled",
+    "fail.txt": "failed"
+  },
+  "expectedBaseline": {
+    "version": 1,
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": {
+      "conf.txt": {
+        "left": { "size": 6, "modifiedMs": 600 },
+        "right": { "size": 6, "modifiedMs": 600 }
+      },
+      "fail.txt": {
+        "left": { "size": 5, "modifiedMs": 500 },
+        "right": { "size": 5, "modifiedMs": 500 }
+      }
+    }
+  },
+  "provesFullSync": false
+}

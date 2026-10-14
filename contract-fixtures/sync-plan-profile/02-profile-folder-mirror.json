@@ -1,0 +1,135 @@
+{
+  "name": "Profile mirror sync: new folder becomes createDirRight, extra folder becomes removeEmptyDirRight",
+  "report": {
+    "leftRoot": "C:\\Left",
+    "rightRoot": "D:\\Right",
+    "entries": [
+      {
+        "name": "extra-folder",
+        "state": "rightOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "extra-folder/old.txt",
+        "state": "rightOnly",
+        "isDir": false,
+        "leftSize": 0,
+        "leftModifiedMs": 0,
+        "rightSize": 50,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "new-folder",
+        "state": "leftOnly",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "new-folder/file.txt",
+        "state": "leftOnly",
+        "isDir": false,
+        "leftSize": 100,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 0
+      },
+      {
+        "name": "shared",
+        "state": "same",
+        "isDir": true,
+        "leftSize": 0,
+        "leftModifiedMs": 1000,
+        "rightSize": 0,
+        "rightModifiedMs": 1000
+      },
+      {
+        "name": "shared/f.txt",
+        "state": "same",
+        "isDir": false,
+        "leftSize": 20,
+        "leftModifiedMs": 1000,
+        "rightSize": 20,
+        "rightModifiedMs": 1000
+      }
+    ],
+    "truncated": false,
+    "recursive": true
+  },
+  "options": {
+    "direction": "leftToRight",
+    "deleteExtras": true,
+    "profile": true
+  },
+  "baseline": null,
+  "expected": {
+    "items": [
+      {
+        "name": "extra-folder",
+        "state": "rightOnly",
+        "action": "removeEmptyDirRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\extra-folder",
+        "rightPath": "D:\\Right\\extra-folder"
+      },
+      {
+        "name": "extra-folder/old.txt",
+        "state": "rightOnly",
+        "action": "deleteRight",
+        "isDir": false,
+        "leftPath": "C:\\Left\\extra-folder\\old.txt",
+        "rightPath": "D:\\Right\\extra-folder\\old.txt"
+      },
+      {
+        "name": "new-folder",
+        "state": "leftOnly",
+        "action": "createDirRight",
+        "isDir": true,
+        "leftPath": "C:\\Left\\new-folder",
+        "rightPath": "D:\\Right\\new-folder"
+      },
+      {
+        "name": "new-folder/file.txt",
+        "state": "leftOnly",
+        "action": "copyToRight",
+        "isDir": false,
+        "leftPath": "C:\\Left\\new-folder\\file.txt",
+        "rightPath": "D:\\Right\\new-folder\\file.txt"
+      },
+      {
+        "name": "shared",
+        "state": "same",
+        "action": "skip",
+        "isDir": true,
+        "leftPath": "C:\\Left\\shared",
+        "rightPath": "D:\\Right\\shared"
+      },
+      {
+        "name": "shared/f.txt",
+        "state": "same",
+        "action": "skip",
+        "isDir": false,
+        "leftPath": "C:\\Left\\shared\\f.txt",
+        "rightPath": "D:\\Right\\shared\\f.txt"
+      }
+    ],
+    "summary": {
+      "total": 6,
+      "toRight": 2,
+      "toLeft": 0,
+      "overwrites": 0,
+      "deletes": 2,
+      "conflicts": 0,
+      "skipped": 2,
+      "userSkipped": 0
+    },
+    "blockers": [],
+    "blockersDescription": ""
+  }
+}
