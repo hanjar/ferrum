@@ -20,7 +20,8 @@
   } from '../ipc/prefs';
   import { TERMINAL_CHOICES, type TerminalChoice } from '../ipc/shellOpen';
   import { prefs } from '../stores/prefsStore.svelte';
-  import { APP_NAME, BUILD_TAG } from '../version';
+  import { copyText } from '../clipboard';
+  import { APP_NAME, BUILD_LABEL, BUILD_DETAIL } from '../version';
   import Icon from './Icon.svelte';
   import { ICON_THEMES } from '../fileIcon';
   import { activity } from '../stores/activityStore.svelte';
@@ -151,7 +152,23 @@
   onMount(() => {
     if (isInTauri()) void activity.refresh().catch(() => undefined);
   });
-  onDestroy(() => activityPage.cancelScope());
+
+  let copyBuildStatus = $state('');
+  let copyBuildTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function handleCopyBuildInfo() {
+    const ok = await copyText(BUILD_DETAIL);
+    copyBuildStatus = ok ? 'Tersalin!' : 'Gagal menyalin';
+    clearTimeout(copyBuildTimer);
+    copyBuildTimer = setTimeout(() => {
+      copyBuildStatus = '';
+    }, 1500);
+  }
+
+  onDestroy(() => {
+    activityPage.cancelScope();
+    clearTimeout(copyBuildTimer);
+  });
 
   // FER-464: Disk usage scan cache (roots outside the index only).
   let cacheSummary = $state('');
@@ -245,8 +262,13 @@
         </button>
       {/each}
     </nav>
-    <div class="catFoot" style="margin-top:auto;font-size:10.5px;color:var(--text3);padding:0 8px;">
-      {APP_NAME} · build {BUILD_TAG}
+    <div class="catFoot">
+      <div class="buildLabelText" title={BUILD_DETAIL}>
+        {APP_NAME} · {BUILD_LABEL}
+      </div>
+      <button type="button" class="copyBuildBtn" title={BUILD_DETAIL} onclick={handleCopyBuildInfo}>
+        {copyBuildStatus || 'Salin info build'}
+      </button>
     </div>
   </aside>
 
@@ -1016,6 +1038,35 @@
   .cat:disabled {
     color: var(--text3);
     opacity: 0.55;
+  }
+  .catFoot {
+    margin-top: auto;
+    font-size: 10.5px;
+    color: var(--text3);
+    padding: 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .buildLabelText {
+    line-height: 1.35;
+    word-break: break-word;
+    font-family: 'Geist Mono', monospace;
+  }
+  .copyBuildBtn {
+    align-self: flex-start;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: transparent;
+    color: var(--text3);
+    font-size: 11px;
+    cursor: default;
+  }
+  .copyBuildBtn:hover {
+    background: var(--hover);
+    color: var(--text2);
   }
   .panel {
     display: flex;

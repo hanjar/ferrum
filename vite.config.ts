@@ -1,8 +1,10 @@
 /// <reference types="svelte" />
 /// <reference types="vitest" />
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 import { build as esbuild } from 'esbuild';
-import { resolve } from 'node:path';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { svelteTesting } from '@testing-library/svelte/vite';
 
@@ -33,9 +35,59 @@ function pdfViewerBundle(): Plugin {
   };
 }
 
+function getPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf-8'));
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function getGitInfo(): { commit: string; dirty: boolean } {
+  try {
+    const commit = execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 3000,
+    }).trim();
+
+    const status = execFileSync('git', ['status', '--porcelain'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 3000,
+    }).trim();
+
+    return {
+      commit: commit || 'unknown',
+      dirty: status.length > 0,
+    };
+  } catch {
+    return { commit: 'unknown', dirty: false };
+  }
+}
+
+const isTest = Boolean(process.env.VITEST);
+
+const buildInfo = isTest
+  ? {
+      version: getPackageVersion(),
+      commit: 'test000',
+      dirty: false,
+      date: '2026-10-14T00:00:00.000Z',
+    }
+  : {
+      version: getPackageVersion(),
+      ...getGitInfo(),
+      date: new Date().toISOString(),
+    };
+
 // Tauri dev server: fixed port, strictPort so a stale server fails loudly
 // instead of silently falling back to another origin the Rust shell never loads.
 export default defineConfig({
+  define: {
+    __FERRUM_BUILD__: JSON.stringify(buildInfo),
+  },
   plugins: [svelte(), svelteTesting(), pdfViewerBundle()],
   clearScreen: false,
   server: {

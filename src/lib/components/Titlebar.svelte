@@ -4,7 +4,7 @@
   import Icon from './Icon.svelte';
   import MenuBar from './MenuBar.svelte';
   import { ui } from '../uiState.svelte';
-  import { BUILD_TAG } from '../version';
+  import { BUILD_LABEL_COMPACT, BUILD_DETAIL } from '../version';
   import { ops } from '../stores/opsStore.svelte';
   import { aiChatHost } from '../ai/aiChatHost.svelte';
 
@@ -89,10 +89,10 @@
       <div class="logoMark"><span></span><span></span></div>
       <span class="logoName">Ferrum</span>
       <span
-        class="buildTag"
-        title="Build tag — naik setiap kali ada perbaikan"
+        class="buildLabel"
+        title={BUILD_DETAIL}
         style="margin-left:6px;font-size:10px;color:var(--text3);opacity:.85;font-family:'Geist Mono',monospace;"
-        >{BUILD_TAG}</span
+        >{BUILD_LABEL_COMPACT}</span
       >
     </div>
     <button
