@@ -248,6 +248,8 @@ pub fn run() {
             automation::commands::sync_profile_validate,
             automation::commands::sync_profile_save,
             automation::commands::sync_profile_delete,
+            automation::commands::sync_profile_preview,
+            automation::commands::sync_profile_run,
             automation::commands::sync_lease_acquire,
             automation::commands::sync_lease_release
         ])
@@ -337,6 +339,7 @@ pub fn run() {
             // failures are remembered in the state and reported per command; a newer store
             // schema opens read-only (LC-3).
             app.handle().manage(automation::commands::AutomationState::open());
+            app.handle().manage(automation::manual_run::PreviewBoard::default());
             Ok(())
         })
         .run(context)

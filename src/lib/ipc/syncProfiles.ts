@@ -113,6 +113,112 @@ export interface SaveInput {
   draft: SyncProfileDraft;
 }
 
+// ── Manual preview and run (Automation P0.2, design §7.1) ──
+
+/** Plan counts of a preview (the engine's `planSummary`). */
+export interface SyncPlanSummary {
+  total: number;
+  toRight: number;
+  toLeft: number;
+  overwrites: number;
+  deletes: number;
+  conflicts: number;
+  skipped: number;
+  userSkipped: number;
+}
+
+/** Verdict of the delete safety guard (SP-5), decided before any operation. */
+export type SyncGuardVerdict =
+  | { verdict: 'off' | 'ok' }
+  | {
+      verdict: 'tripped';
+      side: 'left' | 'right';
+      deletes: number;
+      entries: number;
+      percent: number;
+    }
+  | { verdict: 'emptySource'; empty: 'left' | 'right' };
+
+/** Why a comparison cannot be trusted (closed codes; a run is then impossible). */
+export type SyncBlocker = 'truncated' | 'cancelled' | 'errors';
+
+export interface SyncPreview {
+  /** Required by `run`; empty when `blockers` is present. */
+  previewId: string;
+  summary: SyncPlanSummary;
+  conflicts: number;
+  guard: SyncGuardVerdict;
+  blockers?: SyncBlocker[];
+}
+
+export interface SyncRunInput {
+  id: string;
+  previewId: string;
+  /** The user confirmed the overwrites listed in the preview (webview dialog). */
+  confirmOverwrite: boolean;
+}
+
+export interface SyncRunStarted {
+  runId: number;
+}
+
+export interface SyncRunCounts {
+  total: number;
+  done: number;
+  failed: number;
+  skipped: number;
+  changed: number;
+  held: number;
+  notStarted: number;
+}
+
+export type SyncOpStatus =
+  'notStarted' | 'running' | 'done' | 'skipped' | 'changed' | 'failed' | 'held';
+
+export interface SyncRunProblem {
+  index: number;
+  name: string;
+  action: string;
+  status: SyncOpStatus;
+  /** Closed code such as `sharing_violation`, `access_denied`, `disk_full`, `link_in_path`. */
+  reason?: string;
+}
+
+export type SyncSettleState =
+  | { state: 'notAttempted' }
+  | { state: 'saved' | 'unchanged'; entries: number }
+  | { state: 'skipped'; reason: string }
+  | { state: 'saveFailed'; code: string };
+
+/** The final result of a run. `errorText` is the documented run error text (may name a root). */
+export interface SyncRunResult {
+  kind:
+    | 'completed'
+    | 'partial'
+    | 'conflictHeld'
+    | 'failed'
+    | 'cancelled'
+    | 'interrupted'
+    | 'nothingToDo';
+  counts?: SyncRunCounts;
+  errorCode?: string;
+  errorText?: string;
+  interrupted?: 'rootOffline' | 'leaseLost';
+  pendingRerun: boolean;
+  settle: SyncSettleState;
+  problems: SyncRunProblem[];
+}
+
+/** Payload of the `sync-profile://run` event: a phase, throttled counts, or the final result. */
+export interface SyncRunEvent {
+  runId: number;
+  phase?: 'checking' | 'comparing' | 'syncing' | 'stopping' | 'settling';
+  counts?: SyncRunCounts;
+  result?: SyncRunResult;
+}
+
+export const SYNC_PROFILE_RUN_EVENT = 'sync-profile://run';
+
 /** A failed call; `code` is from the closed set of design §7 (`stale`, `not_found`, ...). */
 export class SyncProfilesError extends Error {
   constructor(public code: string) {
@@ -127,6 +233,10 @@ export interface SyncProfilesBackend {
   validate(draft: SyncProfileDraft): Promise<ValidateResult>;
   save(input: SaveInput): Promise<SaveResult>;
   delete(id: string, expectedRevision: number): Promise<{ status: string }>;
+  /** Read-only engine dry run (no lease, nothing touched). */
+  preview(id: string): Promise<SyncPreview>;
+  /** Start a previewed run; progress and the result arrive as `sync-profile://run` events. */
+  run(input: SyncRunInput): Promise<SyncRunStarted>;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -157,6 +267,17 @@ const tauriBackend: SyncProfilesBackend = {
   },
   async delete(id, expectedRevision) {
     return call<{ status: string }>('sync_profile_delete', { id, expectedRevision });
+  },
+  async preview(id) {
+    return call<SyncPreview>('sync_profile_preview', { id });
+  },
+  async run(input) {
+    // Flat arguments, never a "confirmed" flag: the permanent-delete dialog is backend-only (SE-1).
+    return call<SyncRunStarted>('sync_profile_run', {
+      id: input.id,
+      previewId: input.previewId,
+      confirmOverwrite: input.confirmOverwrite,
+    });
   },
 };
 
@@ -219,6 +340,12 @@ export function createMemoryBackend(initial: SyncProfileDraft[] = []): SyncProfi
       profiles.set(id, profile);
       return { status: 'saved', profile };
     },
+    async preview() {
+      throw new SyncProfilesError('unsupported');
+    },
+    async run() {
+      throw new SyncProfilesError('unsupported');
+    },
     async delete(id, expectedRevision) {
       const p = profiles.get(id);
       if (!p) throw new SyncProfilesError('not_found');
@@ -239,6 +366,8 @@ export function defaultBackend(): SyncProfilesBackend {
     validate: (d) => pick().validate(d),
     save: (i) => pick().save(i),
     delete: (id, r) => pick().delete(id, r),
+    preview: (id) => pick().preview(id),
+    run: (i) => pick().run(i),
   };
 }
 

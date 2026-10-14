@@ -1,0 +1,16 @@
+{
+  "runId": 1790000000123,
+  "result": {
+    "kind": "partial",
+    "counts": { "total": 6, "done": 3, "failed": 1, "skipped": 0, "changed": 1, "held": 0, "notStarted": 1 },
+    "errorCode": "access_denied",
+    "errorText": "Not retried automatically — permission errors need you. Fix access, then Recheck.",
+    "pendingRerun": true,
+    "settle": { "state": "saved", "entries": 12 },
+    "problems": [
+      { "index": 2, "name": "docs/report.docx", "action": "updateRight", "status": "changed" },
+      { "index": 3, "name": "photos/img1.jpg", "action": "copyToRight", "status": "failed", "reason": "access_denied" },
+      { "index": 5, "name": "photos/img2.jpg", "action": "copyToRight", "status": "notStarted" }
+    ]
+  }
+}

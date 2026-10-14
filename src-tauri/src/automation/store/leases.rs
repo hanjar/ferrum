@@ -448,6 +448,30 @@ pub fn covers(
     }))
 }
 
+/// Like [`covers`], but for ONE lease row (by id): the row must belong to `holder`, be fresh and
+/// cover every one of `wanted`. Used by a run that holds a lease guard and must not be satisfied
+/// by some other lease of the same process.
+pub fn covers_lease(
+    conn: &Connection,
+    id: &str,
+    holder: Holder,
+    wanted: &[String],
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    if wanted.is_empty() {
+        return Ok(false);
+    }
+    Ok(get(conn, id)?.is_some_and(|row| {
+        row.holder == holder
+            && !stale(now_ms, row.beat_ms)
+            && row.roots.as_ref().is_some_and(|have| {
+                wanted
+                    .iter()
+                    .all(|want| have.iter().any(|root| roots::contains(root, want)))
+            })
+    }))
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;

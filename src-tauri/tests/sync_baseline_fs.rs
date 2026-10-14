@@ -8,16 +8,22 @@
 //! mencatat fakta kedua sisi, dan modifikasi/hapus nyata mengubah fakta itu seperti yang diharapkan.
 //! Tidak ada tes yang menyentuh folder pengguna.
 
+use ferrum_lib::automation::lease::{GuardOutcome, LeaseEnv, LeaseGuard};
+use ferrum_lib::automation::store::Store as AutomationStore;
+use ferrum_lib::automation::store::leases::HolderKind;
 use ferrum_lib::compare::{CompareDirsReport, DirDiffState, compare_dirs};
 use ferrum_lib::copy_engine::{ConflictPolicy, run_copy};
 use ferrum_lib::domain::OperationProgress;
 use ferrum_lib::ops::CancelToken;
 use ferrum_lib::sync_baseline::{
-    BASELINE_VERSION, BaselineDto, EntryDto, FactsDto, LoadResult, RootPair, SyncBaselineStore,
+    BASELINE_VERSION, BaselineDto, BaselineError, EntryDto, FactsDto, LoadResult, RootPair,
+    SyncBaselineStore, clear_with_lease, save_with_guard,
 };
+use ferrum_lib::sync_engine::roots;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -38,6 +44,51 @@ fn s(p: &Path) -> String {
 }
 
 fn silent(_: OperationProgress) {}
+
+fn canon(p: &str) -> Result<String, roots::RootError> {
+    roots::canonical(p)
+}
+
+/// Baseline writes need the lease of their pair (design §5.7): the store's
+/// unguarded `save` is crate-private, so this test takes a real lease over the fixture's roots
+/// and saves through `save_with_guard`, exactly as an engine run does.
+fn with_lease<T>(
+    f: &Fixture,
+    p: &RootPair,
+    body: impl FnOnce(&LeaseGuard, &AutomationStore) -> T,
+) -> T {
+    let auto = Arc::new(AutomationStore::open(&f.base.join("auto"), "0.2.0"));
+    let roots = [canon(&p.left_root).unwrap(), canon(&p.right_root).unwrap()];
+    let GuardOutcome::Acquired(guard) = LeaseGuard::acquire(
+        &auto,
+        &LeaseEnv::system(),
+        HolderKind::Manual,
+        None,
+        &roots,
+        None,
+    )
+    .unwrap() else {
+        panic!("lease busy")
+    };
+    body(&guard, &auto)
+}
+
+fn save(
+    f: &Fixture,
+    store: &SyncBaselineStore,
+    p: &RootPair,
+    baseline: &BaselineDto,
+) -> Result<(), BaselineError> {
+    with_lease(f, p, |guard, _| {
+        save_with_guard(store, guard, &canon, p, baseline)
+    })
+}
+
+fn clear(f: &Fixture, store: &SyncBaselineStore, p: &RootPair) -> Result<(), BaselineError> {
+    with_lease(f, p, |_, auto| {
+        clear_with_lease(store, auto, &LeaseEnv::system(), &canon, p)
+    })
+}
 
 struct Fixture {
     base: PathBuf,
@@ -125,7 +176,7 @@ fn first_run_and_persist(f: &Fixture, store: &SyncBaselineStore) -> RootPair {
     copy_all_missing(f, &report);
     let after = compare(&f.left, &f.right);
     assert!(after.entries.iter().all(|e| e.state == DirDiffState::Same));
-    store.save(&p, &baseline_from(&p, &after)).unwrap();
+    save(f, store, &p, &baseline_from(&p, &after)).unwrap();
     p
 }
 
@@ -265,7 +316,7 @@ fn two_real_pairs_are_independent() {
     fs::write(f2.right.join("solo.txt"), b"x").unwrap();
     let p2 = pair(&f2.left, &f2.right);
     let after = compare(&f2.left, &f2.right);
-    store.save(&p2, &baseline_from(&p2, &after)).unwrap();
+    save(&f2, &store, &p2, &baseline_from(&p2, &after)).unwrap();
 
     let LoadResult::Ok { baseline: b1 } = store.load(&p1).unwrap() else {
         panic!("p1")
@@ -275,7 +326,7 @@ fn two_real_pairs_are_independent() {
     };
     assert_eq!(b1.entries.len(), 3);
     assert_eq!(b2.entries.keys().collect::<Vec<_>>(), vec!["solo.txt"]);
-    store.clear(&p2).unwrap();
+    clear(&f2, &store, &p2).unwrap();
     assert!(matches!(store.load(&p1).unwrap(), LoadResult::Ok { .. }));
     let _ = fs::remove_dir_all(&f1.base);
     let _ = fs::remove_dir_all(&f2.base);
@@ -301,7 +352,10 @@ fn nested_and_same_roots_are_rejected_before_any_baseline_io() {
         pair(&inner, &f.left),
     ] {
         assert_eq!(store.load(&p).unwrap_err().code, "invalid_roots");
-        assert_eq!(store.save(&p, &dto(&p)).unwrap_err().code, "invalid_roots");
+        assert_eq!(
+            save(&f, &store, &p, &dto(&p)).unwrap_err().code,
+            "invalid_roots"
+        );
     }
     let files = fs::read_dir(&store_dir).unwrap().flatten().count();
     assert_eq!(files, 0, "rejected roots write nothing");
