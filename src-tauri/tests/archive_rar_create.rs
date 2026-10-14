@@ -22,7 +22,8 @@ use ferrum_lib::archive_contract::{
 use ferrum_lib::archive_create_test;
 use ferrum_lib::archive_rar::RarProvider;
 use ferrum_lib::archive_rar_tool::{
-    RarTool, create_rar_from_prefs_dir, create_rar_with_tool, validate_rar_exe,
+    RarTool, create_rar_from_prefs_dir, create_rar_with_tool, fingerprint_exe,
+    validate_confirmed_rar_exe,
 };
 use ferrum_lib::archive_zip::ZipProvider;
 use sha2::{Digest, Sha256};
@@ -78,13 +79,15 @@ fn find_rar_exe() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
-/// The host's Rar.exe, validated exactly like production does.
+/// The host's Rar.exe, validated exactly like production does: static checks, then the
+/// fingerprint gate with the file's own freshly computed fingerprint (FER-511).
 fn rar_tool() -> Option<RarTool> {
     let Some(p) = find_rar_exe() else {
         eprintln!("SKIP: Rar.exe not found on host");
         return None;
     };
-    Some(validate_rar_exe(&p).expect("host Rar.exe must validate"))
+    let fp = fingerprint_exe(&p).expect("host Rar.exe fingerprint");
+    Some(validate_confirmed_rar_exe(&p, Some(&fp)).expect("host Rar.exe must validate"))
 }
 
 fn limits() -> ArchiveLimits {
@@ -243,6 +246,82 @@ fn test_rar_create_empty_or_unconfigured_path_returns_unsupported() {
     assert!(leftovers(t.path()).is_empty());
 }
 
+/// FER-511: only a CONFIRMED exe (path + matching fingerprint in prefs) may run. A legacy path
+/// without a fingerprint and an exe changed after confirmation are both refused before any
+/// process starts — the archive error would otherwise only appear after a real spawn, and no
+/// job folder / listfile is ever created.
+#[test]
+fn test_rar_create_requires_the_confirmed_fingerprint() {
+    let Some(host) = find_rar_exe() else {
+        eprintln!("SKIP: Rar.exe not found on host");
+        return;
+    };
+    let t = TempDir::new("fp-gate");
+    // Private copy: the user's WinRAR install is never touched.
+    let tool_dir = t.path().join("tool");
+    fs::create_dir_all(&tool_dir).unwrap();
+    let private = tool_dir.join("Rar.exe");
+    fs::copy(&host, &private).unwrap();
+
+    let src = t.path().join("file.txt");
+    fs::write(&src, b"hello").unwrap();
+    let sources = vec![s(&src)];
+    let store = |fp: Option<ferrum_lib::prefs::RarExeFingerprint>| {
+        let config = t.path().join(format!("config-{}", fp.is_some()));
+        fs::create_dir_all(&config).unwrap();
+        ferrum_lib::prefs::set_rar_exe(&config, Some(s(&private)), fp).unwrap();
+        config
+    };
+    let run = |config: &Path, dest: &Path| {
+        create_rar_from_prefs_dir(
+            config,
+            &sources,
+            dest,
+            ArchiveConflictPolicy::Overwrite,
+            ArchiveCompressionLevel::Normal,
+            &mut |_| true,
+        )
+    };
+
+    // 1. Legacy prefs: path without fingerprint → refused, nothing ran.
+    let legacy = store(None);
+    let dest1 = t.path().join("out1.rar");
+    let err = run(&legacy, &dest1).expect_err("unconfirmed exe must be refused");
+    assert_eq!(err.code, ArchiveErrorCode::UnsupportedFormat);
+    assert!(
+        err.message.contains("belum dikonfirmasi"),
+        "message says why: {}",
+        err.message
+    );
+    assert!(!dest1.exists(), "no archive without confirmation");
+    assert!(leftovers(t.path()).is_empty(), "no job folder was created");
+
+    // 2. Confirmed fingerprint (set the legitimate way: freshly computed) → create runs.
+    let fp = fingerprint_exe(&private).expect("fingerprint of the private copy");
+    let confirmed = store(Some(fp));
+    let dest2 = t.path().join("out2.rar");
+    let written = run(&confirmed, &dest2).expect("confirmed exe runs");
+    assert_eq!(written, dest2);
+    assert_eq!(rar_names(&dest2), vec!["file.txt".to_string()]);
+
+    // 3. The exe changes AFTER confirmation → refused BEFORE spawn: error is about the
+    //    fingerprint, no second archive, no job folder. (A spawn attempt on this modified exe
+    //    would still run and produce a DIFFERENT failure — the message proves the gate fired.)
+    let mut bytes = fs::read(&private).unwrap();
+    bytes.extend_from_slice(b"\0");
+    fs::write(&private, &bytes).unwrap();
+    let dest3 = t.path().join("out3.rar");
+    let err = run(&confirmed, &dest3).expect_err("changed exe must be refused");
+    assert_eq!(err.code, ArchiveErrorCode::UnsupportedFormat);
+    assert!(
+        err.message.contains("berubah sejak dikonfirmasi"),
+        "message says why: {}",
+        err.message
+    );
+    assert!(!dest3.exists(), "no archive from a changed exe");
+    assert!(leftovers(t.path()).is_empty(), "no job folder was created");
+}
+
 #[test]
 fn test_rar_create_via_prefs_dir_uses_configured_tool() {
     let Some(p) = find_rar_exe() else {
@@ -254,8 +333,11 @@ fn test_rar_create_via_prefs_dir_uses_configured_tool() {
     fs::write(&src, b"hello").unwrap();
     let config = t.path().join("config");
     fs::create_dir_all(&config).unwrap();
+    // FER-511: the fingerprint is set through the legitimate path — freshly computed from the
+    // exe itself, exactly what the confirmed set_path flow stores.
     let prefs = ferrum_lib::prefs::Prefs {
         rar_exe_path: Some(s(&p)),
+        rar_exe_fingerprint: Some(fingerprint_exe(&p).expect("host fingerprint")),
         ..Default::default()
     };
     ferrum_lib::prefs::save_to(&config, &prefs).unwrap();
@@ -486,7 +568,10 @@ fn test_rar_create_cfg_switch_ignores_rar_ini_next_to_exe() {
     );
 
     // Ferrum's run with the same Rar.exe: -cfg- keeps the source intact.
-    let tool = validate_rar_exe(&private_rar).expect("private Rar.exe validates");
+    let tool = {
+        let fp = fingerprint_exe(&private_rar).expect("private copy fingerprint");
+        validate_confirmed_rar_exe(&private_rar, Some(&fp)).expect("private Rar.exe validates")
+    };
     let src_file = t.path().join("precious_source.txt");
     let source_data = b"CRITICAL USER DATA MUST NEVER BE DELETED BY WINRAR SWITCHES";
     fs::write(&src_file, source_data).unwrap();
@@ -649,4 +734,38 @@ fn test_rar_create_sources_from_different_folders_match_zip() {
     let rn = rar_names(&rar_dest);
     assert_eq!(rn, zip_names(&zip_dest));
     assert!(rn.contains(&"docs/1.txt".to_string()) && rn.contains(&"2.txt".to_string()));
+}
+
+/// FER-510: two sources from different folders producing the same relative member name
+/// (`same.txt` vs `Same.txt` — Windows matches names case-insensitively) are refused with
+/// `Conflict` + `member_path` BEFORE Rar.exe runs: no job folder, no archive, no process.
+#[test]
+fn test_rar_create_duplicate_member_names_refused_before_rar_runs() {
+    let Some(tool) = rar_tool() else { return };
+    let t = TempDir::new("dup");
+    let a = t.path().join("left");
+    let b = t.path().join("right");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("same.txt"), b"one").unwrap();
+    fs::write(b.join("Same.txt"), b"two").unwrap();
+
+    let dest = t.path().join("dup.rar");
+    let err = create_rar_with_tool(
+        &tool,
+        &[s(&a.join("same.txt")), s(&b.join("Same.txt"))],
+        &dest,
+        ArchiveConflictPolicy::Overwrite,
+        ArchiveCompressionLevel::Normal,
+        &mut |_| true,
+    )
+    .expect_err("duplicate member names must be refused");
+    assert_eq!(err.code, ArchiveErrorCode::Conflict, "{err:?}");
+    assert_eq!(err.member_path.as_deref(), Some("Same.txt"));
+    assert!(!dest.exists(), "no archive from duplicate names");
+    assert!(
+        leftovers(t.path()).is_empty(),
+        "no job folder was created — Rar never ran: {:?}",
+        leftovers(t.path())
+    );
 }

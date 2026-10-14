@@ -29,7 +29,7 @@ use sevenz_rust2::{ArchiveReader, Password};
 use crate::archive_contract::{
     ArchiveCapabilities, ArchiveCreateRequest, ArchiveEntry, ArchiveError, ArchiveErrorCode,
     ArchiveFormat, ArchiveListRequest, ArchiveListResponse, ArchiveProvider, ArchiveReadRequest,
-    ArchiveTestReport, ArchiveTestRequest, Location, MemberPath,
+    ArchiveTestReport, ArchiveTestRequest, Location, MemberPath, dedup_level, level_row,
 };
 
 pub struct SevenZProvider;
@@ -474,51 +474,24 @@ fn list_from(
         None => SevenZProvider::open_reader(Path::new(archive_path), password)?,
     };
     // Direct children of `member_path`; implicit dirs synthesized and
-    // deduped by child-name (same rules as the ZIP central directory).
-    // Explicit folder entries (7-Zip always writes them) and implicit
-    // ones synthesized from deeper members share one seen-set so a
-    // folder is listed once; the UI keys rows by member path.
-    let mut names: Vec<(String, bool, u64, Option<i64>)> = Vec::new();
-    let mut seen_dirs = std::collections::HashSet::new();
+    // deduped by child-name (FER-508, same rules as RAR and ZIP).
+    let mut rows: Vec<(String, bool, u64, Option<i64>)> = Vec::new();
     for file in reader.archive().files.iter() {
         let raw = normalized(file.name());
-        let Some(rest) = raw.strip_prefix(&prefix) else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue; // the requested dir itself
-        }
         let mod_time = if file.has_last_modified_date {
             nt_time_to_ms(file.last_modified_date)
         } else {
             None
         };
-        if let Some(slash) = rest.find('/') {
-            let child = &rest[..slash];
-            if !child.is_empty() && seen_dirs.insert(child.to_owned()) {
-                names.push((child.to_owned(), true, 0, None));
-            }
-        } else {
-            let is_dir = file.is_directory();
-            if !seen_dirs.insert(rest.to_owned()) {
-                if is_dir
-                    && mod_time.is_some()
-                    && let Some(existing) = names.iter_mut().find(|(n, d, _, _)| *d && n == rest)
-                {
-                    existing.3 = mod_time;
-                }
-                continue; // already listed (explicit + implicit folder, or repeated name)
-            }
-            names.push((
-                rest.to_owned(),
-                is_dir,
-                if is_dir { 0 } else { file.size() },
-                mod_time,
-            ));
+        let is_dir = file.is_directory();
+        let size = if is_dir { 0 } else { file.size() };
+        if let Some(row) = level_row(&prefix, &raw, is_dir, size, mod_time) {
+            rows.push(row);
         }
     }
+    let rows = dedup_level(member_path.as_str(), rows)?;
 
-    let entries: Vec<ArchiveEntry> = names
+    let entries: Vec<ArchiveEntry> = rows
         .into_iter()
         .map(|(name, is_dir, size, modified_ms)| {
             let full = if prefix.is_empty() {
@@ -538,13 +511,19 @@ fn list_from(
         .collect::<Result<Vec<_>, ArchiveError>>()?;
     // Folders-first ordering, then by name — the contract's listing order.
     let mut entries = entries;
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 
-    Ok(ArchiveListResponse {
+    let response = ArchiveListResponse {
         location: request.location.clone(),
         request_token: request.request_token,
         entries,
-    })
+    };
+    response.validate()?;
+    Ok(response)
 }
 
 /// Read body shared by `read` (by path) and `read_opened` (checked handle, FER-488).
@@ -1903,5 +1882,78 @@ mod solid_tests {
             !body.contains("!emit(done.get(), None))"),
             "every cancel check goes through cancel_seen"
         );
+    }
+
+    use crate::archive_contract::RawLevelRow;
+
+    fn row(name: &str, is_dir: bool, size: u64) -> RawLevelRow {
+        (name.to_owned(), is_dir, size, None)
+    }
+
+    fn names(rows: &[RawLevelRow]) -> Vec<(&str, bool)> {
+        rows.iter().map(|(n, d, _, _)| (n.as_str(), *d)).collect()
+    }
+
+    fn list_level(
+        dir: &str,
+        members: &[(&str, bool, u64)],
+    ) -> Result<Vec<RawLevelRow>, ArchiveError> {
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let rows = members
+            .iter()
+            .filter_map(|(raw, d, s)| level_row(&prefix, raw, *d, *s, None))
+            .collect();
+        dedup_level(dir, rows)
+    }
+
+    #[test]
+    fn sevenz_synthetic_duplicate_files_conflict() {
+        let err = dedup_level(
+            "",
+            vec![row("file.txt", false, 10), row("file.txt", false, 20)],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("file.txt"));
+    }
+
+    #[test]
+    fn sevenz_synthetic_case_variant_files_conflict() {
+        let err = dedup_level(
+            "",
+            vec![row("file.txt", false, 10), row("FILE.TXT", false, 20)],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("FILE.TXT"));
+    }
+
+    #[test]
+    fn sevenz_synthetic_file_and_folder_conflict() {
+        let err =
+            dedup_level("", vec![row("items", false, 10), row("items", true, 0)]).unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("items"));
+    }
+
+    #[test]
+    fn sevenz_synthetic_folder_case_variants_stay_separate() {
+        let members = [("docs/a.txt", false, 5), ("Docs/b.txt", false, 10)];
+        let root = list_level("", &members).unwrap();
+        assert_eq!(names(&root), vec![("docs", true), ("Docs", true)]);
+        let lower = list_level("docs", &members).unwrap();
+        assert_eq!(names(&lower), vec![("a.txt", false)]);
+        let upper = list_level("Docs", &members).unwrap();
+        assert_eq!(names(&upper), vec![("b.txt", false)]);
+    }
+
+    #[test]
+    fn sevenz_synthetic_identical_folders_merge() {
+        let merged = dedup_level("", vec![row("docs", true, 0), row("docs", true, 0)]).unwrap();
+        assert_eq!(names(&merged), vec![("docs", true)]);
     }
 }

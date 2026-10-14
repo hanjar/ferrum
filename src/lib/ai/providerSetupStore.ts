@@ -11,11 +11,17 @@ import type { BackendErrorKind } from './remote-provider';
 /** Kunci localStorage lama (sebelum FER-430). Tetap dibaca di luar Tauri dan untuk migrasi. */
 export const SETUP_STORAGE_KEY = 'ferrum.ai.setup';
 
-export type StoreErrorKind = BackendErrorKind | 'storage_unavailable';
+/** 'not_confirmed' = dialog konfirmasi native dijawab tidak (FER-512); bukan kind backend. */
+export type StoreErrorKind = BackendErrorKind | 'storage_unavailable' | 'not_confirmed';
 
 // Salinan setup backend untuk pembacaan sinkron (aiRuntime). Diisi oleh `loadBackendSetup`/save.
 let cache: ProviderSetup | undefined;
 let loaded: Promise<ProviderSetup | undefined> | undefined;
+
+/** Setup valid saat ini (sinkron). Di Tauri dari cache backend; selainnya dari localStorage. */
+export function currentSetup(): ProviderSetup | undefined {
+  return isInTauri() ? cache : readLocal();
+}
 
 function readLocal(): ProviderSetup | undefined {
   try {
@@ -36,12 +42,10 @@ function dropLocal(): void {
 
 function backendKind(error: unknown): StoreErrorKind {
   const kind = error && typeof error === 'object' ? (error as { kind?: unknown }).kind : undefined;
-  return kind === 'unsafe_endpoint' || kind === 'invalid_config' ? kind : 'storage_unavailable';
-}
-
-/** Setup valid saat ini (sinkron). Di Tauri dari cache backend; selainnya dari localStorage. */
-export function currentSetup(): ProviderSetup | undefined {
-  return isInTauri() ? cache : readLocal();
+  // 'not_confirmed' = pengguna menjawab tidak di dialog konfirmasi native (FER-512).
+  return kind === 'unsafe_endpoint' || kind === 'invalid_config' || kind === 'not_confirmed'
+    ? kind
+    : 'storage_unavailable';
 }
 
 /**

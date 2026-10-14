@@ -399,3 +399,120 @@ fn capabilities_are_honest() {
     assert!(!caps.encrypted_create, "create_7z does not encrypt");
     assert!(!caps.multi_volume);
 }
+
+fn write_sevenz(path: &Path, entries: &[(&str, bool, Option<&[u8]>)]) {
+    let mut writer = sevenz_rust2::ArchiveWriter::create(path).unwrap();
+    for (name, is_dir, content) in entries {
+        if *is_dir {
+            let dir_entry = sevenz_rust2::ArchiveEntry::new_directory(name);
+            writer.push_archive_entry(dir_entry, None::<&[u8]>).unwrap();
+        } else {
+            let mut entry = sevenz_rust2::ArchiveEntry::new();
+            entry.name = name.to_string();
+            entry.has_last_modified_date = false;
+            let bytes = content.unwrap_or(b"");
+            writer.push_archive_entry(entry, Some(bytes)).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+}
+
+#[test]
+fn sevenz_duplicate_files_conflict_on_list() {
+    let dir = temp("7z-dup");
+    let arc_path = dir.join("dup.7z");
+    write_sevenz(
+        &arc_path,
+        &[("a.txt", false, Some(b"1")), ("a.txt", false, Some(b"2"))],
+    );
+
+    let provider = SevenZProvider::new();
+    let err = provider.list(&list_req(&arc_path, "")).unwrap_err();
+    assert_eq!(err.code, Code::Conflict);
+    assert_eq!(err.member_path.as_deref(), Some("a.txt"));
+}
+
+#[test]
+fn sevenz_case_variant_files_conflict_on_list() {
+    let dir = temp("7z-case");
+    let arc_path = dir.join("case.7z");
+    write_sevenz(
+        &arc_path,
+        &[
+            ("test.txt", false, Some(b"1")),
+            ("TEST.TXT", false, Some(b"2")),
+        ],
+    );
+
+    let provider = SevenZProvider::new();
+    let err = provider.list(&list_req(&arc_path, "")).unwrap_err();
+    assert_eq!(err.code, Code::Conflict);
+    assert_eq!(err.member_path.as_deref(), Some("TEST.TXT"));
+}
+
+#[test]
+fn sevenz_file_and_folder_conflict_on_list() {
+    let dir = temp("7z-file-folder");
+    let arc_path = dir.join("clash.7z");
+    write_sevenz(
+        &arc_path,
+        &[("items", false, Some(b"content")), ("items", true, None)],
+    );
+
+    let provider = SevenZProvider::new();
+    let err = provider.list(&list_req(&arc_path, "")).unwrap_err();
+    assert_eq!(err.code, Code::Conflict);
+    assert_eq!(err.member_path.as_deref(), Some("items"));
+}
+
+#[test]
+fn sevenz_folder_case_variants_stay_separate_rows() {
+    let dir = temp("7z-folder-case");
+    let arc_path = dir.join("folders.7z");
+    write_sevenz(
+        &arc_path,
+        &[
+            ("docs/a.txt", false, Some(b"alpha")),
+            ("Docs/b.txt", false, Some(b"beta")),
+        ],
+    );
+
+    let provider = SevenZProvider::new();
+    let root = provider.list(&list_req(&arc_path, "")).unwrap();
+    let root_names: Vec<(&str, bool)> = root
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_dir))
+        .collect();
+    assert_eq!(root_names, vec![("docs", true), ("Docs", true)]);
+
+    let docs = provider.list(&list_req(&arc_path, "docs")).unwrap();
+    assert_eq!(docs.entries.len(), 1);
+    assert_eq!(docs.entries[0].name, "a.txt");
+
+    let docs_upper = provider.list(&list_req(&arc_path, "Docs")).unwrap();
+    assert_eq!(docs_upper.entries.len(), 1);
+    assert_eq!(docs_upper.entries[0].name, "b.txt");
+}
+
+#[test]
+fn sevenz_folder_exact_duplicates_merge() {
+    let dir = temp("7z-folder-merge");
+    let arc_path = dir.join("merge.7z");
+    write_sevenz(
+        &arc_path,
+        &[
+            ("docs", true, None),
+            ("docs/file.txt", false, Some(b"hello")),
+        ],
+    );
+
+    let provider = SevenZProvider::new();
+    let root = provider.list(&list_req(&arc_path, "")).unwrap();
+    let folder_count = root
+        .entries
+        .iter()
+        .filter(|e| e.name == "docs" && e.is_dir)
+        .count();
+    assert_eq!(folder_count, 1);
+}

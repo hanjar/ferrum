@@ -140,19 +140,30 @@ Berasal dari review keamanan FER-104 (N2, F3, N3, N5). Perilaku yang berlaku sek
 - **Cara kerja & konfigurasi:**
   - Ferrum tidak mendistribusikan maupun membundel WinRAR (`Rar.exe`).
   - Pengguna yang memiliki WinRAR berlisensi dapat mengonfigurasi path `Rar.exe` melalui menu **Settings → Arsip**.
-  - Tombol "Cari otomatis" memanggil IPC `archive_rar_tool_detect()` untuk memeriksa lokasi default `Program Files` tanpa otomatis menyimpannya.
-  - Tombol "Tes" menyimpan prefs dulu (flush, tanpa debounce) lalu memanggil IPC `archive_rar_tool_probe()`, yang membaca path dari prefs di disk, memvalidasi, dan mengambil versi banner `Rar.exe`.
-  - Preferensi disimpan pada `prefs.rar_exe_path` (`Option<String>`).
+  - Tombol "Cari otomatis" memanggil IPC `archive_rar_tool_detect()` untuk memeriksa lokasi default `Program Files` dan hanya mengisi kolom isian (draft) — tidak menyimpan apa pun.
+  - Tombol **"Pakai path ini"** memanggil IPC `archive_rar_tool_set_path(path)` — satu-satunya cara mengubah path (FER-511, lihat di bawah).
+  - Tombol "Tes" memanggil IPC `archive_rar_tool_probe()`, yang menjalankan `Rar.exe` tersimpan yang **sudah terkonfirmasi** dari prefs di disk dan mengambil baris versinya.
+  - Preferensi disimpan pada `prefs.rar_exe_path` + `prefs.rar_exe_fingerprint` (`Option<…>`; FER-511).
 
-- **Sumber path `Rar.exe`:** hanya `prefs.rar_exe_path` di disk (`create_rar_progress_with_level` → `create_rar_from_prefs_dir`). Tidak ada override lewat env, IPC, maupun AI. Tes integrasi memanggil inti `create_rar_with_tool(&RarTool, ...)` dengan `RarTool` hasil `validate_rar_exe` (struct ini hanya bisa dibuat oleh fungsi validasi).
+- **FER-511 — path hanya lewat konfirmasi native + sidik jari exe (Oktober 2026):**
+  - **Webview tidak bisa menulis path.** `save_prefs` dari webview selalu mengabaikan `rar_exe_path` dan `rar_exe_fingerprint` yang dikirim, dan menyimpan nilai yang sudah ada di disk (`prefs::save_from_webview`, satu-satunya jalur tulis prefs dari webview; serialisasi read-modify-write dengan lock).
+  - **`archive_rar_tool_set_path(window, path)`** adalah satu-satunya cara mengubah path. `None` (atau string kosong) menghapus pengaturan **tanpa** konfirmasi (mematikan fitur selalu aman). `Some(path)` menjalankan validasi statis **tanpa mengeksekusi** file, lalu menampilkan **dialog `MessageBoxW` native** milik jendela Ferrum (pola `native_confirm` hotlist: OK/Cancel, default tombol = Cancel, `MB_ICONWARNING`) yang menampilkan path lengkap dan peringatan bahwa Ferrum akan menjalankan program itu. Hanya OK yang menyimpan; Cancel dijawab error `Cancelled` tanpa menyimpan apa pun. Webview tidak bisa menggambar maupun menjawab dialog ini.
+  - **Sidik jari exe.** Saat dikonfirmasi, backend menghitung `{ size, modified, sha256 }` file (crate `sha2`, sudah ada di dependency) dan menyimpannya di `prefs.rar_exe_fingerprint` bersama path.
+  - **Sebelum SETIAP eksekusi** (probe dan create), di jalur validasi ulang yang sudah ada (sebelum spawn): sidik jari dihitung ulang; tidak cocok atau tidak ada → ditolak **tanpa menjalankan apa pun** dengan pesan "WinRAR berubah sejak dikonfirmasi; atur ulang di Settings" (varian `FingerprintChanged`/`Unconfirmed` — bukan `ProbeFailed`, jadi tes bisa membuktikan tidak ada proses yang mulai).
+  - **Migrasi:** prefs lama yang berisi `rar_exe_path` tanpa sidik jari dianggap **belum dikonfirmasi**; eksekusi ditolak sampai user mengatur ulang lewat "Pakai path ini". Settings menampilkan status `archive_rar_tool_status()` (hash file, tanpa menjalankan): `unset` / `unconfirmed` / `changed` / `ready`.
+  - **Detect tetap read-only:** `archive_rar_tool_detect()` hanya mengembalikan kandidat; memakainya tetap lewat `archive_rar_tool_set_path` (yang memicu konfirmasi native).
+  - **Adapter AI tetap tanpa jalur** ke command ini: kontrak intent AI tertutup (`deny_unknown_fields`, tanpa kapabilitas rar/prefs; `archive.create` terkunci `zip`) — diuji di `ai/contract_rar_tests.rs` dan `aiRarGuards.test.ts`.
 
-- **Validasi Keamanan (`validate_rar_exe`):**
+- **Sumber path `Rar.exe`:** hanya `prefs.rar_exe_path` + `rar_exe_fingerprint` di disk (`create_rar_progress_with_level` → `create_rar_from_prefs_dir`). Tidak ada override lewat env, IPC, maupun AI. Tes integrasi memanggil inti `create_rar_with_tool(&RarTool, ...)` dengan `RarTool` hasil `validate_confirmed_rar_exe` (struct ini hanya bisa dibuat oleh fungsi validasi yang melewati gerbang sidik jari).
+
+- **Validasi Keamanan (`validate_confirmed_rar_exe`):**
   - Path harus berupa path drive Windows lokal mutlak (`^[A-Za-z]:[\\/]`).
   - Path UNC (`\\...`), device (`\\?\`) dan komponen traversal (`..`) ditolak.
   - Nama file persis `Rar.exe` (case-insensitive). Binary lain seperti `WinRAR.exe` atau `UnRAR.exe` ditolak.
   - File harus berwujud berkas reguler yang ada di disk, dan bukan berupa symlink maupun reparse point/junction.
-  - Probe tanpa argumen (timeout 5 detik) harus mengeluarkan baris versi `RAR x.yy`.
-  - Pemeriksaan file statis (path, nama, berkas reguler non-link) diulang tepat sebelum setiap spawn untuk mempersempit jendela TOCTOU.
+  - Sidik jari tersimpan wajib ada dan cocok dengan file di disk **sebelum** probe (yang menjalankan file).
+  - Probe tanpa argumen (timeout 5 detik) harus mengeluarkan baris versi `RAR x.yy`, dan **versi minimal 7.00** (FER-510). Versi lebih lama ditolak dengan pesan "WinRAR 7.00 atau lebih baru diperlukan" tanpa dijalankan untuk membuat arsip: build lama dapat mencari `rarlng.dll` di working directory (di fitur ini: folder sumber milik pengguna), yang membuka risiko DLL planting.
+  - Pemeriksaan file statis **dan** hitung ulang sidik jari diulang tepat sebelum setiap spawn untuk mempersempit jendela TOCTOU.
 
 - **Daftar entri (sama dengan ZIP/7z):**
   - Entri berasal dari `collect_sources` (pipeline yang sama dengan ZIP/7z): symlink/junction dilewati (D07), file staging `.ferrum-tmp` dan tujuan arsip itu sendiri dikecualikan, folder kosong ikut sebagai entri eksplisit (FER-502).
@@ -190,6 +201,12 @@ Berasal dari review keamanan FER-104 (N2, F3, N3, N5). Perilaku yang berlaku sek
   - Guard `Drop` menghapus folder job di semua jalur (sukses, galat, cancel, panic), jadi tidak ada `.rar` sementara maupun listfile yang tertinggal.
 
 - **UI dan Pembatasan AI Guard:**
-  - Dialog Pack hanya menampilkan opsi radio format RAR jika probe `archive_rar_tool_probe()` sukses.
+  - Dialog Pack hanya menampilkan opsi radio format RAR jika probe `archive_rar_tool_probe()` sukses (yang kini juga mensyaratkan sidik jari cocok, FER-511).
   - Kontrak AI (`ProposedIntent`) dan adapter `archive.create` mengunci format ke `zip` dan menolak format `rar`.
-  - AI policy dan tools tidak memiliki jalur maupun properti untuk mengubah `rarExePath` atau preferensi pengguna.
+  - AI policy dan tools tidak memiliki jalur maupun properti untuk mengubah `rarExePath` atau preferensi pengguna — `archive_rar_tool_set_path` tidak ada di permukaan AI (FER-511, lihat bagian di atas).
+
+- **FER-510 — follow-up create RAR (Oktober 2026):**
+  - **Versi minimal WinRAR 7.00.** `Rar.exe` dengan versi < 7.00 ditolak di jalur validasi terkonfirmasi (`probe_rar_version` → `enforce_min_rar_version`, hanya terjangkau setelah gerbang sidik jari FER-511) dengan galat `VersionTooOld` "WinRAR 7.00 atau lebih baru diperlukan (ditemukan: …)". Alasan: build lama mencari `rarlng.dll` di working directory = folder sumber pengguna (DLL planting). Output tanpa baris versi tetap ditolak sebagai `ProbeFailed`.
+  - **Nama member ganda dari beberapa folder dasar ditolak dini.** Dua sumber dari folder dasar berbeda yang menghasilkan nama member relatif sama (dibandingkan case-insensitive, seperti filesystem Windows) kini ditolak oleh `collect_sources` — pipeline bersama ZIP/7z/RAR — dengan galat `Conflict` + `member_path` **sebelum** Rar dijalankan (sebelumnya Rar gagal dengan "exit code 10" yang kriptis setelah proses berjalan, dan ZIP/7z diam-diam menulis member ganda yang nanti ditolak saat ekstraksi).
+  - **Pembersihan staging lama (`archive_staging_cleanup`).** Saat create dimulai (ZIP, 7z, dan RAR), folder tujuan diseka entri staging Ferrum bernama persis `.<nama>.<pid>-<n>.ferrum-tmp` (juga varian `.ferrum-tmp.rar`, termasuk folder job RAR) yang **umurnya > 1 jam** dan **PID-nya tidak lagi hidup** (`OpenProcess` + `GetExitCodeProcess`; setiap kegagalan API dihitung hidup — fail-closed). Symlink/junction tidak diikuti dan tidak dihapus; metadata tak terbaca, mtime di masa depan, atau keraguan apa pun berarti tidak dihapus. Hanya folder tujuan job, best-effort, tidak pernah rekursif ke atas.
+  - **Dialog Pack menunggu probe.** Opsi RAR tidak pernah tampil sebelum probe selesai, termasuk saat dialog dibuka langsung dengan format `rar` (mis. dibuka ulang setelah pack RAR gagal): selama probe berjalan tampil catatan "Memeriksa WinRAR…", tombol Pack dinonaktifkan, dan Enter tidak mengirim. Probe sukses → opsi RAR muncul; probe gagal/galat → dialog dibuka sebagai `rar` kembali ke ZIP (ekstensi target ikut) dengan pesan "WinRAR tidak tersedia (alasan) — format dikembalikan ke ZIP."

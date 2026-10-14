@@ -118,6 +118,8 @@ pub fn run() {
             ipc::archive_test,
             ipc::archive_rar_tool_probe,
             ipc::archive_rar_tool_detect,
+            ipc::archive_rar_tool_set_path,
+            ipc::archive_rar_tool_status,
             ipc::archive_multipart_check,
             ipc::save_selection,
             ipc::load_selection,

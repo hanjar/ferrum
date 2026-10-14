@@ -161,7 +161,9 @@ fn periodic_purge_still_runs_under_a_steady_job_stream() {
             "purge starved by jobs"
         );
         let (ack, _wait) = sync_channel(1);
-        let _ = service.jobs.try_send(Job::Flush(ack));
+        if let Some(jobs) = &service.jobs {
+            let _ = jobs.try_send(Job::Flush(ack));
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }

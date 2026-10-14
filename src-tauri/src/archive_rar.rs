@@ -14,7 +14,7 @@
 use crate::archive_contract::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveErrorCode, ArchiveFormat,
     ArchiveListRequest, ArchiveListResponse, ArchiveProvider, ArchiveReadRequest, Location,
-    MemberPath,
+    MemberPath, dedup_level, level_row,
 };
 use std::path::Path;
 
@@ -102,7 +102,7 @@ impl RarProvider {
 
         // Pass 1: walk the forward-only listing, collecting raw rows for the
         // direct children of `member_path` (implicit directories included).
-        let mut rows: Vec<(String, bool, u64)> = Vec::new();
+        let mut rows: Vec<(String, bool, u64, Option<i64>)> = Vec::new();
         for header in listing {
             let header = header.map_err(map_unrar)?;
             if header.is_split() {
@@ -113,7 +113,7 @@ impl RarProvider {
             }
             let raw = member_string(&header.filename);
             let is_dir = header.is_directory();
-            if let Some(row) = level_row(&prefix, &raw, is_dir, header.unpacked_size) {
+            if let Some(row) = level_row(&prefix, &raw, is_dir, header.unpacked_size, None) {
                 rows.push(row);
             }
         }
@@ -126,7 +126,7 @@ impl RarProvider {
         // Pass 2: build contract entries referencing owned names.
         let mut entries: Vec<ArchiveEntry> = rows
             .into_iter()
-            .map(|(name, is_dir, size)| {
+            .map(|(name, is_dir, size, modified_ms)| {
                 let full = if prefix.is_empty() {
                     name.clone()
                 } else {
@@ -137,7 +137,7 @@ impl RarProvider {
                     name,
                     is_dir,
                     size,
-                    modified_ms: None,
+                    modified_ms,
                 })
             })
             .collect::<Result<_, ArchiveError>>()?;
@@ -165,78 +165,6 @@ impl Default for RarProvider {
 
 fn member_string(filename: &Path) -> String {
     filename.to_string_lossy().replace('\\', "/")
-}
-
-/// One raw member path → the row it contributes to the level under `prefix`
-/// (`""` for the root, otherwise `"<dir>/"`), or `None` when the member lies
-/// outside that level. A deeper member implies its first path segment as a
-/// folder row. The prefix match is exact (case-sensitive), so `Docs/x` is
-/// never listed under `docs`.
-fn level_row(prefix: &str, raw: &str, is_dir: bool, size: u64) -> Option<(String, bool, u64)> {
-    let rest = raw.strip_prefix(prefix)?;
-    if rest.is_empty() {
-        return None;
-    }
-    match rest.find('/') {
-        Some(slash) => {
-            let child = &rest[..slash];
-            (!child.is_empty()).then(|| (child.to_owned(), true, 0))
-        }
-        None => Some((rest.to_owned(), is_dir, if is_dir { 0 } else { size })),
-    }
-}
-
-/// FER-504: type-aware dedup of one directory level's raw listing rows.
-///
-/// A folder is listed once whether it came from an explicit directory entry
-/// or was implied by a deeper member path — but only when the names match
-/// **exactly**. Folders differing only in case (`docs` / `Docs`) stay two
-/// rows, because the subfolder listing matches its prefix case-sensitively:
-/// merging them would hide `Docs/*` members that extraction still writes
-/// (same behaviour as ZIP/7z and as before FER-504).
-///
-/// A name shared by two files, or by a file and a folder, is a `Conflict` —
-/// the same verdict the extract preflight reaches (`archive_extract::preflight`
-/// rejects any repeated normalized name) — carrying the clashing member path.
-/// That comparison folds to lowercase like the pipeline's `normalize()`, so
-/// `X` and `x` clash on the case-insensitive Windows target. First occurrence
-/// wins for merged folder rows.
-fn dedup_level(
-    directory: &str,
-    rows: Vec<(String, bool, u64)>,
-) -> Result<Vec<(String, bool, u64)>, ArchiveError> {
-    // lowercased name → the exact names and kinds of the rows kept so far.
-    let mut seen: std::collections::HashMap<String, Vec<(String, bool)>> =
-        std::collections::HashMap::with_capacity(rows.len());
-    let mut merged: Vec<(String, bool, u64)> = Vec::with_capacity(rows.len());
-    for (name, is_dir, size) in rows {
-        let kept = seen.entry(name.to_lowercase()).or_default();
-        if kept.is_empty() {
-            kept.push((name.clone(), is_dir));
-            merged.push((name, is_dir, size));
-            continue;
-        }
-        let all_dirs = kept.iter().all(|(_, d)| *d);
-        if is_dir && all_dirs {
-            // Folder + folder: merge only on an exact (case-sensitive) match;
-            // a case variant is its own row so its members stay reachable.
-            if !kept.iter().any(|(n, _)| *n == name) {
-                kept.push((name.clone(), true));
-                merged.push((name, true, size));
-            }
-            continue;
-        }
-        // File + file, or file + folder (case-insensitive): extraction would
-        // refuse this archive, so the listing refuses to show a quiet row.
-        let mut err = ArchiveError::new(ArchiveErrorCode::Conflict, "Duplicate archive member");
-        err.member_path = Some(if directory.is_empty() {
-            name
-        } else {
-            format!("{directory}/{name}")
-        });
-        return Err(err);
-    }
-    Ok(merged)
 }
 
 fn map_unrar(e: unrar::error::UnrarError) -> ArchiveError {
@@ -624,13 +552,14 @@ impl ArchiveProvider for RarProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive_contract::RawLevelRow;
 
-    fn row(name: &str, is_dir: bool, size: u64) -> (String, bool, u64) {
-        (name.to_owned(), is_dir, size)
+    fn row(name: &str, is_dir: bool, size: u64) -> RawLevelRow {
+        (name.to_owned(), is_dir, size, None)
     }
 
-    fn names(rows: &[(String, bool, u64)]) -> Vec<(&str, bool)> {
-        rows.iter().map(|(n, d, _)| (n.as_str(), *d)).collect()
+    fn names(rows: &[RawLevelRow]) -> Vec<(&str, bool)> {
+        rows.iter().map(|(n, d, _, _)| (n.as_str(), *d)).collect()
     }
 
     #[test]
@@ -739,7 +668,7 @@ mod tests {
     fn list_level(
         dir: &str,
         members: &[(&str, bool, u64)],
-    ) -> Result<Vec<(String, bool, u64)>, ArchiveError> {
+    ) -> Result<Vec<RawLevelRow>, ArchiveError> {
         let prefix = if dir.is_empty() {
             String::new()
         } else {
@@ -747,7 +676,7 @@ mod tests {
         };
         let rows = members
             .iter()
-            .filter_map(|(raw, d, s)| level_row(&prefix, raw, *d, *s))
+            .filter_map(|(raw, d, s)| level_row(&prefix, raw, *d, *s, None))
             .collect();
         dedup_level(dir, rows)
     }

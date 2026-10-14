@@ -186,8 +186,9 @@ export async function indexerStatus(): Promise<IndexerStatus> {
 }
 
 /**
- * Change the mode. `confirmed` must only be true after the user accepted the privacy dialog
- * (the backend refuses otherwise). Lowering privacy triggers UAC on the backend side.
+ * Change the mode. FER-512: `confirmed` is accepted for compatibility but the backend IGNORES it
+ * as authorization — every change asks in a native dialog owned by the Ferrum window, and only
+ * the dialog's Yes reaches the service. Lowering privacy triggers UAC on the backend side.
  */
 export async function indexerSetMode(
   mode: IndexerMode,

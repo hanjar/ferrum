@@ -86,7 +86,6 @@ function snapshot(session: unknown): string {
     ui.addressOwnRow,
     ui.indexerFolderSizes,
     ui.syncJournalSkip,
-    ui.rarExePath,
     ...operationPrefs(),
     session,
   ]);
@@ -158,6 +157,9 @@ export class PrefsStore {
       ui.addressOwnRow = p.addressOwnRow === true;
       ui.indexerFolderSizes = p.indexerFolderSizes === true;
       ui.syncJournalSkip = p.syncJournalSkip === true;
+      // FER-511: display-only mirror of the path stored on disk. It is loaded from
+      // load_prefs, updated after archive_rar_tool_set_path succeeds, and never persisted
+      // by this store (see persist()).
       ui.rarExePath = typeof p.rarExePath === 'string' ? p.rarExePath : null;
       // Older configs have no terminal field; the backend normalizes, but a
       // defensive guard keeps an unknown value from reaching the launcher.
@@ -271,7 +273,9 @@ export class PrefsStore {
       addressOwnRow: ui.addressOwnRow,
       indexerFolderSizes: ui.indexerFolderSizes,
       syncJournalSkip: ui.syncJournalSkip,
-      rarExePath: ui.rarExePath,
+      // FER-511: rarExePath is deliberately NOT part of the saved payload — the backend keeps
+      // the disk value anyway, and the path only changes through archive_rar_tool_set_path
+      // (which pops a native confirmation the webview can neither draw nor answer).
       ...normalizeFileOperationPrefs(fileOperations),
     };
     this.lastSaved = snapshot(this.sessionForPersist());

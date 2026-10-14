@@ -140,6 +140,35 @@ export async function archiveRarToolDetect(): Promise<string | null> {
   return wrap(invoke('archive_rar_tool_detect'));
 }
 
+/** FER-511: status of the configured Rar.exe. `unset` = nothing stored; `unconfirmed` = a path
+ *  is stored without a confirmed fingerprint (legacy config or changed file — it will NOT run);
+ *  `changed` = the file no longer matches the confirmation; `ready` = confirmed and usable. */
+export type RarToolStatusState = 'unset' | 'unconfirmed' | 'changed' | 'ready';
+
+export interface RarToolStatus {
+  path: string | null;
+  state: RarToolStatusState;
+}
+
+/** FER-511: read-only; hashes the configured exe but never runs it. */
+export async function archiveRarToolStatus(): Promise<RarToolStatus> {
+  if (!isInTauri()) return { path: null, state: 'unset' };
+  return wrap(invoke('archive_rar_tool_status'));
+}
+
+export interface RarToolSetPathResult {
+  saved: boolean;
+}
+
+/** FER-511: the ONLY way to change the configured Rar.exe path. A non-null path pops a NATIVE
+ *  confirmation dialog (never a webview surface) before anything is stored; resolving the
+ *  promise means path + fingerprint are stored. Rejects with FsError code 'cancelled' when the
+ *  user answered No — nothing is stored then. `null` clears the setting without asking. */
+export async function archiveRarToolSetPath(path: string | null): Promise<RarToolSetPathResult> {
+  if (!isInTauri()) throw unsupported();
+  return wrap(invoke('archive_rar_tool_set_path', { path }));
+}
+
 export async function archiveCreate(
   sourcePaths: string[],
   destinationPath: string,

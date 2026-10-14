@@ -11,7 +11,11 @@
   import { FsError } from '../ipc/types';
   import { isCancelledError } from '../ipc/archiveErrors';
   import { archiveRarToolProbe, type ArchiveCompressionLevel } from '../ipc/archive';
-  import { dialogs, type ArchiveTestOutcome } from '../stores/dialogStore.svelte';
+  import {
+    dialogs,
+    sanitizeMemberPath,
+    type ArchiveTestOutcome,
+  } from '../stores/dialogStore.svelte';
   import { activePane } from '../stores/panesRegistry.svelte';
   import {
     applySavedSelection,
@@ -41,29 +45,47 @@
   let packFormat = $state<PackFormat>('zip');
   let packTarget = $state<string>('');
   let rarAvailable = $state(false);
+  // FER-510: true while the WinRAR probe is still running — the RAR option must never show
+  // before the probe finished, even when the dialog opens directly with format 'rar'.
+  let rarProbing = $state(false);
+
+  /** The target path for format `fmt`: swap (or append) the archive extension. */
+  function withArchiveExt(current: string, fmt: PackFormat): string {
+    const newExt = fmt === 'sevenz' ? '.7z' : `.${fmt}`;
+    for (const ext of ['.zip', '.7z', '.rar']) {
+      if (current.toLowerCase().endsWith(ext)) {
+        return current.slice(0, -ext.length) + newExt;
+      }
+    }
+    return current + newExt;
+  }
 
   function changePackFormat(fmt: PackFormat) {
     packFormat = fmt;
     if (d && d.kind === 'pack') {
       d.format = fmt;
-      const current = packTarget || d.target;
-      const exts = ['.zip', '.7z', '.rar'];
-      let replaced = false;
-      const newExt = fmt === 'sevenz' ? '.7z' : `.${fmt}`;
-      for (const ext of exts) {
-        if (current.toLowerCase().endsWith(ext)) {
-          packTarget = current.slice(0, -ext.length) + newExt;
-          d.target = packTarget;
-          replaced = true;
-          break;
-        }
-      }
-      if (!replaced) {
-        packTarget = current + newExt;
-        d.target = packTarget;
-      }
+      packTarget = withArchiveExt(packTarget || d.target, fmt);
+      d.target = packTarget;
     }
   }
+  /** FER-510: probe failed or threw — RAR stays hidden; a dialog opened as 'rar' falls back
+   *  to ZIP (target extension included) with a message. LOCAL state only: mutating the
+   *  store's dialog here would re-run the open effect (which reads d.format) and wipe the
+   *  message again. */
+  function rarUnavailable(reason?: string) {
+    rarAvailable = false;
+    if (packFormat === 'rar') {
+      packFormat = 'zip';
+      packTarget = withArchiveExt(packTarget, 'zip');
+      error = reason
+        ? `WinRAR tidak tersedia (${reason}) — format dikembalikan ke ZIP.`
+        : 'WinRAR tidak tersedia — format dikembalikan ke ZIP.';
+    }
+  }
+
+  /** FER-510: 'rar' was requested but the probe has not OK'd it yet — nothing to submit. */
+  const rarProbePending = $derived(rarProbing && packFormat === 'rar');
+
   /** FER-460 scan offer: "jangan tanya lagi" (offer preference only). */
   let fastDontAsk = $state(false);
   /** FER-460: initial focus of the scan offer = the safe "Scan biasa". */
@@ -99,22 +121,32 @@
       packLevel = 'normal';
       password = '';
       fastDontAsk = false;
+      rarProbing = false;
+      rarAvailable = false;
       name = d.kind === 'rename' ? d.original : '';
       commentDraft = d.kind === 'comment' ? d.initial : '';
       if (d.kind === 'pack') {
         packFormat = d.format;
         packTarget = d.target;
-        rarAvailable = d.format === 'rar';
+        // FER-510: the RAR option only ever appears after the probe succeeded. A dialog
+        // opened directly with format 'rar' (e.g. reopened after a failed RAR pack) shows a
+        // checking note instead, cannot be submitted while checking, and falls back to ZIP
+        // with a message when the probe fails.
+        rarProbing = true;
         archiveRarToolProbe()
           .then((res) => {
+            if (dialogs.current !== d) return;
+            rarProbing = false;
             if (res && res.ok) {
               rarAvailable = true;
+            } else {
+              rarUnavailable(res?.reason);
             }
           })
-          .catch(() => {
-            if (d.format !== 'rar') {
-              rarAvailable = false;
-            }
+          .catch((e) => {
+            if (dialogs.current !== d) return;
+            rarProbing = false;
+            rarUnavailable(e instanceof FsError ? e.message : undefined);
           });
         if (d.initialError) {
           error = d.initialError;
@@ -235,26 +267,24 @@
   async function submitSaveSelection(parent: string, names: string[]) {
     busy = true;
     try {
-      const target = name.trim() || `${parent}\\selection.json`;
-      await saveSelectionFile(target, parent, names);
+      // FER-512: only a NAME inside `parent` is sent; the backend refuses
+      // anything with separators or traversal.
+      const file = name.trim() || 'selection.json';
+      await saveSelectionFile(parent, file, names);
       dialogs.close();
     } catch (e) {
       fail(e);
     }
   }
 
-  async function submitLoadSelection() {
+  async function submitLoadSelection(d: { kind: 'loadSelection'; parent: string }) {
     const pane = activePane();
     if (!pane?.visibleEntries) return;
     busy = true;
     try {
-      const filePath = name.trim();
-      if (!filePath) {
-        error = 'Enter the path of a selection file.';
-        busy = false;
-        return;
-      }
-      const doc = await loadSelectionFile(filePath);
+      // FER-512: only a NAME inside `parent` is sent; same default as Save.
+      const file = name.trim() || 'selection.json';
+      const doc = await loadSelectionFile(d.parent, file);
       const saved = parseSelectionFile(JSON.stringify(doc));
       const applied = applySavedSelection(pane.visibleEntries(), saved);
       pane.selectPaths?.(applied.selected);
@@ -403,10 +433,11 @@
       else if (d?.kind === 'delete') void submitDelete(d.paths);
       else if (d?.kind === 'selectGroup' && name.trim()) submitSelectGroup(d.unselect);
       else if (d?.kind === 'saveSelection') void submitSaveSelection(d.parent, d.names);
-      else if (d?.kind === 'loadSelection') void submitLoadSelection();
+      else if (d?.kind === 'loadSelection') void submitLoadSelection(d);
       else if (d?.kind === 'showFilter') submitShowFilter();
       else if (d?.kind === 'comment') void submitComment(d.path);
-      else if (d?.kind === 'pack') submitPack(d.paths, packTarget || d.target, packFormat);
+      else if (d?.kind === 'pack' && !rarProbePending)
+        submitPack(d.paths, packTarget || d.target, packFormat);
       else if (d?.kind === 'extractConflicts' && !busy)
         dialogs.confirmExtractConflicts(extractPolicy);
       else if (d?.kind === 'password' && password.trim()) submitPassword(d.retry);
@@ -562,6 +593,9 @@
           </label>
         {/each}
       </div>
+      {#if rarProbing}
+        <p class="dim" data-testid="rar-probing">Memeriksa WinRAR…</p>
+      {/if}
       <p class="dim">Kompresi:</p>
       <div class="policies" role="radiogroup" aria-label="Kompresi">
         {#each [['store', 'Simpan'], ['fast', 'Cepat'], ['normal', 'Normal'], ['max', 'Maksimal']] as [val, label] (val)}
@@ -599,7 +633,7 @@
       <p class="path mono">{d.parent}</p>
       <p>
         Save {d.names.length}
-        selected {d.names.length === 1 ? 'name' : 'names'} (versioned JSON).
+        selected {d.names.length === 1 ? 'name' : 'names'} (versioned JSON) into this folder.
       </p>
       <input
         bind:this={inputEl}
@@ -611,10 +645,11 @@
     {:else if d.kind === 'loadSelection'}
       <h2>Load Selection From File</h2>
       <p class="path mono">{d.parent}</p>
+      <p>Name of the selection file in this folder.</p>
       <input
         bind:this={inputEl}
         bind:value={name}
-        placeholder="Path to a selection file"
+        placeholder="selection.json"
         spellcheck="false"
         disabled={busy}
       />
@@ -758,7 +793,9 @@
             {#if r.failures.length > 0}
               <ul class="tr-fail">
                 {#each r.failures as f, i (`${i}:${f.memberPath}`)}
-                  <li><span class="mono">{f.memberPath}</span> · {f.message}</li>
+                  <li>
+                    <span class="mono">{sanitizeMemberPath(f.memberPath)}</span> · {f.message}
+                  </li>
                 {/each}
               </ul>
             {/if}
@@ -836,7 +873,7 @@
           <button
             class="primary"
             onclick={() => void submitPack(d.paths, packTarget || d.target, packFormat)}
-            disabled={busy}
+            disabled={busy || rarProbePending}
           >
             Pack
           </button>
@@ -874,7 +911,7 @@
             Save
           </button>
         {:else if d.kind === 'loadSelection'}
-          <button class="primary" onclick={() => void submitLoadSelection()} disabled={busy}>
+          <button class="primary" onclick={() => void submitLoadSelection(d)} disabled={busy}>
             Load
           </button>
         {:else if d.kind === 'showFilter'}

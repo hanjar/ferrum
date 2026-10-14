@@ -79,6 +79,10 @@
     unsafe_endpoint: 'Endpoint is not allowed: use HTTPS, or HTTP only for localhost with a port',
     invalid_config: 'Setup is incomplete or invalid: check endpoint, model and timeout',
     storage_unavailable: 'Setup could not be saved',
+    // FER-512: the native confirmation (new host) was answered with No.
+    not_confirmed: 'Not saved: the native confirmation was declined',
+    // FER-512: an AI request may only use the saved endpoint.
+    endpoint_mismatch: 'The saved setup uses a different endpoint; save this setup first',
   };
   const KEY_ERRORS: Record<CredentialErrorKind, string> = {
     invalid_value:

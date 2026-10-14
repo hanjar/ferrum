@@ -153,7 +153,6 @@ describe('prefsStore — paneSplit (FER-406)', () => {
       addressOwnRow: false,
       indexerFolderSizes: false,
       syncJournalSkip: false,
-      rarExePath: null,
       ...DEFAULT_FILE_OPERATION_PREFS,
     });
   });
@@ -417,19 +416,39 @@ describe('prefsStore — session snapshot (FER-395)', () => {
 });
 
 describe('prefsStore — flush (FER-505)', () => {
-  it('saves the edited value immediately, without waiting for the debounce', async () => {
+  it('the Rar.exe path is NEVER part of the saved payload (FER-511)', async () => {
+    // The webview cannot change rarExePath: the backend keeps the disk value, and the store
+    // must not even send it — the only write path is archive_rar_tool_set_path (native
+    // confirmation in Settings). Changing the mirror must not even schedule a save.
     vi.useFakeTimers();
     mockedLoad.mockResolvedValue({ ...DEFAULTS });
     const store = makeStore();
     await store.init();
     ui.rarExePath = 'D:\\Tools\\WinRAR\\Rar.exe';
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockedSave).not.toHaveBeenCalled();
+
+    // Even when a real change rides the same debounced save, the payload carries no rarExePath.
+    ui.paneSplit = 0.6;
+    await vi.advanceTimersByTimeAsync(400);
+    expect(mockedSave).toHaveBeenCalledTimes(1);
+    const payload = mockedSave.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.rarExePath).toBeUndefined();
+    ui.rarExePath = null;
+  });
+
+  it('saves other edited values immediately via flush, without the debounce', async () => {
+    vi.useFakeTimers();
+    mockedLoad.mockResolvedValue({ ...DEFAULTS });
+    const store = makeStore();
+    await store.init();
+    ui.paneSplit = 0.42;
     await expect(store.flush()).resolves.toBe(true);
     expect(mockedSave).toHaveBeenCalledTimes(1);
-    expect(mockedSave.mock.calls[0][0].rarExePath).toBe('D:\\Tools\\WinRAR\\Rar.exe');
+    expect(mockedSave.mock.calls[0][0].paneSplit).toBe(0.42);
     // The pending debounced save was dropped: no second write afterwards.
     await vi.advanceTimersByTimeAsync(1000);
     expect(mockedSave).toHaveBeenCalledTimes(1);
-    ui.rarExePath = null;
   });
 
   it('reports false when the save fails, and is a no-op before init', async () => {

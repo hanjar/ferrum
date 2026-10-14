@@ -6,9 +6,17 @@
 //!
 //! Security boundary:
 //! - The executable path comes **only** from the prefs file on disk (never from IPC, env or AI).
+//! - FER-511: the webview cannot write the path either — `save_prefs` keeps the value on disk,
+//!   and the only way to change it is `set_rar_exe_path_in`, which shows a NATIVE confirmation
+//!   and stores the file's fingerprint alongside the path.
 //! - Absolute local drive paths only (reject UNC `\\...`, device `\\?\`, relative, `..`).
 //! - Exact filename `Rar.exe` (case-insensitive).
-//! - Regular file only (reject symlinks and junctions); re-checked right before every spawn.
+//! - Regular file only (reject symlinks and junctions).
+//! - FER-511: the confirmed fingerprint (`size`, `modified`, sha-256) is re-checked before every
+//!   execution — probe and create alike. Unconfirmed or changed files are never run.
+//! - FER-510: only Rar.exe 7.00+ is accepted (probed after the fingerprint gate). Older builds
+//!   search `rarlng.dll` in the working directory — the user's source folder here — which is a
+//!   DLL-planting risk.
 //! - Clean execution: `env_remove("RAR")`, `CREATE_NO_WINDOW`, no shell.
 //! - Fixed whitelist arguments with `-cfg-`, `-r-` and `--`.
 //! - Rar only ever sees the explicit entries produced by `collect_sources` (the same pipeline as
@@ -22,17 +30,21 @@ use crate::archive_contract::{
 use crate::archive_create_test::{
     CreateTrack, SourceEntry, collect_sources, precheck_conflict, publish_created,
 };
+use crate::prefs::RarExeFingerprint;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// A `Rar.exe` that passed [`validate_rar_exe`]. Only that function can construct it.
+/// A `Rar.exe` that passed [`validate_confirmed_rar_exe`]. Only that function can construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RarTool {
     path: PathBuf,
     version: String,
+    /// FER-511: the fingerprint confirmed at `set_path` time and re-verified before every spawn.
+    fingerprint: RarExeFingerprint,
 }
 
 impl RarTool {
@@ -66,6 +78,16 @@ pub enum RarValidationError {
     NotRegularFile(String),
     Io(std::io::Error),
     ProbeFailed(String),
+    /// FER-511: the prefs carry no confirmed fingerprint for this path (never confirmed, or old
+    /// prefs from before the fingerprint existed). The file is never executed in this state.
+    Unconfirmed(String),
+    /// FER-511: the file on disk no longer matches the confirmed fingerprint (content, size or
+    /// mtime changed). Refused without running anything.
+    FingerprintChanged(String),
+    /// FER-510: the exe is a real Rar.exe but older than [`MIN_RAR_VERSION`]. Old builds search
+    /// `rarlng.dll` in the working directory (here: the user's source folder) — a DLL-planting
+    /// risk. Refused after the fingerprint gate, with the version that was found.
+    VersionTooOld(String),
 }
 
 impl std::fmt::Display for RarValidationError {
@@ -97,6 +119,18 @@ impl std::fmt::Display for RarValidationError {
             }
             Self::Io(err) => write!(f, "I/O error inspecting file: {err}"),
             Self::ProbeFailed(err) => write!(f, "Probe failed: {err}"),
+            Self::Unconfirmed(path) => write!(
+                f,
+                "Path Rar.exe belum dikonfirmasi lewat dialog konfirmasi; atur ulang di Settings ({path})"
+            ),
+            Self::FingerprintChanged(path) => write!(
+                f,
+                "WinRAR berubah sejak dikonfirmasi; atur ulang di Settings ({path})"
+            ),
+            Self::VersionTooOld(found) => write!(
+                f,
+                "WinRAR 7.00 atau lebih baru diperlukan (ditemukan: {found})"
+            ),
         }
     }
 }
@@ -204,17 +238,65 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
     Ok(())
 }
 
-/// Validate `Rar.exe` path according to section 3.1:
-/// - Absolute local path with drive letter (reject UNC, device, relative, `..`).
-/// - Filename is exactly `Rar.exe` (case-insensitive).
-/// - File exists and is a regular file, not a symlink or junction.
-/// - Probe: runs `Rar.exe` without arguments (timeout 5s), parses version line `RAR x.yy`.
-pub fn validate_rar_exe(path: &Path) -> Result<RarTool, RarValidationError> {
+/// FER-511: identity of the executable file: `{ size, modified, sha256 }`. Reading and hashing
+/// the file never runs it.
+pub fn fingerprint_exe(path: &Path) -> Result<RarExeFingerprint, RarValidationError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            RarValidationError::NotFound(path.display().to_string())
+        } else {
+            RarValidationError::Io(e)
+        }
+    })?;
+    if !meta.is_file() {
+        return Err(RarValidationError::NotRegularFile(
+            path.display().to_string(),
+        ));
+    }
+    let modified = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let sha256: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(RarExeFingerprint {
+        size: meta.len(),
+        modified,
+        sha256,
+    })
+}
+
+/// Validate a `Rar.exe` the user wants to RUN (FER-511): static checks of section 3.1, then the
+/// fingerprint gate — the stored fingerprint must exist and match the file on disk — and only
+/// then the probe (which executes the file). With no stored fingerprint, or on a mismatch,
+/// nothing is ever executed.
+pub fn validate_confirmed_rar_exe(
+    path: &Path,
+    stored: Option<&RarExeFingerprint>,
+) -> Result<RarTool, RarValidationError> {
     check_rar_exe_file(path)?;
+    let actual = fingerprint_exe(path)?;
+    match stored {
+        None => return Err(RarValidationError::Unconfirmed(path.display().to_string())),
+        Some(expected) if expected != &actual => {
+            return Err(RarValidationError::FingerprintChanged(
+                path.display().to_string(),
+            ));
+        }
+        _ => {}
+    }
     let version = probe_rar_version(path)?;
     Ok(RarTool {
         path: path.to_path_buf(),
         version,
+        fingerprint: actual,
     })
 }
 
@@ -287,11 +369,51 @@ fn probe_rar_version(rar_path: &Path) -> Result<String, RarValidationError> {
     let stdout_text = stdout_reader.join().unwrap_or_default();
     let _ = stderr_reader.join();
 
-    parse_rar_version_output(&stdout_text).ok_or_else(|| {
+    let version = parse_rar_version_output(&stdout_text).ok_or_else(|| {
         RarValidationError::ProbeFailed(
             "Rar.exe did not output a valid 'RAR x.yy' version line".to_string(),
         )
-    })
+    })?;
+    // FER-510: refuse builds older than 7.00 — they search `rarlng.dll` in the working
+    // directory, which on this feature is a folder owned by the user (DLL planting).
+    enforce_min_rar_version(&version)?;
+    Ok(version)
+}
+
+/// FER-510: minimum accepted `Rar.exe` version. WinRAR before 7.00 can look for `rarlng.dll`
+/// in the working directory (the user's source folder during a create), which enables DLL
+/// planting; 7.00+ is required.
+pub const MIN_RAR_VERSION: (u32, u32) = (7, 0);
+
+/// Numeric `(major, minor)` out of a version line like `RAR 7.10 beta 1 x64` → `(7, 10)`.
+/// `None` when the line carries no `major.minor` pair of ASCII digits.
+pub fn rar_version_tuple(version_line: &str) -> Option<(u32, u32)> {
+    let token = version_line
+        .trim()
+        .strip_prefix("RAR ")?
+        .split_whitespace()
+        .next()?;
+    let (major, minor) = token.split_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(major) || !digits(minor) {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// FER-510: the pure half of the version gate (no spawn): anything below
+/// [`MIN_RAR_VERSION`] is refused with the clear [`RarValidationError::VersionTooOld`] error.
+/// Called from [`probe_rar_version`], which only runs from
+/// [`validate_confirmed_rar_exe`] — after the fingerprint gate — so an old exe is never
+/// executed and the check can never bypass the fingerprint.
+fn enforce_min_rar_version(version_line: &str) -> Result<(), RarValidationError> {
+    match rar_version_tuple(version_line) {
+        Some(v) if v >= MIN_RAR_VERSION => Ok(()),
+        Some(_) => Err(RarValidationError::VersionTooOld(version_line.to_owned())),
+        None => Err(RarValidationError::ProbeFailed(format!(
+            "Rar.exe did not output a valid 'RAR x.yy' version line: {version_line}"
+        ))),
+    }
 }
 
 /// Parses the RAR version line from stdout text.
@@ -506,15 +628,20 @@ fn write_listfile(path: &Path, entries: &[&SourceEntry]) -> Result<(), ArchiveEr
     f.sync_all().map_err(|e| io_error(e, path))
 }
 
-/// Reads the configured `Rar.exe` path from the prefs file in `config_dir`.
-fn configured_rar_path(config_dir: &Path) -> Result<PathBuf, ArchiveError> {
-    match crate::prefs::load_from(config_dir).rar_exe_path {
-        Some(p) if !p.trim().is_empty() => Ok(PathBuf::from(p)),
-        _ => Err(ArchiveError::new(
+/// FER-511: the confirmed `Rar.exe` from the prefs file in `config_dir`: the path AND its
+/// stored fingerprint come from disk only, and the fingerprint is re-checked here (and again
+/// right before every spawn). Unset → `UnsupportedFormat`; unconfirmed or changed → refused
+/// without running anything.
+fn configured_rar_tool(config_dir: &Path) -> Result<RarTool, ArchiveError> {
+    let prefs = crate::prefs::load_from(config_dir);
+    let Some(p) = prefs.rar_exe_path.filter(|p| !p.trim().is_empty()) else {
+        return Err(ArchiveError::new(
             ArchiveErrorCode::UnsupportedFormat,
             "WinRAR (Rar.exe) is not configured in Settings",
-        )),
-    }
+        ));
+    };
+    validate_confirmed_rar_exe(Path::new(&p), prefs.rar_exe_fingerprint.as_ref())
+        .map_err(|e| ArchiveError::new(ArchiveErrorCode::UnsupportedFormat, e.to_string()))
 }
 
 /// RAR archive creation driven by the user's Rar.exe (FER-505), production entry point.
@@ -536,10 +663,11 @@ pub fn create_rar_progress_with_level(
     )
 }
 
-/// Like [`create_rar_progress_with_level`] with an explicit prefs folder: loads `rar_exe_path`
-/// from the prefs in `config_dir`, validates it (including the probe), then runs
-/// [`create_rar_with_tool`]. Unset or invalid path → `UnsupportedFormat`, and no archiving
-/// process is started.
+/// Like [`create_rar_progress_with_level`] with an explicit prefs folder: loads the confirmed
+/// `Rar.exe` (path + fingerprint) from the prefs in `config_dir`, re-verifies the fingerprint
+/// (which runs [`validate_confirmed_rar_exe`], including the probe), then runs
+/// [`create_rar_with_tool`]. Unset, unconfirmed or changed → `UnsupportedFormat`, and no
+/// archiving process is started.
 pub fn create_rar_from_prefs_dir(
     config_dir: &Path,
     sources: &[String],
@@ -550,13 +678,7 @@ pub fn create_rar_from_prefs_dir(
 ) -> Result<PathBuf, ArchiveError> {
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
-    let rar_path = configured_rar_path(config_dir)?;
-    let tool = validate_rar_exe(&rar_path).map_err(|e| {
-        ArchiveError::new(
-            ArchiveErrorCode::UnsupportedFormat,
-            format!("Invalid Rar.exe path: {e}"),
-        )
-    })?;
+    let tool = configured_rar_tool(config_dir)?;
     create_rar_with_tool(&tool, sources, destination_path, policy, level, progress)
 }
 
@@ -583,6 +705,7 @@ pub fn create_rar_with_tool(
 ) -> Result<PathBuf, ArchiveError> {
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
+    crate::archive_create_test::clean_stale_staging(destination_path);
 
     let default_limits = ArchiveLimits {
         max_entries: 100_000,
@@ -679,13 +802,11 @@ fn run_rar(
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    // TOCTOU: re-check the executable immediately before spawning it.
-    check_rar_exe_file(tool.path()).map_err(|e| {
-        ArchiveError::new(
-            ArchiveErrorCode::UnsupportedFormat,
-            format!("Invalid Rar.exe path: {e}"),
-        )
-    })?;
+    // TOCTOU: re-check the executable immediately before spawning it — the static file checks
+    // AND the confirmed fingerprint (FER-511). A Rar.exe swapped after confirmation is refused
+    // here and never spawned.
+    reverify_before_spawn(tool)
+        .map_err(|e| ArchiveError::new(ArchiveErrorCode::UnsupportedFormat, e.to_string()))?;
     let mut child = cmd.spawn().map_err(|e| {
         ArchiveError::new(
             ArchiveErrorCode::Io,
@@ -785,6 +906,103 @@ fn run_rar(
     Ok(())
 }
 
+/// FER-511: the last gate before EVERY spawn (probe already gated in
+/// [`validate_confirmed_rar_exe`]): the static file checks plus a freshly hashed fingerprint
+/// must equal the one confirmed at `set_path` time. Any difference refuses without running
+/// anything — a spawn attempt would surface as `ProbeFailed`, so these variants themselves
+/// prove no process was started.
+fn reverify_before_spawn(tool: &RarTool) -> Result<(), RarValidationError> {
+    check_rar_exe_file(tool.path())?;
+    let actual = fingerprint_exe(tool.path())?;
+    if actual != tool.fingerprint {
+        return Err(RarValidationError::FingerprintChanged(
+            tool.path().display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// FER-511: outcome of [`set_rar_exe_path_in`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetPathOutcome {
+    /// The path (with its fingerprint) is stored, or the setting was removed.
+    Saved,
+    /// `None` was requested: the setting is cleared WITHOUT any confirmation — turning the
+    /// feature off is always safe and must never be blocked.
+    Cleared,
+    /// The user answered the native confirmation with No. Nothing is stored.
+    Cancelled,
+}
+
+/// The text of the native confirmation: the full path plus what Ferrum will do with it.
+fn set_path_confirm_text(path: &Path) -> String {
+    format!(
+        "Ferrum akan MENJALANKAN program berikut setiap kali Anda membuat arsip RAR:\n\n{}\n\nSimpan dan percayai program ini? (Ferrum memverifikasi file ini lagi sebelum setiap eksekusi.)",
+        path.display()
+    )
+}
+
+fn prefs_write_failed(e: crate::domain::FsError) -> RarValidationError {
+    RarValidationError::Io(std::io::Error::other(e.message))
+}
+
+/// FER-511: the ONLY way the configured Rar.exe path changes. `None` (or blank) clears the
+/// setting without asking. `Some(path)` runs the static validation (path shape, name, regular
+/// file — never executing it), then asks via `confirm` — production passes a native
+/// `MessageBoxW` owned by the Ferrum window, which the webview can neither draw nor answer —
+/// and only on Yes stores the path together with the freshly computed fingerprint. The
+/// injectable `confirm` seam mirrors the hotlist confirmation; no test-only hooks live in the
+/// production path.
+pub fn set_rar_exe_path_in(
+    config_dir: &Path,
+    path: Option<String>,
+    confirm: impl FnOnce(&str) -> bool,
+) -> Result<SetPathOutcome, RarValidationError> {
+    let Some(raw) = path.filter(|p| !p.trim().is_empty()) else {
+        crate::prefs::set_rar_exe(config_dir, None, None).map_err(prefs_write_failed)?;
+        return Ok(SetPathOutcome::Cleared);
+    };
+    let candidate = PathBuf::from(raw.trim());
+    check_rar_exe_file(&candidate)?;
+    let fingerprint = fingerprint_exe(&candidate)?;
+    if !confirm(&set_path_confirm_text(&candidate)) {
+        return Ok(SetPathOutcome::Cancelled);
+    }
+    crate::prefs::set_rar_exe(
+        config_dir,
+        Some(candidate.to_string_lossy().into_owned()),
+        Some(fingerprint),
+    )
+    .map_err(prefs_write_failed)?;
+    Ok(SetPathOutcome::Saved)
+}
+
+/// FER-511: native Windows message box owned by the Ferrum window (hotlist pattern). The
+/// webview can neither draw it nor answer it. Cancel is the default button, so a held Enter
+/// key cannot confirm running an unknown program.
+#[cfg(windows)]
+pub fn native_confirm(owner: isize, text: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
+    };
+    let text = crate::shell_open::to_wide(text);
+    let caption = crate::shell_open::to_wide("Konfirmasi WinRAR");
+    // SAFETY: both strings are NUL-terminated UTF-16; `owner` is the window handle or 0.
+    unsafe {
+        MessageBoxW(
+            owner as _,
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        ) == IDOK
+    }
+}
+
+#[cfg(not(windows))]
+pub fn native_confirm(_owner: isize, _text: &str) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,25 +1056,28 @@ mod tests {
     #[test]
     fn test_validate_rar_exe_rejects_invalid_paths() {
         // Relative path
-        let err = validate_rar_exe(Path::new("Rar.exe")).unwrap_err();
+        let err = validate_confirmed_rar_exe(Path::new("Rar.exe"), None).unwrap_err();
         assert!(matches!(err, RarValidationError::NotLocalDrive));
 
         // UNC path
-        let err = validate_rar_exe(Path::new(r"\\server\share\Rar.exe")).unwrap_err();
+        let err =
+            validate_confirmed_rar_exe(Path::new(r"\\server\share\Rar.exe"), None).unwrap_err();
         assert!(matches!(err, RarValidationError::NotLocalDrive));
 
         // Device path
-        let err = validate_rar_exe(Path::new(r"\\?\C:\WinRAR\Rar.exe")).unwrap_err();
+        let err =
+            validate_confirmed_rar_exe(Path::new(r"\\?\C:\WinRAR\Rar.exe"), None).unwrap_err();
         assert!(matches!(err, RarValidationError::NotLocalDrive));
 
         // Path with ..
-        let err = validate_rar_exe(Path::new(r"C:\Programs\..\WinRAR\Rar.exe")).unwrap_err();
+        let err = validate_confirmed_rar_exe(Path::new(r"C:\Programs\..\WinRAR\Rar.exe"), None)
+            .unwrap_err();
         assert!(matches!(err, RarValidationError::TraversalComponent));
 
         // Wrong names
         for bad_name in ["WinRAR.exe", "UnRAR.exe", "rar.dll", "cmd.exe"] {
             let p = format!(r"C:\Program Files\WinRAR\{bad_name}");
-            let err = validate_rar_exe(Path::new(&p)).unwrap_err();
+            let err = validate_confirmed_rar_exe(Path::new(&p), None).unwrap_err();
             assert!(
                 matches!(err, RarValidationError::InvalidFilename(_)),
                 "rejected {bad_name}"
@@ -865,7 +1086,8 @@ mod tests {
 
         // File not found
         let err =
-            validate_rar_exe(Path::new(r"C:\does-not-exist-ferrum-test\Rar.exe")).unwrap_err();
+            validate_confirmed_rar_exe(Path::new(r"C:\does-not-exist-ferrum-test\Rar.exe"), None)
+                .unwrap_err();
         assert!(matches!(err, RarValidationError::NotFound(_)));
     }
 
@@ -890,6 +1112,10 @@ mod tests {
         }
     }
 
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_validate_rar_exe_rejects_junction_named_rar_exe() {
@@ -910,7 +1136,7 @@ mod tests {
             .map(|st| st.success())
             .unwrap_or(false);
         assert!(ok, "mklink /J must succeed without privileges");
-        let err = validate_rar_exe(&link).unwrap_err();
+        let err = validate_confirmed_rar_exe(&link, None).unwrap_err();
         assert!(
             matches!(err, RarValidationError::SymlinkRefused(_)),
             "junction must be refused, got {err:?}"
@@ -930,7 +1156,7 @@ mod tests {
             );
             return;
         }
-        let err = validate_rar_exe(&link).unwrap_err();
+        let err = validate_confirmed_rar_exe(&link, None).unwrap_err();
         assert!(
             matches!(err, RarValidationError::SymlinkRefused(_)),
             "symlink must be refused, got {err:?}"
@@ -942,7 +1168,7 @@ mod tests {
         let s = Scratch::new("dir");
         let dir = s.0.join("Rar.exe");
         std::fs::create_dir(&dir).unwrap();
-        let err = validate_rar_exe(&dir).unwrap_err();
+        let err = validate_confirmed_rar_exe(&dir, None).unwrap_err();
         assert!(
             matches!(err, RarValidationError::NotRegularFile(_)),
             "directory must be refused, got {err:?}"
@@ -954,11 +1180,145 @@ mod tests {
         let s = Scratch::new("fake");
         let fake = s.0.join("Rar.exe");
         std::fs::write(&fake, b"MZ not a real program").unwrap();
-        let err = validate_rar_exe(&fake).unwrap_err();
+        // FER-511: reach the probe by passing the file's own fingerprint (the state a user
+        // reaches through the confirmed set_path flow). A fake binary must still fail there.
+        let fp = fingerprint_exe(&fake).unwrap();
+        let err = validate_confirmed_rar_exe(&fake, Some(&fp)).unwrap_err();
         assert!(
             matches!(err, RarValidationError::ProbeFailed(_)),
             "fake binary must fail the probe, got {err:?}"
         );
+    }
+
+    // ── FER-511: fingerprint gate + the only path-change flow ───────────────
+
+    #[test]
+    fn set_path_cancel_stores_nothing_and_yes_stores_path_with_fingerprint() {
+        let root = Scratch::new("setpath");
+        let cfg = root.0.join("config");
+        std::fs::create_dir(&cfg).unwrap();
+        let fake = root.0.join("Rar.exe");
+        std::fs::write(&fake, b"MZ not a real program").unwrap();
+
+        // "No": nothing stored, even though the file itself is valid (shape/name/regular).
+        let out = set_rar_exe_path_in(&cfg, Some(s(&fake)), |_| false).unwrap();
+        assert_eq!(out, SetPathOutcome::Cancelled);
+        let prefs = crate::prefs::load_from(&cfg);
+        assert_eq!(prefs.rar_exe_path, None, "cancel must store nothing");
+        assert_eq!(prefs.rar_exe_fingerprint, None);
+
+        // "Yes": path and freshly computed fingerprint stored together; the dialog text
+        // showed the full path and what Ferrum will do with it.
+        let asked = std::cell::Cell::new(false);
+        let out = set_rar_exe_path_in(&cfg, Some(s(&fake)), |text| {
+            asked.set(true);
+            assert!(text.contains(&s(&fake)), "dialog shows the path: {text}");
+            assert!(text.contains("MENJALANKAN"), "dialog warns it runs: {text}");
+            true
+        })
+        .unwrap();
+        assert_eq!(out, SetPathOutcome::Saved);
+        assert!(asked.get(), "the confirmation must have been asked");
+        let prefs = crate::prefs::load_from(&cfg);
+        assert_eq!(prefs.rar_exe_path, Some(s(&fake)));
+        assert_eq!(
+            prefs.rar_exe_fingerprint,
+            Some(fingerprint_exe(&fake).unwrap())
+        );
+    }
+
+    #[test]
+    fn set_path_none_clears_without_any_confirmation() {
+        let root = Scratch::new("setclear");
+        let cfg = root.0.join("config");
+        std::fs::create_dir(&cfg).unwrap();
+        let fake = root.0.join("Rar.exe");
+        std::fs::write(&fake, b"MZ not a real program").unwrap();
+        assert_eq!(
+            set_rar_exe_path_in(&cfg, Some(s(&fake)), |_| true).unwrap(),
+            SetPathOutcome::Saved
+        );
+
+        // Clearing (and a blank string) must never ask: disabling the feature is safe.
+        let mut asked = false;
+        let out = set_rar_exe_path_in(&cfg, None, |_| {
+            asked = true;
+            true
+        })
+        .unwrap();
+        assert_eq!(out, SetPathOutcome::Cleared);
+        assert!(!asked, "removing the setting must not confirm");
+        assert_eq!(
+            set_rar_exe_path_in(&cfg, Some("   ".into()), |_| {
+                asked = true;
+                true
+            })
+            .unwrap(),
+            SetPathOutcome::Cleared
+        );
+        assert!(!asked);
+        let prefs = crate::prefs::load_from(&cfg);
+        assert_eq!(prefs.rar_exe_path, None);
+        assert_eq!(prefs.rar_exe_fingerprint, None);
+    }
+
+    #[test]
+    fn unconfirmed_and_changed_exes_are_refused_before_any_spawn() {
+        let s = Scratch::new("fpgate");
+        let fake = s.0.join("Rar.exe");
+        std::fs::write(&fake, b"MZ not a real program").unwrap();
+
+        // Legacy prefs (path without fingerprint): refused as unconfirmed.
+        let err = validate_confirmed_rar_exe(&fake, None).unwrap_err();
+        assert!(matches!(err, RarValidationError::Unconfirmed(_)), "{err:?}");
+
+        // Modified after confirmation (content changed): refused on the fingerprint.
+        let fp = fingerprint_exe(&fake).unwrap();
+        std::fs::write(&fake, b"MZ not a real program anymore").unwrap();
+        let err = validate_confirmed_rar_exe(&fake, Some(&fp)).unwrap_err();
+        assert!(
+            matches!(err, RarValidationError::FingerprintChanged(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("berubah sejak dikonfirmasi"));
+
+        // The refusal variants are NOT ProbeFailed. A real spawn attempt on this garbage
+        // binary would surface exactly as ProbeFailed (see the fake-binary test above), so
+        // the variant itself is the proof that no process was ever started.
+    }
+
+    #[test]
+    fn fingerprint_tracks_size_modified_and_content() {
+        let s = Scratch::new("fpcalc");
+        let fake = s.0.join("Rar.exe");
+        std::fs::write(&fake, b"same bytes").unwrap();
+        let first = fingerprint_exe(&fake).unwrap();
+        assert_eq!(first.size, 10);
+        assert_eq!(first.sha256.len(), 64);
+        assert_eq!(
+            first,
+            fingerprint_exe(&fake).unwrap(),
+            "stable when untouched"
+        );
+
+        std::fs::write(&fake, b"same bytes!").unwrap();
+        let second = fingerprint_exe(&fake).unwrap();
+        assert_ne!(
+            first, second,
+            "content/size change must change the identity"
+        );
+
+        // Not a regular file / missing file.
+        let dir = s.0.join("Rar.exe.dir");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(matches!(
+            fingerprint_exe(&dir).unwrap_err(),
+            RarValidationError::NotRegularFile(_)
+        ));
+        assert!(matches!(
+            fingerprint_exe(&s.0.join("missing.exe")).unwrap_err(),
+            RarValidationError::NotFound(_)
+        ));
     }
 
     #[test]
@@ -1034,5 +1394,47 @@ mod tests {
 
         let bad_sample = "WinRAR 7.00\nNo RAR line here\n";
         assert_eq!(parse_rar_version_output(bad_sample), None);
+    }
+
+    /// FER-510: the pure version gate — 5.x/6.x refused with the clear message, 7.00/7.10
+    /// accepted, unknown output has no version at all.
+    #[test]
+    fn rar_versions_below_7_00_are_refused_and_7_x_pass_the_gate() {
+        // 5.x and 6.x parse into a version line but are refused with the clear error.
+        for line in ["RAR 5.91 x64", "RAR 6.24"] {
+            let desc = parse_rar_version_output(line).expect("a version line");
+            assert_eq!(desc, line);
+            let err = enforce_min_rar_version(&desc).unwrap_err();
+            assert!(
+                matches!(err, RarValidationError::VersionTooOld(_)),
+                "{line} must be refused, got {err:?}"
+            );
+            assert!(
+                err.to_string()
+                    .contains("WinRAR 7.00 atau lebih baru diperlukan"),
+                "clear message: {err}"
+            );
+            assert!(
+                err.to_string().contains(line),
+                "message names the version: {err}"
+            );
+        }
+        assert_eq!(rar_version_tuple("RAR 5.91 x64"), Some((5, 91)));
+        assert_eq!(rar_version_tuple("RAR 6.24"), Some((6, 24)));
+
+        // 7.00 (the minimum) and 7.10 pass; a beta suffix does not confuse the tuple.
+        for line in ["RAR 7.00 x64", "RAR 7.10 beta 1 x64"] {
+            let desc = parse_rar_version_output(line).expect("a version line");
+            enforce_min_rar_version(&desc).expect("7.x must pass the gate");
+        }
+        assert_eq!(rar_version_tuple("RAR 7.00 x64"), Some((7, 0)));
+        assert_eq!(rar_version_tuple("RAR 7.10 beta 1 x64"), Some((7, 10)));
+
+        // Unknown output: no version line, so the probe fails before any version check.
+        assert_eq!(
+            parse_rar_version_output("WinRAR 7.00\nNo RAR line here\n"),
+            None
+        );
+        assert_eq!(rar_version_tuple("RAR seven"), None);
     }
 }

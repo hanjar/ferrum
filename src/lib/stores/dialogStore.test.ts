@@ -6,7 +6,7 @@ vi.mock('../ipc/mutations', () => ({
   planCopy: (...args: unknown[]) => planCopyMock(...args),
 }));
 
-const { dialogs, summarizeArchiveTest } = await import('./dialogStore.svelte');
+const { dialogs, summarizeArchiveTest, sanitizeMemberPath } = await import('./dialogStore.svelte');
 const { registerPane } = await import('./panesRegistry.svelte');
 const { ui } = await import('../uiState.svelte');
 const { FsError } = await import('../ipc/types');
@@ -1027,5 +1027,264 @@ describe('FER-55: error per item and destination refresh', () => {
     await flush();
 
     expect(dstRefresh).toHaveBeenCalled();
+  });
+
+  it('FER-508: preflight conflict error specifies the failed member path from FsError', async () => {
+    register(0, 'C:\\Projects', ['C:\\Projects\\pkg.zip']);
+    register(1, 'D:\\Backup');
+    const err = new FsError({
+      code: 'alreadyExists',
+      archiveCode: 'conflict',
+      message: 'Duplicate archive member',
+      memberPath: 'data/assets/icon.png',
+    });
+    archivePreflightMock.mockRejectedValue(err);
+
+    dialogs.beginUnpack();
+    await flush();
+
+    expect(dialogs.current).toMatchObject({ kind: 'error', title: 'Unpack' });
+    const msg = (dialogs.current as { message: string }).message;
+    expect(msg).toContain('Gagal di: data/assets/icon.png');
+    expect(msg).toContain('Duplicate archive member');
+  });
+
+  it('FER-508 (P3-2): sanitizes control characters and bidi overrides in member_path error display', async () => {
+    register(0, 'C:\\Projects', ['C:\\Projects\\pkg.zip']);
+    register(1, 'D:\\Backup');
+    const evilMember = 'data/evil\u202Ename\n.png';
+    const err = new FsError({
+      code: 'alreadyExists',
+      archiveCode: 'conflict',
+      message: 'Duplicate archive member',
+      memberPath: evilMember,
+    });
+    archivePreflightMock.mockRejectedValue(err);
+
+    dialogs.beginUnpack();
+    await flush();
+
+    expect(dialogs.current).toMatchObject({ kind: 'error', title: 'Unpack' });
+    const msg = (dialogs.current as { message: string }).message;
+    expect(msg).toContain('Gagal di: data/evil\\u{202E}name\\n.png');
+    expect(msg).not.toContain('\u202E');
+    const lines = msg.split('\n');
+    expect(lines[0]).toBe('Gagal di: data/evil\\u{202E}name\\n.png');
+    expect(lines[1]).toBe('Duplicate archive member');
+  });
+
+  it('FER-508 (P3-2): sanitizeMemberPath helper unit tests', () => {
+    expect(sanitizeMemberPath('docs/readme.txt')).toBe('docs/readme.txt');
+    expect(sanitizeMemberPath('a\u202Eb\nc\rd\te\0f')).toBe('a\\u{202E}b\\nc\\rd\\te\\0f');
+    expect(sanitizeMemberPath('file\u061C\u200E\u200F\u2066\u2069.ext')).toBe(
+      'file\\u{061C}\\u{200E}\\u{200F}\\u{2066}\\u{2069}.ext',
+    );
+    expect(sanitizeMemberPath('line\u2028sep\u2029para')).toBe('line\\u{2028}sep\\u{2029}para');
+  });
+});
+
+describe('FER-508: dialog queue for concurrent prompts', () => {
+  beforeEach(() => {
+    dialogs.current = null;
+  });
+
+  it('two concurrent password prompts both complete sequentially without hanging', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    const p2 = dialogs.askArchivePassword('C:\\arc2.7z', false);
+
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+
+    // Submit first password prompt
+    const firstPrompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await firstPrompt.retry('pass1');
+
+    // First prompt resolved, second prompt is now active
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc2.7z',
+    });
+
+    // Submit second password prompt
+    const secondPrompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await secondPrompt.retry('pass2');
+
+    const [res1, res2] = await Promise.all([p1, p2]);
+    expect(res1).toBe('pass1');
+    expect(res2).toBe('pass2');
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('first prompt cancelled still allows second queued prompt to be answered', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    const p2 = dialogs.askArchivePassword('C:\\arc2.7z', false);
+
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+
+    // User cancels the first prompt (Esc / Cancel)
+    dialogs.close();
+
+    // First prompt resolves to null, second prompt appears
+    expect(await p1).toBeNull();
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc2.7z',
+    });
+
+    // User completes the second prompt
+    const secondPrompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await secondPrompt.retry('pass2');
+
+    expect(await p2).toBe('pass2');
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('both concurrent prompts can be cancelled without hanging', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    const p2 = dialogs.askArchivePassword('C:\\arc2.7z', false);
+
+    dialogs.close();
+    expect(await p1).toBeNull();
+
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc2.7z',
+    });
+
+    dialogs.close();
+    expect(await p2).toBeNull();
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('FER-508 (P3-1): queued prompt is unshifted (not cancelled) when non-prompt progress dialog opens, and reappears after progress closes', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    const p2 = dialogs.askArchivePassword('C:\\arc2.7z', false);
+
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+
+    let answered2: string | null = 'not_settled';
+    p2.then((res) => {
+      answered2 = res;
+    });
+
+    // User submits prompt 1
+    const firstPrompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await firstPrompt.retry('pass1');
+    expect(await p1).toBe('pass1');
+
+    // Prompt 2 is now active
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc2.7z',
+    });
+    expect(answered2).toBe('not_settled');
+
+    // Job 1 opens progress dialog: prompt 2 must be unshifted to queue, NOT cancelled
+    await dialogs.withProgress(
+      { title: 'Extract job 1', archivePath: 'C:\\arc1.rar' },
+      async () => {
+        expect(dialogs.current?.kind).toBe('archiveProgress');
+        expect(answered2).toBe('not_settled');
+      },
+    );
+
+    // After job 1 progress closes, prompt 2 is restored as current!
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc2.7z',
+    });
+    expect(answered2).toBe('not_settled');
+
+    // User can now answer prompt 2
+    const secondPrompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await secondPrompt.retry('pass2');
+
+    expect(await p2).toBe('pass2');
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('FER-508 (P3-1): non-prompt dialog (error/summary) unshifts waiting prompt and restores it after close', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    let answered: string | null = 'not_settled';
+    p1.then((res) => {
+      answered = res;
+    });
+
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+
+    // A non-prompt error dialog opens while prompt is waiting
+    dialogs.open({ kind: 'error', title: 'Error', message: 'Something broke' });
+    expect(dialogs.current).toMatchObject({ kind: 'error', message: 'Something broke' });
+    expect(answered).toBe('not_settled');
+
+    // User closes error dialog
+    dialogs.close();
+
+    // Prompt is restored
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+    expect(answered).toBe('not_settled');
+
+    // Now test extractSummary dialog
+    dialogs.showExtractSummary({ written: 5 });
+    expect(dialogs.current).toMatchObject({ kind: 'extractSummary', written: 5 });
+    expect(answered).toBe('not_settled');
+
+    // User closes summary dialog
+    dialogs.close();
+
+    // Prompt is restored again
+    expect(dialogs.current).toMatchObject({
+      kind: 'password',
+      archivePath: 'C:\\arc1.rar',
+    });
+    expect(answered).toBe('not_settled');
+
+    // User answers prompt
+    const prompt = dialogs.current as { retry: (pw: string) => Promise<void> };
+    await prompt.retry('secret');
+    expect(await p1).toBe('secret');
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('FER-508 (P3-1): closeAll and reset cancel all active and queued prompts', async () => {
+    const p1 = dialogs.askArchivePassword('C:\\arc1.rar', false);
+    const p2 = dialogs.askArchivePassword('C:\\arc2.7z', false);
+    const p3 = dialogs.askArchivePassword('C:\\arc3.zip', false);
+
+    expect(dialogs.current).toMatchObject({ kind: 'password', archivePath: 'C:\\arc1.rar' });
+    expect(dialogs.queue).toHaveLength(2);
+
+    dialogs.closeAll();
+
+    const [res1, res2, res3] = await Promise.all([p1, p2, p3]);
+    expect(res1).toBeNull();
+    expect(res2).toBeNull();
+    expect(res3).toBeNull();
+    expect(dialogs.current).toBeNull();
+    expect(dialogs.queue).toEqual([]);
+
+    // Same with reset()
+    const p4 = dialogs.askArchivePassword('C:\\arc4.rar', false);
+    const p5 = dialogs.askArchivePassword('C:\\arc5.7z', false);
+    dialogs.reset();
+    const [res4, res5] = await Promise.all([p4, p5]);
+    expect(res4).toBeNull();
+    expect(res5).toBeNull();
+    expect(dialogs.current).toBeNull();
+    expect(dialogs.queue).toEqual([]);
   });
 });
