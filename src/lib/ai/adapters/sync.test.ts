@@ -599,4 +599,32 @@ describe('folder lease', () => {
     await t.facade.execute(approved).catch(() => undefined);
     expect(lease.release).toHaveBeenCalledTimes(1);
   });
+
+  it('an onQueued callback that throws neither fails the run nor frees the lease before the settle', async () => {
+    const lease = leaseApi();
+    let finish!: (r: SettleResult) => void;
+    const settle = vi.fn(
+      () =>
+        new Promise<SettleResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onQueued = vi.fn(() => {
+      throw new Error('ui exploded');
+    });
+    const t = setup({
+      leaseApi: lease,
+      onQueued,
+      settle: settle as unknown as SyncAdapterDeps['settle'],
+    });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    ipc.enqueueCopy.mockResolvedValue('op-1');
+    const run = await t.facade.execute((await t.approve()).approved);
+    expect(run).toMatchObject({ ok: true, value: { state: 'queued', jobIds: ['op-1'] } });
+    expect(onQueued).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledTimes(1));
+    expect(lease.release).not.toHaveBeenCalled();
+    finish({ status: 'saved', entries: 1 });
+    await vi.waitFor(() => expect(lease.release).toHaveBeenCalledTimes(1));
+  });
 });

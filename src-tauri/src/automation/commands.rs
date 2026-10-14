@@ -830,6 +830,13 @@ pub fn lease_acquire_in(
     }
 }
 
+/// The webview (re)loaded its page: whatever JavaScript held manual lease tokens is gone, so
+/// every manual lease of this process is released. Wired to the page-load-started event in
+/// `lib.rs`. Returns how many leases were released.
+pub fn release_manual_leases_on_page_load(state: &AutomationState) -> usize {
+    state.leases.release_all()
+}
+
 /// `sync_lease_release` core: idempotent. Only a token this process was given releases
 /// anything; any other value does nothing and looks the same (no existence oracle).
 pub fn lease_release_in(

@@ -318,17 +318,33 @@ describe('executeSync x busy lease', () => {
     await compareStore.executeSync();
     expect(compareDirsMock).toHaveBeenCalledTimes(1);
     expect(enqueueCopyMock).not.toHaveBeenCalled();
-    expect(compareStore.errorText).toMatch(/could not be locked/);
-    expect(compareStore.errorText).toMatch(/Store is down/);
+    expect(compareStore.errorText).toMatch(/automation store is unavailable/);
+    expect(compareStore.errorText).toMatch(/Nothing was changed/);
     expect(compareStore.syncLeaseBusy).toBe('');
     expect(compareStore.syncBusy).toBe(false);
   });
 
-  it('the too-many-leases backend error is shown as busy', async () => {
+  it('the too-many-leases backend error has its own message, not "folders in use"', async () => {
     await preview();
     api.acquire.mockRejectedValueOnce(new SyncLeaseError('lease_busy', 'Too many'));
     await compareStore.executeSync();
-    expect(compareStore.syncLeaseBusy).not.toBe('');
+    expect(compareStore.syncLeaseBusy).toMatch(/Too many synchronizations/);
+    expect(compareStore.syncLeaseBusy).not.toMatch(/in use/);
+    expect(enqueueCopyMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['store_read_only', /Ferrum was updated - restart Ferrum/],
+    ['store_unavailable', /automation store is unavailable/],
+    ['store_untrusted', /not trusted/],
+    ['invalid_input', /path is not valid/],
+    ['something_else', /could not be locked/],
+  ])('a %s lease failure gets its own message', async (code, text) => {
+    await preview();
+    api.acquire.mockRejectedValueOnce(new SyncLeaseError(code, 'backend text'));
+    await compareStore.executeSync();
+    expect(compareStore.errorText).toMatch(text);
+    expect(compareStore.errorText).toMatch(/Nothing was changed/);
     expect(enqueueCopyMock).not.toHaveBeenCalled();
   });
 
@@ -358,5 +374,95 @@ describe('executeSync x busy lease', () => {
     await compareStore.executeSync();
     expect(compareStore.syncConfirm).not.toBeNull();
     expect(api.acquire).not.toHaveBeenCalled();
+  });
+});
+
+/** P2-2: the delete phase of Synchronize Dirs (confirmation dialog + the deletes) is part of the
+ *  run, so the lease outlives the baseline settle until that phase is over. */
+describe('executeSync x delete phase', () => {
+  const withDelete = report([diff('new.txt', 'leftOnly'), diff('gone.txt', 'rightOnly')]);
+
+  async function previewWithDelete() {
+    compareDirsMock.mockImplementation(async (_l: string, _r: string, byContent: boolean) => {
+      events.push(`compare:${byContent ? 'content' : 'meta'}`);
+      return byContent
+        ? report([diff('new.txt', 'same'), diff('gone.txt', 'rightOnly')])
+        : withDelete;
+    });
+    enqueueCopyMock.mockImplementation(async () => {
+      events.push('enqueue');
+      return 'op_1';
+    });
+    await compareStore.openSync();
+    compareStore.setSyncDirection('leftToRight');
+    compareStore.setSyncDeleteExtras(true);
+    events.length = 0;
+  }
+
+  it('keeps the lease after the settle while the delete dialog is open, releases when it closes', async () => {
+    await previewWithDelete();
+    await compareStore.executeSync();
+    expect(dialogs.current?.kind).toBe('delete');
+    await compareStore.lastSettlement;
+    await tick();
+    expect(compareStore.syncSettle).not.toBeNull();
+    expect(api.release).not.toHaveBeenCalled();
+    expect(held).not.toBeNull();
+    dialogs.close(); // cancelled (or confirmed and done)
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
+    expect(held).toBeNull();
+  });
+
+  it('waits for the settle too when the dialog ends first', async () => {
+    await previewWithDelete();
+    const gate = deferred<void>();
+    saveMock.mockImplementation(async () => {
+      events.push('save');
+      await gate.promise;
+    });
+    await compareStore.executeSync();
+    dialogs.close();
+    await tick();
+    expect(api.release).not.toHaveBeenCalled();
+    gate.resolve();
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
+  });
+
+  it('a replaced delete dialog and a reset both end the phase', async () => {
+    await previewWithDelete();
+    await compareStore.executeSync();
+    await compareStore.lastSettlement;
+    dialogs.open({ kind: 'delete', paths: ['C:/other'], permanent: false });
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
+    dialogs.close();
+    expect(api.release).toHaveBeenCalledTimes(1); // still exactly once
+
+    api.release.mockClear();
+    await previewWithDelete();
+    await compareStore.executeSync();
+    await compareStore.lastSettlement;
+    dialogs.reset();
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
+  });
+
+  it('without a baseline settle the lease ends with the delete phase', async () => {
+    compareStore.syncBaselineEnabled = () => false;
+    await previewWithDelete();
+    await compareStore.executeSync();
+    await tick();
+    expect(api.release).not.toHaveBeenCalled();
+    dialogs.close();
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
+  });
+
+  it('a dialog that cannot be opened does not leak the lease', async () => {
+    await previewWithDelete();
+    const open = vi.spyOn(dialogs, 'open').mockImplementation(() => {
+      throw new Error('no dialog');
+    });
+    await compareStore.executeSync();
+    await compareStore.lastSettlement;
+    open.mockRestore();
+    await vi.waitFor(() => expect(api.release).toHaveBeenCalledTimes(1));
   });
 });

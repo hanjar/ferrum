@@ -395,31 +395,57 @@ export class SyncFlow {
       }
       // Baseline: after the jobs finish, take a fresh compare and record only verified items.
       // Runs in the background (the panel stays responsive); failures/cancels never move it.
-      // The lease is held until the settle ends (the baseline save needs it) and released there,
-      // even when the panel was closed in the meantime.
+      // The lease is held until the settle ends (the baseline save needs it) AND until the delete
+      // phase is over (RQ-2: the deletes are part of this run), then released, even when the
+      // panel was closed in the meantime.
+      // Deletions ALWAYS require the explicit delete confirmation dialog (trash default, D05;
+      // FER-364 carries the permanent flag explicitly). The dialog ends (confirmed and done,
+      // cancelled, replaced or reset) through `onSettled`.
+      const held = lease;
+      let deletePhase: Promise<void> | null = null;
+      if (result.deletes.length > 0) {
+        deletePhase = new Promise<void>((resolve) => {
+          try {
+            dialogs.open({
+              kind: 'delete',
+              paths: result.deletes,
+              permanent: false,
+              onSettled: resolve,
+            });
+          } catch {
+            resolve();
+          }
+        });
+      }
       this.syncSettle = null;
       if (this.syncBaselineEnabled()) {
-        const held = lease;
         handedToSettle = true;
-        this.lastSettlement = settleSyncRun({
+        const settling = settleSyncRun({
           report,
           plan,
           result,
           readJob: this.syncJobReader,
         })
           .catch((): SettleResult => ({ status: 'skipped', reason: 'verifyFailed' }))
-          .then(async (settled) => {
+          .then((settled) => {
             this.syncSettle = settled;
+            return settled;
+          });
+        if (deletePhase) {
+          this.lastSettlement = settling;
+          void Promise.all([settling, deletePhase]).then(() => held.release());
+        } else {
+          this.lastSettlement = settling.then(async (settled) => {
             await held.release();
             return settled;
           });
+        }
       } else {
         this.lastSettlement = null;
-      }
-      // Deletions ALWAYS require the explicit delete confirmation dialog
-      // (trash default, D05; FER-364 carries the permanent flag explicitly).
-      if (result.deletes.length > 0) {
-        dialogs.open({ kind: 'delete', paths: result.deletes, permanent: false });
+        if (deletePhase) {
+          handedToSettle = true;
+          void deletePhase.then(() => held.release());
+        }
       }
       this.syncPlan = null; // executed plan is consumed; a fresh preview is required for another run
       this.syncBasePlan = null;

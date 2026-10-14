@@ -132,6 +132,10 @@ leases(id TEXT PK, holder_kind TEXT, holder_pid INTEGER, holder_created INTEGER,
   (fail closed) and expires by heartbeat instead. A heartbeat from the far future counts as stale. For manual
   leases the backend (not the webview, whose timers are throttled when hidden) heartbeats, but stops after 12 h.
   The `leases` table is part of schema v1, so P0.4 needs no schema bump.
+  A lease id never leaves the process in any DTO other than the `sync_lease_acquire` answer to its
+  requester (diagnostic UIs use `holder_kind` / `run_id` only). All manual leases of the process are released
+  when the webview reloads its page. Known limit: a wall-clock jump forward of more than 30 s makes live
+  leases look stale for at most one heartbeat (5 s); a step back is tolerated up to 5 minutes.
 - `sync_baseline_save` (existing command) MUST refuse with `lease_required` unless the calling process holds a lease
   covering both roots (manual lease or run lease). This makes concurrent baseline writes impossible across
   processes.

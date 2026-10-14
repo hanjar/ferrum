@@ -106,7 +106,14 @@ export type Dialog =
   /** FER-364: `permanent` is the dialog's initial checkbox state (D05) —
    *  carried through from beginDelete so Shift+F8 opens pre-checked while
    *  F8 (trash) opens unchecked. The checkbox stays user-editable. */
-  | { kind: 'delete'; paths: string[]; permanent: boolean }
+  | {
+      kind: 'delete';
+      paths: string[];
+      permanent: boolean;
+      /** Called once when the dialog is no longer current (confirmed and done, cancelled, replaced
+       *  or reset) - lets a flow that must hold a lock across the delete wait for the end. */
+      onSettled?: () => void;
+    }
   | { kind: 'error'; title: string; message: string }
   | { kind: 'testReport'; title: string; reports: ArchiveTestItem[] }
   | {
@@ -306,6 +313,18 @@ export function sanitizeMemberPath(member: string): string {
   );
 }
 
+/** Run a delete dialog's `onSettled` hook (at most once; a throwing hook never breaks the store). */
+function settleDelete(d: Dialog | null): void {
+  if (d?.kind !== 'delete' || !d.onSettled) return;
+  const hook = d.onSettled;
+  d.onSettled = undefined;
+  try {
+    hook();
+  } catch {
+    // A hook is a notification; it must not break dialog handling.
+  }
+}
+
 class DialogStore {
   private _current = $state<Dialog | null>(null);
   queue = $state<Dialog[]>([]);
@@ -317,6 +336,7 @@ class DialogStore {
   set current(val: Dialog | null) {
     const prev = this._current;
     this._current = val;
+    if (prev !== val) settleDelete(prev);
     if (val === null) {
       if (prev?.kind === 'password') prev.cancel?.();
       if (prev?.kind === 'fastScanOffer') prev.choose(null, false);
@@ -351,6 +371,8 @@ class DialogStore {
 
     if (isPrompt(this._current)) {
       this.queue.unshift(this._current);
+    } else {
+      settleDelete(this._current);
     }
 
     this._current = d;
@@ -370,11 +392,13 @@ class DialogStore {
     // FER-73: a dismissed password prompt settles its caller and lets it drop the password.
     if (d.kind === 'password') d.cancel?.();
 
+    settleDelete(d);
     this._current = this.queue.shift() ?? null;
   }
 
   /** Close without any cancel/settle hooks: a flow moving on to its next step. */
   private dismiss() {
+    settleDelete(this._current);
     this._current = this.queue.shift() ?? null;
   }
 

@@ -243,11 +243,28 @@ impl LeaseRegistry {
         self.held.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
+    /// Drop guards whose lease is already gone (reclaimed, or past the hold limit) so they stop
+    /// counting against [`MAX_MANUAL_LEASES`]. Dropping also deletes a leftover row.
+    fn prune_lost(&self) {
+        let lost: Vec<LeaseGuard> = {
+            let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+            let ids: Vec<String> = held
+                .iter()
+                .filter(|(_, g)| g.is_lost())
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| held.remove(id)).collect()
+        };
+        // Thread join and row delete happen outside the registry lock.
+        drop(lost);
+    }
+
     pub fn acquire_manual(
         &self,
         store: &Arc<Store>,
         roots: &[String],
     ) -> Result<ManualAcquire, StoreError> {
+        self.prune_lost();
         if self.held_count() >= MAX_MANUAL_LEASES {
             return Ok(ManualAcquire::TooMany);
         }
@@ -289,6 +306,20 @@ impl LeaseRegistry {
             .remove(lease_id);
         // The drop (thread join + row delete) runs outside the lock.
         guard.is_some()
+    }
+
+    /// Release every manual lease of this process. Called when the webview (re)loads its page:
+    /// the JavaScript that held the tokens is gone, so nothing can release these leases any
+    /// more and they must not keep folders locked for the rest of the session. Returns how many
+    /// were released.
+    pub fn release_all(&self) -> usize {
+        let all: Vec<LeaseGuard> = {
+            let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+            held.drain().map(|(_, g)| g).collect()
+        };
+        let n = all.len();
+        drop(all);
+        n
     }
 }
 
@@ -725,5 +756,68 @@ mod tests {
             Err(CoverError::Required),
             "released"
         );
+    }
+
+    /// P2-1: a webview reload loses the tokens, so `release_all` frees every manual lease at once:
+    /// rows gone, folders free, nothing left in the registry.
+    #[test]
+    fn release_all_frees_every_manual_lease() {
+        let rig = rig();
+        let registry = LeaseRegistry::new(rig.env.clone());
+        let mut ids = Vec::new();
+        for list in [[r"C:", r"D:"], [r"E:\c", r"F:\d"]] {
+            let ManualAcquire::Acquired { lease_id } =
+                registry.acquire_manual(&rig.store, &roots(&list)).unwrap()
+            else {
+                panic!()
+            };
+            ids.push(lease_id);
+        }
+        assert_eq!(registry.release_all(), 2);
+        assert_eq!(registry.held_count(), 0);
+        for id in &ids {
+            assert_eq!(row_beat(&rig, id), None, "row deleted");
+        }
+        assert_eq!(registry.release_all(), 0, "idempotent");
+        // The folders are free for a new acquire.
+        assert!(matches!(
+            registry
+                .acquire_manual(&rig.store, &roots(&[r"C:", r"D:"]))
+                .unwrap(),
+            ManualAcquire::Acquired { .. }
+        ));
+    }
+
+    /// P2-1: a guard that already lost its lease (hold limit) is pruned and does not count
+    /// against the cap of 8.
+    #[test]
+    fn lost_guards_are_pruned_and_do_not_count_against_the_cap() {
+        let rig = rig();
+        let registry = LeaseRegistry::new(LeaseEnv {
+            max_manual_hold_ms: 5_000,
+            ..rig.env.clone()
+        });
+        for i in 0..MAX_MANUAL_LEASES {
+            let r = roots(&[&format!(r"C:\cap{i}"), &format!(r"D:\cap{i}")]);
+            assert!(matches!(
+                registry.acquire_manual(&rig.store, &r).unwrap(),
+                ManualAcquire::Acquired { .. }
+            ));
+        }
+        let extra = roots(&[r"C:\extra", r"D:\extra"]);
+        assert!(matches!(
+            registry.acquire_manual(&rig.store, &extra).unwrap(),
+            ManualAcquire::TooMany
+        ));
+        // Past the hold limit every guard stops beating and reports lost.
+        rig.clock.store(1_000 + 6_000, Ordering::SeqCst);
+        assert!(wait_for(|| {
+            registry.held.lock().unwrap().values().all(|g| g.is_lost())
+        }));
+        assert!(matches!(
+            registry.acquire_manual(&rig.store, &extra).unwrap(),
+            ManualAcquire::Acquired { .. }
+        ));
+        assert_eq!(registry.held_count(), 1, "the lost guards were dropped");
     }
 }

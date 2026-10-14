@@ -391,7 +391,6 @@ export function createSyncAdapter(deps: SyncAdapterDeps): CommandAdapter<SyncSta
           );
         }
         queued = result;
-        deps.onQueued?.();
         // Baseline: only the verified settlement may move it. Background: the chat card tracks
         // the jobs. The lease goes with the settlement.
         const settle = deps.settle ?? settleSyncRun;
@@ -413,6 +412,13 @@ export function createSyncAdapter(deps: SyncAdapterDeps): CommandAdapter<SyncSta
             ),
           )
           .finally(() => void lease.release());
+        // The copies are queued and the settle (which owns the lease now) is scheduled: a
+        // callback that throws must not undo that, so it is only notified, never trusted.
+        try {
+          deps.onQueued?.();
+        } catch {
+          // ignored on purpose
+        }
       } finally {
         if (!handedToSettle) await lease.release();
       }

@@ -299,3 +299,77 @@ fn a_second_connection_sees_the_manual_lease() {
         LeaseAcquireDto::Busy(_)
     ));
 }
+
+/// P2-1: the page-load hook releases every manual lease of the process and frees the folders.
+#[test]
+fn page_load_releases_the_manual_leases() {
+    let (dir, store) = store();
+    let state = AutomationState {
+        store: store.clone(),
+        leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+    };
+    let (left, right) = folders(&dir, "left", "right");
+    let LeaseAcquireDto::Acquired(_) =
+        lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap()
+    else {
+        panic!("acquired");
+    };
+    assert!(matches!(
+        lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap(),
+        LeaseAcquireDto::Busy(_)
+    ));
+    assert_eq!(release_manual_leases_on_page_load(&state), 1);
+    assert!(matches!(
+        lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap(),
+        LeaseAcquireDto::Acquired(_)
+    ));
+}
+
+/// RQ-2 / SP-1.5: a junction and its target are the same folder, so a lease on one makes the
+/// other busy. Skipped (with a message) where a junction cannot be created.
+#[test]
+fn a_junction_alias_overlaps_its_target() {
+    let (dir, store) = store();
+    let registry = LeaseRegistry::new(LeaseEnv::system());
+    let (left, right) = folders(&dir, "real-left", "right");
+    let link = dir.path().join("link-to-left");
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&left)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !made {
+        eprintln!("SKIPPED: a junction could not be created in this environment");
+        return;
+    }
+    let LeaseAcquireDto::Acquired(_) =
+        lease_acquire_in(&store, &registry, &left, &right, &canon).unwrap()
+    else {
+        panic!("acquired");
+    };
+    let (_, other_right) = folders(&dir, "unused", "other-right");
+    let via_link = link.to_string_lossy().into_owned();
+    assert!(matches!(
+        lease_acquire_in(&store, &registry, &via_link, &other_right, &canon).unwrap(),
+        LeaseAcquireDto::Busy(_)
+    ));
+    // A path inside the junction is covered as well.
+    let inside = link.join("sub");
+    std::fs::create_dir_all(&inside).unwrap();
+    assert!(matches!(
+        lease_acquire_in(
+            &store,
+            &registry,
+            &inside.to_string_lossy(),
+            &other_right,
+            &canon
+        )
+        .unwrap(),
+        LeaseAcquireDto::Busy(_)
+    ));
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "rmdir"])
+        .arg(&link)
+        .output();
+}

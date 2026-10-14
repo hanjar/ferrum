@@ -311,6 +311,9 @@ impl SyncBaselineStore {
 
     /// Simpan ATOMIK. Menolak root tak valid, baseline yang bukan milik pasangan ini, dan
     /// batas terlampaui (baseline lama dibiarkan).
+    /// UNGUARDED write. Production code must go through [`save_with_lease`] (design §5.7: only
+    /// the lease holder writes a baseline); this stays `pub` only because the integration test
+    /// `tests/sync_baseline_fs.rs` drives the store directly, outside the crate.
     pub fn save(&self, pair: &RootPair, baseline: &BaselineDto) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
@@ -442,15 +445,37 @@ pub fn save_with_lease(
     pair: &RootPair,
     baseline: &BaselineDto,
 ) -> Result<(), BaselineError> {
+    require_pair_lease(automation, env, canonical, pair)?;
+    baselines.save(pair, baseline)
+}
+
+/// Forget a pair's baseline, under the same lease rule as a save: every writer of a pair's
+/// baseline file holds the lease (design §5.7).
+pub fn clear_with_lease(
+    baselines: &SyncBaselineStore,
+    automation: &AutomationStore,
+    env: &LeaseEnv,
+    canonical: &dyn Fn(&str) -> Result<String, crate::sync_engine::roots::RootError>,
+    pair: &RootPair,
+) -> Result<(), BaselineError> {
+    require_pair_lease(automation, env, canonical, pair)?;
+    baselines.clear(pair)
+}
+
+fn require_pair_lease(
+    automation: &AutomationStore,
+    env: &LeaseEnv,
+    canonical: &dyn Fn(&str) -> Result<String, crate::sync_engine::roots::RootError>,
+    pair: &RootPair,
+) -> Result<(), BaselineError> {
     const REQUIRED: BaselineError = err(
         "lease_required",
-        "The baseline can only be saved while this sync holds its folder lease",
+        "The baseline can only be changed while this sync holds its folder lease",
     );
     let (Ok(left), Ok(right)) = (canonical(&pair.left_root), canonical(&pair.right_root)) else {
         return Err(REQUIRED);
     };
-    require_cover(automation, env, &[left, right]).map_err(|_| REQUIRED)?;
-    baselines.save(pair, baseline)
+    require_cover(automation, env, &[left, right]).map_err(|_| REQUIRED)
 }
 
 // ── Command Tauri ──────────────────────────────────────────────────────
@@ -493,12 +518,23 @@ pub async fn sync_baseline_save(
 #[tauri::command]
 pub async fn sync_baseline_clear(
     store: tauri::State<'_, SyncBaselineStore>,
+    automation: tauri::State<'_, AutomationState>,
     pair: RootPair,
 ) -> Result<(), BaselineError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || store.clear(&pair))
-        .await
-        .map_err(|_| err("io", "Baseline task failed"))?
+    let automation_store = automation.store.clone();
+    let env = automation.leases.env().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        clear_with_lease(
+            &store,
+            &automation_store,
+            &env,
+            &|p| crate::sync_engine::roots::canonical(p),
+            &pair,
+        )
+    })
+    .await
+    .map_err(|_| err("io", "Baseline task failed"))?
 }
 
 #[cfg(test)]
@@ -1135,5 +1171,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "lease_required");
+    }
+
+    /// The clear command follows the same lease rule as save.
+    #[test]
+    fn baseline_clear_requires_a_lease() {
+        let (b, l, r, baselines) = setup("lease-clear");
+        let (auto, registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        baselines.save(&p, &baseline_for(&p, &["a"])).unwrap();
+        let clear = || clear_with_lease(&baselines, &auto, &env, &real_canonical, &p);
+        assert_eq!(clear().unwrap_err().code, "lease_required");
+        assert!(matches!(baselines.load(&p).unwrap(), LoadResult::Ok { .. }));
+        let id = lease_on(&auto, &registry, &l, &r);
+        clear().unwrap();
+        assert!(matches!(
+            baselines.load(&p).unwrap(),
+            LoadResult::FirstRun { .. }
+        ));
+        assert!(registry.release(&id));
+        assert_eq!(clear().unwrap_err().code, "lease_required");
     }
 }

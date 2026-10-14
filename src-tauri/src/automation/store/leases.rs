@@ -253,10 +253,26 @@ fn new_lease_id() -> Result<String, StoreError> {
     Ok(hex::encode(bytes))
 }
 
+/// How far in the future a heartbeat may be before the row counts as damaged (clock set back,
+/// edited row). A holder that is alive corrects its own beat within 5 s, so a small step back is
+/// NOT a reason to reclaim; a far-future beat of a hung holder expires once the clock passes it
+/// or this bound is exceeded.
+pub const FUTURE_SKEW_MS: i64 = 300_000;
+
+/// Whether a heartbeat is too old (or implausibly far ahead) to protect its lease.
+///
+/// Known, accepted limit: if the wall clock jumps FORWARD by more than [`STALE_MS`], every live
+/// lease looks stale until its holder beats again (at most 5 s). An acquirer in that window can
+/// reclaim a live lease; the displaced holder notices (`is_lost`) and its baseline save is then
+/// refused (`covers` requires a fresh beat), but its copy jobs are not stopped. Telling a hung
+/// holder from a clock jump is impossible with a shared wall clock alone; the process probe
+/// already covers the dead-holder case without depending on time.
 fn stale(now_ms: i64, beat_ms: i64) -> bool {
-    // Either direction: an old beat is a dead holder, a beat from the far future is a broken
-    // clock or row - neither may block others forever.
-    now_ms.saturating_sub(beat_ms).abs() > STALE_MS
+    if beat_ms > now_ms {
+        beat_ms.abs_diff(now_ms) > FUTURE_SKEW_MS as u64
+    } else {
+        now_ms.abs_diff(beat_ms) > STALE_MS as u64
+    }
 }
 
 fn read_rows(conn: &Connection) -> Result<Vec<LeaseRow>, StoreError> {
@@ -689,6 +705,27 @@ mod tests {
             6_400_000,
             &probe
         )));
+    }
+
+    /// A small step back of the clock (within the skew bound) does not make a live lease
+    /// reclaimable; a large one does. Extreme values do not panic.
+    #[test]
+    fn small_clock_steps_back_do_not_reclaim() {
+        let (_dir, store) = open_store();
+        let probe = FakeProbe::default();
+        assert!(!is_busy(&take(&store, ME, &[r"C:"], 1_000_000, &probe)));
+        // Clock back by 2 minutes: the holder will correct its beat within 5 s.
+        assert!(is_busy(&take(&store, OTHER, &[r"C:"], 880_000, &probe)));
+        // Back by more than the bound: damaged row, reclaimable.
+        assert!(!is_busy(&take(
+            &store,
+            OTHER,
+            &[r"C:"],
+            1_000_000 - FUTURE_SKEW_MS - 1,
+            &probe
+        )));
+        assert!(stale(i64::MAX, i64::MIN));
+        assert!(stale(i64::MIN, i64::MAX));
     }
 
     /// A heartbeat keeps a lease alive past 30 s.

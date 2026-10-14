@@ -178,8 +178,13 @@ unknown` and `holder.runId` is present for runs. The backend heartbeats the leas
   `{}` (no existence oracle); a malformed token is `invalid_input`.
 - `sync_baseline_save` now requires a fresh lease held by the calling process that covers both
   roots of the pair; otherwise it fails with `{ code: 'lease_required' }` and writes nothing. The
-  check is made in the backend. `sync_baseline_load` and `sync_baseline_clear` are unchanged.
+  check is made in the backend. `sync_baseline_clear` follows the same rule; `sync_baseline_load`
+  is unchanged.
 - Manual Synchronize Dirs (and the chat sync) acquire the lease before the re-validation compare,
   hold it through the run and the baseline settle, and release it after the settle, on cancel, on
   error and on close. If the folders are busy nothing is compared or enqueued and the panel shows
   that they are in use.
+- When the webview (re)loads its page (F5, DevTools reload, crash recovery) the backend releases
+  every manual lease of the process, because the JavaScript that held the tokens is gone. The
+  Synchronize Dirs lease also covers the delete phase (confirmation dialog and deletes) and is
+  released only when both the baseline settle and that phase have ended.
