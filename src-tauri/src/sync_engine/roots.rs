@@ -716,7 +716,12 @@ mod tests {
 
     #[test]
     fn accepted_forms_normalize_drive_case_and_separators() {
-        assert_eq!(canonical("c:/temp/a"), Ok("C:\\temp\\a".into()));
+        // A path that does not exist keeps its spelling; an existing one resolves to its
+        // on-disk case (e.g. `C:\Temp` on CI runners), so use a name that cannot exist.
+        assert_eq!(
+            canonical("c:/ferrum-no-such-root-7f3a/a"),
+            Ok("C:\\ferrum-no-such-root-7f3a\\a".into())
+        );
         assert_eq!(canonical(r"D:\Photos\"), Ok(r"D:\Photos".into()));
         assert_eq!(canonical(r"\\Nas\Share"), Ok(r"\\Nas\Share".into()));
     }
