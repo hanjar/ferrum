@@ -171,14 +171,6 @@ export type Dialog =
   | { kind: 'comment'; path: string; name: string; initial: string }
   /** F2-27: quit confirmation while operations are still in flight. */
   | { kind: 'quitConfirm'; operations: number }
-  /** FER-494 T1: opening an agent in a folder with project configuration / UNC / foreign owner. */
-  | {
-      kind: 'agentTerminalConfirm';
-      title: string;
-      intro: string;
-      warnings: string[];
-      onConfirm: () => void;
-    }
   /** FER-368 (D21): the ONE extraction conflict ask per batch. `run` applies
    *  the chosen policy to the whole batch — apply-to-all is inherent to a
    *  single choice. Escape/Cancel just closes: nothing has been written. */

@@ -28,20 +28,17 @@ export interface TerminalOpenRequest {
   agent: AgentId;
   path: string;
   program: string;
-  /** FER-494 T1: user chose "Buka tetap" after the warnings of a first call. */
-  confirmedUntrusted: boolean;
+  // FER-516: no "confirmed" flag. For an untrusted folder the backend raises its own native
+  // confirmation; nothing the webview sends can stand in for it.
 }
 
 export interface TerminalOpened {
   agent: AgentId;
-  /** Tidak ada bila belum ada yang dijalankan (perlu konfirmasi). */
   via?: 'windowsTerminal' | 'console';
   argv: string[];
   cwd: string;
   dryRun: boolean;
   note?: string;
-  /** FER-494 T1: belum dijalankan; tampilkan `warnings` dan minta konfirmasi. */
-  needsConfirm: boolean;
   /** Konfigurasi proyek, folder UNC, atau pemilik folder lain (satu baris per temuan). */
   warnings: string[];
 }
@@ -105,6 +102,8 @@ export function terminalErrorText(kind: string, name: string, detail?: string): 
       return 'Folder ini tidak bisa dipakai untuk agent (path perangkat, \\\\?\\, karakter tidak sah, atau segmen . / ..).';
     case 'folder_missing':
       return 'Folder tidak ditemukan.';
+    case 'busy':
+      return 'Konfirmasi lain masih terbuka. Selesaikan dulu, lalu coba lagi.';
     case 'terminal_start_failed':
       return `Terminal untuk ${name} tidak dapat dibuka.`;
     default:
@@ -123,49 +122,37 @@ export async function openAgentTerminal(
     question?: string;
     extraNote?: string;
     store?: AgentCliStore;
-    /** Internal: second call after "Buka tetap" (the question was already copied). */
-    confirmed?: { copied: boolean };
   } = {},
 ): Promise<TerminalOpened | undefined> {
   const store = opts.store ?? agentCli;
   const name = store.agent(agent)?.name ?? AGENT_LABELS[agent];
   const question = opts.question?.trim() ?? '';
   // Disalin sebelum terminal mengambil fokus (clipboard webview butuh dokumen yang fokus).
-  const copied = opts.confirmed
-    ? opts.confirmed.copied
-    : question
-      ? await copyText(question)
-      : false;
+  const copied = question ? await copyText(question) : false;
   let opened: TerminalOpened;
   try {
     opened = await port.open({
       agent,
       path,
       program: ui.terminal,
-      confirmedUntrusted: opts.confirmed !== undefined,
     });
   } catch (error) {
     const { kind, detail } = kindOf(error);
+    // The user declined the native confirmation: a neutral note, not an error.
+    if (kind === 'cancelled') {
+      toast.show(`${name} tidak dibuka.`, 4000);
+      return undefined;
+    }
+    if (kind === 'busy') {
+      toast.show(terminalErrorText(kind, name), 5000);
+      return undefined;
+    }
     dialogs.open({
       kind: 'error',
       title: `Buka ${name}`,
       message: terminalErrorText(kind, name, detail),
     });
     return undefined;
-  }
-  if (opened.needsConfirm) {
-    // FER-494 T1: nothing started yet. Default focus is "Batal" (Dialogs.svelte).
-    dialogs.open({
-      kind: 'agentTerminalConfirm',
-      title: `Buka ${name} di folder ini?`,
-      intro: `${name} akan memuat file atau lokasi berikut, yang bisa menjalankan perintah atau mengalihkan API tanpa ditanya:`,
-      warnings: opened.warnings,
-      onConfirm: () => {
-        dialogs.close();
-        void openAgentTerminal(agent, path, { ...opts, confirmed: { copied } });
-      },
-    });
-    return opened;
   }
   const parts = [
     opened.dryRun ? `Profil uji: ${name} tidak dijalankan.` : `${name} dibuka di terminal.`,
@@ -178,9 +165,9 @@ export async function openAgentTerminal(
     );
   }
   if (opened.note) parts.push(opened.note);
-  // Claude Code / Codex ask about folder trust themselves: the warnings are a note only.
-  if (opened.warnings?.length && !opts.confirmed)
-    parts.push(`Catatan: ${opened.warnings.join(' ')}`);
+  // Findings of the folder check (the user confirmed in the native dialog, or the agent asks
+  // about folder trust itself): shown as a note.
+  if (opened.warnings?.length) parts.push(`Catatan: ${opened.warnings.join(' ')}`);
   if (opts.extraNote) parts.push(opts.extraNote);
   toast.show(parts.join(' '), 7000);
   return opened;

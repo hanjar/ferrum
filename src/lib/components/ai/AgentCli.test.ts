@@ -201,7 +201,6 @@ describe('ChatPanel "Buka di terminal" (FER-494)', () => {
           argv: ['wt', '-d', '.', 'C:\\b\\claude.exe'],
           cwd: 'C:\\d',
           dryRun: false,
-          needsConfirm: false,
           warnings: [],
         });
       },
@@ -233,9 +232,7 @@ describe('ChatPanel "Buka di terminal" (FER-494)', () => {
     await fireEvent.click(btn);
     await tick();
     await tick();
-    expect(calls).toEqual([
-      { agent: 'claude', path: 'C:\\d\\q3.pdf', program: 'auto', confirmedUntrusted: false },
-    ]);
+    expect(calls).toEqual([{ agent: 'claude', path: 'C:\\d\\q3.pdf', program: 'auto' }]);
     expect(JSON.stringify(calls)).not.toContain('apa isi');
     expect(clip).toBe('apa isi q3? & del *');
     expect(toast.message).toContain('Pertanyaan disalin — tempel di Claude Code (Ctrl+V)');

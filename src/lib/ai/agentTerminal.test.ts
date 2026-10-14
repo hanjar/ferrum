@@ -33,7 +33,6 @@ function fakePort(result?: Partial<TerminalOpened>, fail?: unknown) {
         argv: ['wt', '-d', '.', 'C:\\b\\claude.exe'],
         cwd: 'C:\\proj',
         dryRun: false,
-        needsConfirm: false,
         warnings: [],
         ...result,
       });
@@ -70,16 +69,9 @@ describe('openAgentTerminal', () => {
     });
     expect(out?.argv).toEqual(['wt', '-d', '.', 'C:\\b\\claude.exe']);
     expect(writeText).toHaveBeenCalledWith(QUESTION.trim());
-    expect(calls).toEqual([
-      { agent: 'claude', path: 'C:\\proj\\a;b\\r.pdf', program: 'auto', confirmedUntrusted: false },
-    ]);
+    expect(calls).toEqual([{ agent: 'claude', path: 'C:\\proj\\a;b\\r.pdf', program: 'auto' }]);
     // Nothing of the question reaches the request (and so the command line).
-    expect(Object.keys(calls[0]).sort()).toEqual([
-      'agent',
-      'confirmedUntrusted',
-      'path',
-      'program',
-    ]);
+    expect(Object.keys(calls[0]).sort()).toEqual(['agent', 'path', 'program']);
     expect(JSON.stringify(calls)).not.toContain('Ringkas');
     expect(toast.message).toContain('Pertanyaan disalin — tempel di Claude Code (Ctrl+V)');
   });
@@ -118,8 +110,8 @@ describe('openAgentTerminal', () => {
   });
 });
 
-describe('untrusted folder confirmation (T1)', () => {
-  it('asks first (default Batal) and opens only after "Buka tetap", copying the question once', async () => {
+describe('untrusted folder confirmation (FER-516)', () => {
+  it('sends no confirmation flag: the backend raises its own native dialog', async () => {
     const calls: TerminalOpenRequest[] = [];
     const warning =
       'Aider akan membaca C:/proj/.aider.conf.yml: bisa menjalankan perintah otomatis.';
@@ -128,11 +120,10 @@ describe('untrusted folder confirmation (T1)', () => {
         calls.push(request);
         return Promise.resolve({
           agent: request.agent,
-          via: request.confirmedUntrusted ? 'windowsTerminal' : undefined,
-          argv: request.confirmedUntrusted ? ['wt', '-d', '.', 'C:/b/aider.exe'] : [],
+          via: 'windowsTerminal',
+          argv: ['wt', '-d', '.', 'C:/b/aider.exe'],
           cwd: 'C:/proj',
           dryRun: false,
-          needsConfirm: !request.confirmedUntrusted,
           warnings: [warning],
         });
       },
@@ -141,26 +132,30 @@ describe('untrusted folder confirmation (T1)', () => {
       question: 'tolong',
       store: new FakeAgentStore(),
     });
-    expect(calls).toEqual([
-      { agent: 'aider', path: 'C:/proj', program: 'auto', confirmedUntrusted: false },
-    ]);
-    const d = dialogs.current;
-    expect(d?.kind).toBe('agentTerminalConfirm');
-    if (d?.kind !== 'agentTerminalConfirm') return;
-    expect(d.warnings).toEqual([warning]);
-    expect(toast.message).toBe('');
-    d.onConfirm();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(calls[1]).toEqual({
-      agent: 'aider',
-      path: 'C:/proj',
-      program: 'auto',
-      confirmedUntrusted: true,
-    });
+    expect(calls).toEqual([{ agent: 'aider', path: 'C:/proj', program: 'auto' }]);
+    expect(Object.keys(calls[0]).sort()).toEqual(['agent', 'path', 'program']);
+    // No webview-drawn confirmation any more.
+    expect(dialogs.current).toBeNull();
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(toast.message).toContain('Aider dibuka di terminal.');
     expect(toast.message).toContain('Pertanyaan disalin');
+  });
+
+  it('"cancelled" (native dialog answered No) is a neutral note, not an error dialog', async () => {
+    fakePort(undefined, { kind: 'cancelled' });
+    const out = await openAgentTerminal('aider', 'C:/proj', { store: new FakeAgentStore() });
+    expect(out).toBeUndefined();
+    expect(dialogs.current).toBeNull();
+    expect(toast.message).toBe('Aider tidak dibuka.');
+  });
+
+  it('"busy" says another confirmation is still open', async () => {
+    fakePort(undefined, { kind: 'busy' });
+    const out = await openAgentTerminal('aider', 'C:/proj', { store: new FakeAgentStore() });
+    expect(out).toBeUndefined();
+    expect(dialogs.current).toBeNull();
+    expect(toast.message).toBe('Konfirmasi lain masih terbuka. Selesaikan dulu, lalu coba lagi.');
+    expect(terminalErrorText('busy', 'x')).toContain('Konfirmasi lain masih terbuka');
   });
 
   it('Claude/Codex only get the warnings as a note', async () => {
@@ -186,9 +181,7 @@ describe('context submenu', () => {
     const omp = contextMenu.items[3];
     if ('run' in omp) omp.run();
     await Promise.resolve();
-    expect(calls).toEqual([
-      { agent: 'omp', path: 'C:\\proj\\notes.txt', program: 'auto', confirmedUntrusted: false },
-    ]);
+    expect(calls).toEqual([{ agent: 'omp', path: 'C:\\proj\\notes.txt', program: 'auto' }]);
   });
 
   it('says so when no agent is available', async () => {
@@ -249,7 +242,6 @@ describe('palette', () => {
         agent: 'claude',
         path: 'C:\\proj',
         program: 'auto',
-        confirmedUntrusted: false,
       });
     } finally {
       off();

@@ -228,9 +228,11 @@ pub fn agent_cli_set_terminal_default(
 #[tauri::command]
 pub async fn agent_terminal_open(
     app: AppHandle,
+    window: tauri::Window,
     request: super::terminal::TerminalOpenRequest,
 ) -> Result<super::terminal::TerminalOpened, AgentError> {
     let (config, data) = dirs(&app)?;
+    let owner = owner_hwnd(&window);
     tauri::async_runtime::spawn_blocking(move || {
         let settings = load_or_detect(&config, &data);
         let test_profile = crate::profile::is_active();
@@ -243,11 +245,24 @@ pub async fn agent_terminal_open(
             folder_owner: &|p: &Path| super::acl::owner_trusted(p),
             wt: crate::shell_open::resolve_wt(),
             spawn: &super::terminal::spawn_first,
+            confirm: &|caption: &str, text: &str| {
+                crate::native_dialog::confirm_or_busy(owner, caption, text)
+            },
         };
         super::terminal::open(&ctx, &request)
     })
     .await
     .unwrap_or_else(|_| Err(AgentError::new("backend_failure")))
+}
+
+#[cfg(windows)]
+fn owner_hwnd(window: &tauri::Window) -> isize {
+    window.hwnd().map(|h| h.0 as isize).unwrap_or(0)
+}
+
+#[cfg(not(windows))]
+fn owner_hwnd(_window: &tauri::Window) -> isize {
+    0
 }
 
 /// The user read the disclosure for this agent ("isi file dikirim ke <vendor>").

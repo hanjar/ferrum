@@ -90,8 +90,6 @@
   let fastDontAsk = $state(false);
   /** FER-460: initial focus of the scan offer = the safe "Scan biasa". */
   let safeScanBtn = $state<HTMLButtonElement | undefined>();
-  /** FER-494 T1: initial focus of the agent confirmation = "Batal". */
-  let agentCancelBtn = $state<HTMLButtonElement | undefined>();
   let busy = $state(false);
   let error = $state('');
   let inputEl = $state<HTMLInputElement | undefined>();
@@ -169,10 +167,6 @@
         }
         if (dialogs.current?.kind === 'fastScanOffer' && safeScanBtn) {
           safeScanBtn.focus();
-          return;
-        }
-        if (dialogs.current?.kind === 'agentTerminalConfirm' && agentCancelBtn) {
-          agentCancelBtn.focus();
           return;
         }
         // Dialogs without an input (pack, test reports) opened by KEYBOARD
@@ -422,11 +416,7 @@
       // FER-460 (review L7): in the scan offer, Enter on a focused button
       // activates THAT button; a bare Enter is the safe default (regular
       // scan). The elevated fast scan always needs an explicit choice.
-      if (
-        (d?.kind === 'fastScanOffer' || d?.kind === 'agentTerminalConfirm') &&
-        e.target instanceof HTMLButtonElement
-      )
-        return;
+      if (d?.kind === 'fastScanOffer' && e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       if (d?.kind === 'mkdir' && name.trim()) void submitMkdir(d.parent);
       else if (d?.kind === 'rename' && name.trim()) void submitRename(d.path);
@@ -673,13 +663,6 @@
         spellcheck="false"
         disabled={busy}
       />
-    {:else if d.kind === 'agentTerminalConfirm'}
-      <h2>{d.title}</h2>
-      <p>{d.intro}</p>
-      <ul class="agentWarnings" data-testid="agent-terminal-warnings">
-        {#each d.warnings as w, i (i)}<li>{w}</li>{/each}
-      </ul>
-      <p>Buka hanya kalau Anda memercayai folder ini dan isinya.</p>
     {:else if d.kind === 'quitConfirm'}
       <h2>Quit Ferrum?</h2>
       <p>
@@ -816,14 +799,7 @@
 
     {#if error}<p class="error" role="alert">{error}</p>{/if}
 
-    {#if d.kind === 'agentTerminalConfirm'}
-      <div class="actions">
-        <button class="ghost" bind:this={agentCancelBtn} onclick={() => dialogs.close()}
-          >Batal</button
-        >
-        <button class="primary danger" onclick={d.onConfirm}>Buka tetap</button>
-      </div>
-    {:else if d.kind === 'archiveProgress'}
+    {#if d.kind === 'archiveProgress'}
       <div class="actions">
         <button class="ghost" onclick={() => dialogs.cancelArchiveJob()} disabled={d.cancelling}>
           Batal
@@ -983,12 +959,6 @@
     margin: 0;
     font-size: calc(14px + var(--uiStep, 0px));
     font-weight: 600;
-  }
-  .agentWarnings {
-    margin: 0 0 8px;
-    padding-left: 18px;
-    font-size: 12px;
-    overflow-wrap: anywhere;
   }
   .path {
     margin: 0;
