@@ -64,7 +64,12 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Diagnostics_ToolHelp",
     # FER-462 R1 (review S1): is the window station interactive before showing a message box.
     "Win32_System_StationsAndDesktops",
+    # Automation P0.3 (design §5.8): mapped network drives resolve to their UNC form.
+    "Win32_NetworkManagement_WNet",
 ] }
+# Automation P0.3: the automation store (same version and `bundled` feature as the activity
+# store; design §4.2, §6.2).
+rusqlite = { version = "0.37", features = ["bundled"] }
 # FER-464: deflate for the Disk usage scan cache (already in the lock via zip).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 zip = { version = "=4.6.1", default-features = false, features = ["deflate", "aes-crypto"] }

@@ -903,6 +903,7 @@ dependencies = [
  "png 0.18.1",
  "quick-xml",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sevenz-rust2",

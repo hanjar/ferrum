@@ -118,3 +118,32 @@ running totals (`scannedFiles/Dirs/Symlinks`, `knownLogicalBytes`,
 - `percentOfParent` / `percentOfScanRoot` are computed independently with
   explicit denominators; partial coverage, zero denominator, or unknown
   value → `null` (render "—", never 0%, contract §2.7).
+
+## Sync profiles (automation P0.3)
+
+Source of truth: `src-tauri/src/automation/` + `src/lib/ipc/syncProfiles.ts`; fixtures in
+`contract-fixtures/automation/` (both test suites read them). The store lives only under the
+local (non-roaming) app data dir (`…\dev.ferrum.app\automation\automation.db`); commands refuse
+reparse points (`store_untrusted`) and an older binary never writes a newer store
+(`store_read_only`).
+
+| Command                 | Payload                             | Result                                                                          | Notes                                                                                                |
+| ----------------------- | ----------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `sync_profile_list`     | none                                | `ProfileSummary[]`                                                              | readiness per root with a 2 s budget; slower roots report `checking`                                 |
+| `sync_profile_get`      | `{ id }`                            | `ProfileDto`                                                                    | policy + identities + per-revision changes list                                                      |
+| `sync_profile_validate` | `{ draft }`                         | `{ errors: FieldError[], identities, kinds }`                                   | no side effects, no dialog                                                                           |
+| `sync_profile_save`     | `{ id?, expectedRevision?, draft }` | `{ status: 'saved', profile } \| { status: 'canceled' } \| { status: 'stale' }` | native confirm only for `permanent` (new/changed) or guard off; revision bumps only on policy fields |
+| `sync_profile_delete`   | `{ id, expectedRevision }`          | `{ status: 'deleted' }`                                                         | `in_use` once automations reference the profile (P1.1)                                               |
+
+`draft` is `{ name, left, right, mode: 'oneWay'|'mirror'|'twoWay', from?, propagateDeletes?,
+deletePolicy: 'recycleBin'|'versioning'|'permanent', versioningRoot?, compare:
+'sizeAndDate'|'content', include: string[], exclude: string[], guard: { enabled, maxCount,
+maxPercent } }`; unknown fields are refused (SE-1: no input may behave like a `confirmed` flag).
+
+Errors cross as `{ code, message }` with a closed-set code (`invalid_input`, `not_found`,
+`stale`, `in_use`, `store_unavailable`, `store_untrusted`, `store_read_only`, `needs_review`)
+and never contain user paths. Ids are lowercase UUID v4 text, validated before any lookup.
+`readiness` is `{ status: 'ready' } | { status: 'checking' } | { status: 'notReady', reason }`
+with reasons `rootMissing | identityMismatch | recycleBinUnavailable | versioningRootInvalid |
+profileInvalid`. The revision changes list shows, per revision, `{ field, from, to }` display
+values (SP-6.3); the newest 50 revisions are kept.

@@ -7,6 +7,7 @@
 //! - `<dir>/config`   prefs + session (`config.json`), AI provider setup
 //! - `<dir>/data`     AI execution journal, sync baselines
 //! - `<dir>/activity` Activity (Recent/Frequent) database
+//! - `<dir>/local`    local (non-roaming) data — the automation store
 //! - `<dir>/webview`  WebView2 user-data folder (localStorage, caches)
 //!
 //! For tests and measurement scripts only. Empty or unset means the normal OS locations.
@@ -22,6 +23,9 @@ use std::sync::OnceLock;
 
 pub const ENV_VAR: &str = "FERRUM_PROFILE_DIR";
 pub const ACTIVITY_ENV_VAR: &str = "FERRUM_ACTIVITY_DIR";
+
+/// App identifier used for the OS data dirs (must stay in sync with `tauri.conf.json`).
+pub const APP_DIR_ID: &str = "dev.ferrum.app";
 
 /// Validated overrides, fixed once at startup by [`init`].
 struct Active {
@@ -228,6 +232,11 @@ pub fn webview_in(root: &Path) -> PathBuf {
     root.join("webview")
 }
 
+/// Local (non-roaming) data dir under a test-profile root.
+pub fn local_in(root: &Path) -> PathBuf {
+    root.join("local")
+}
+
 /// Config dir (prefs, AI setup): test profile first, else the OS app config dir.
 pub fn config_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
     use tauri::Manager;
@@ -272,6 +281,45 @@ pub fn activity_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<Path
             .ok()
             .map(|dir| dir.join("activity")),
     }
+}
+
+/// Local (non-roaming) data dir (automation store): test profile first, else the OS app local
+/// data dir. Never falls back to the roaming dir: WAL needs a local disk and the store must stay
+/// machine-bound.
+pub fn local_data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    use tauri::Manager;
+    match profile_dir() {
+        Some(root) => Some(local_in(&root)),
+        None => app.path().app_local_data_dir().ok(),
+    }
+}
+
+/// Local data dir without an `AppHandle` (for code the runner shares): test profile first, then
+/// `%LOCALAPPDATA%\dev.ferrum.app` (the same composition as Tauri's `app_local_data_dir` for our
+/// identifier), then the system temp dir as a last resort. Honours `FERRUM_PROFILE_DIR`.
+pub fn resolve_local_data_dir() -> PathBuf {
+    resolve_local_data_dir_in(
+        profile_dir().as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )
+}
+
+/// Pure core of [`resolve_local_data_dir`]: `local_app_data` stands in for the Windows
+/// known-folder lookup so a unit test can assert the same directory Tauri resolves.
+pub(crate) fn resolve_local_data_dir_in(
+    profile: Option<&Path>,
+    local_app_data: Option<&OsStr>,
+) -> PathBuf {
+    if let Some(root) = profile {
+        return local_in(root);
+    }
+    let usable = local_app_data
+        .and_then(|v| v.to_str())
+        .filter(|v| !v.trim().is_empty());
+    if let Some(dir) = usable {
+        return PathBuf::from(dir).join(APP_DIR_ID);
+    }
+    std::env::temp_dir()
 }
 
 #[cfg(test)]
@@ -372,7 +420,38 @@ mod tests {
             activity_in(&root),
             PathBuf::from("X:/probe").join("activity")
         );
+        assert_eq!(local_in(&root), PathBuf::from("X:/probe").join("local"));
         assert_eq!(webview_in(&root), PathBuf::from("X:/probe").join("webview"));
+    }
+
+    /// Automation P0.3: `resolve_local_data_dir` honours `FERRUM_PROFILE_DIR` — the store then
+    /// lives under `<profile>\local`, never in the real user profile.
+    #[test]
+    fn local_data_dir_prefers_the_test_profile() {
+        let root = Path::new("X:\\probe");
+        assert_eq!(
+            resolve_local_data_dir_in(Some(root), Some(OsStr::new("F:\\lad"))),
+            PathBuf::from("X:\\probe\\local")
+        );
+        assert_eq!(
+            resolve_local_data_dir_in(Some(root), None),
+            PathBuf::from("X:\\probe\\local")
+        );
+    }
+
+    /// Without a profile the result must equal what Tauri resolves for `app_local_data_dir`:
+    /// the known local-app-data folder plus the app identifier.
+    #[test]
+    fn local_data_dir_matches_the_tauri_resolution() {
+        assert_eq!(
+            resolve_local_data_dir_in(None, Some(OsStr::new("F:\\lad"))),
+            PathBuf::from("F:\\lad").join(APP_DIR_ID)
+        );
+        // A blank LOCALAPPDATA is not a usable known folder: fall through to temp.
+        assert_eq!(
+            resolve_local_data_dir_in(None, Some(OsStr::new("  "))),
+            std::env::temp_dir()
+        );
     }
 
     #[cfg(windows)]

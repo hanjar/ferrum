@@ -292,23 +292,11 @@ pub fn run_command_in(
 
 /// FER-467 R5: the confirmation is a native Windows message box owned by the Ferrum window, with
 /// text built by the backend. The webview can neither draw it nor answer it. Cancel is the default
-/// button, so a held Enter key cannot run anything.
+/// button, so a held Enter key cannot run anything. (The shared module also serves the automation
+/// confirmations; the flags and behaviour are unchanged.)
 #[cfg(windows)]
 fn native_confirm(owner: isize, text: &str) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
-    };
-    let text = crate::shell_open::to_wide(text);
-    let caption = crate::shell_open::to_wide(CONFIRM_CAPTION);
-    // SAFETY: both strings are NUL-terminated UTF-16; `owner` is the window handle or 0.
-    unsafe {
-        MessageBoxW(
-            owner as _,
-            text.as_ptr(),
-            caption.as_ptr(),
-            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
-        ) == IDOK
-    }
+    crate::native_dialog::confirm(owner, CONFIRM_CAPTION, text)
 }
 
 #[cfg(not(windows))]

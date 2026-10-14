@@ -1,0 +1,20 @@
+{
+  "errors": [],
+  "identities": {
+    "left": {
+      "kind": "local",
+      "volumeSerial": "1a2b3c4d",
+      "fileId": "0000000000000000000000000000ab12",
+      "fsName": "NTFS",
+      "drive": "fixed"
+    },
+    "right": {
+      "kind": "network",
+      "uncPrefix": "\\\\nas\\photos"
+    }
+  },
+  "kinds": {
+    "left": "fixed",
+    "right": "network"
+  }
+}
