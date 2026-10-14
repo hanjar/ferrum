@@ -13,10 +13,12 @@
     basename,
     countItems,
     getAt,
+    indent,
     insertAt,
     isDevicePath,
     moveTo,
     moveWithin,
+    outdent,
     parseDoc,
     removeAt,
     replaceAt,
@@ -37,8 +39,15 @@
   let inited = false;
   let sel = $state<TreePath | null>(null);
   let treeEl = $state<HTMLElement>();
+  /** Folded submenus, by index-path key. Cleared whenever the tree structure changes. */
+  let folded = $state<Record<string, true>>({});
+  // Pointer drag: `press` is a pressed row that has not moved past DRAG_THRESHOLD px yet.
+  type DropZone = 'before' | 'after' | 'into';
+  let press: { path: TreePath; id: number; x: number; y: number } | null = null;
   let dragFrom = $state<TreePath | null>(null);
-  let dropOn = $state<string | null>(null);
+  let dropAt = $state<{ key: string; zone: DropZone } | null>(null);
+  let swallowClick = false;
+  const DRAG_THRESHOLD = 4;
   let saving = $state(false);
 
   // Import panel
@@ -57,7 +66,7 @@
       items.forEach((item, i) => {
         const path = [...prefix, i];
         out.push({ path, item, depth });
-        if (item.type === 'submenu') walk(item.items, path, depth + 1);
+        if (item.type === 'submenu' && !folded[key(path)]) walk(item.items, path, depth + 1);
       });
     };
     walk(draft, [], 0);
@@ -103,6 +112,7 @@
     untrack(() => {
       if (!inited || !dirty) {
         draft = structuredClone($state.snapshot(items)) as HotItem[];
+        folded = {};
         if (!inited) sel = draft.length > 0 ? [0] : null;
         inited = true;
       }
@@ -113,17 +123,26 @@
     if (hotlist.configureOpen) void tick().then(() => treeEl?.focus());
   });
 
-  function edit(next: HotItem[] | null, nextSel?: TreePath | null) {
+  function edit(next: HotItem[] | null, nextSel?: TreePath | null, keepFolds = false) {
     if (!next) return;
     draft = next;
+    if (!keepFolds) folded = {}; // index paths shift when the structure changes
     dirty = true;
     if (nextSel !== undefined) sel = nextSel;
   }
 
-  /** Insert after the selection (same list), or at the end when nothing is selected. */
+  /**
+   * Insert after the selection (same list); at the end of the selected submenu (inside it); or at
+   * the end of the top level when nothing is selected.
+   */
   function add(item: HotItem) {
-    const parent = sel ? sel.slice(0, -1) : [];
-    const index = sel ? sel[sel.length - 1] + 1 : draft.length;
+    const intoSub = sel !== null && selected?.type === 'submenu';
+    const parent = sel ? (intoSub ? sel : sel.slice(0, -1)) : [];
+    const index = !sel
+      ? draft.length
+      : intoSub
+        ? (selected as { items: HotItem[] }).items.length
+        : sel[sel.length - 1] + 1;
     const next = insertAt(draft, parent, index, item);
     if (!next) {
       hotlist.say('The hotlist is full or nested too deeply.');
@@ -159,26 +178,60 @@
     if (r) edit(r.items, r.path);
   }
 
+  const canIndent = $derived(sel !== null && indent(draft, sel) !== null);
+  const canOutdent = $derived(sel !== null && outdent(draft, sel) !== null);
+
+  function reparent(fn: typeof indent) {
+    if (!sel) return;
+    const r = fn(draft, sel);
+    if (r) edit(r.items, r.path);
+  }
+
+  function setFold(path: TreePath, fold: boolean) {
+    const k = key(path);
+    if (fold) {
+      folded = { ...folded, [k]: true };
+      // Keep the selection on a visible row.
+      if (sel && sel.length > path.length && key(sel.slice(0, path.length)) === k) sel = path;
+    } else {
+      const rest = { ...folded };
+      delete rest[k];
+      folded = rest;
+    }
+  }
+
   function setField(patch: Record<string, unknown>) {
     if (!sel || !selected || selected.type === 'separator') return;
-    edit(replaceAt(draft, sel, { ...selected, ...patch } as HotItem));
+    edit(replaceAt(draft, sel, { ...selected, ...patch } as HotItem), undefined, true);
   }
 
   function onTreeKey(e: KeyboardEvent) {
     const i = sel ? flat.findIndex((r) => key(r.path) === key(sel!)) : -1;
-    if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown' && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       if (i < flat.length - 1) sel = flat[i + 1].path;
-    } else if (e.key === 'ArrowUp') {
+    } else if (e.key === 'ArrowUp' && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       if (i > 0) sel = flat[i - 1].path;
     } else if (e.key === 'Delete') {
       e.preventDefault();
       remove();
-    } else if ((e.altKey || e.ctrlKey) && e.key === 'PageUp') {
+    } else if (e.ctrlKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      reparent(indent);
+    } else if (e.ctrlKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      reparent(outdent);
+    } else if (e.key === 'ArrowRight' && sel && selected?.type === 'submenu') {
+      e.preventDefault();
+      setFold(sel, false);
+    } else if (e.key === 'ArrowLeft' && sel && selected?.type === 'submenu') {
+      e.preventDefault();
+      setFold(sel, true);
+    } else if ((e.altKey || e.ctrlKey) && (e.key === 'PageUp' || e.key === 'ArrowUp')) {
       e.preventDefault();
       move(-1);
-    } else if ((e.altKey || e.ctrlKey) && e.key === 'PageDown') {
+    } else if ((e.altKey || e.ctrlKey) && (e.key === 'PageDown' || e.key === 'ArrowDown')) {
       e.preventDefault();
       move(1);
     }
@@ -188,7 +241,8 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (importOpen) importOpen = false;
+      if (press || dragFrom) cancelDrag();
+      else if (importOpen) importOpen = false;
       else hotlist.closeConfigure();
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
@@ -204,21 +258,82 @@
     if (done) hotlist.closeConfigure();
   }
 
-  // ── drag & drop (drop on a submenu = move into it; elsewhere = place before the row) ──
-  function onDrop(target: FlatRow, e: DragEvent) {
-    e.preventDefault();
-    const from = dragFrom;
+  // ── drag & drop with pointer events ──
+  // (HTML5 drag events do not reach the webview while native file drops are enabled.)
+  // A drop on the middle third of a submenu row goes INTO it (as its last entry); elsewhere on a
+  // row, before it (upper part) or after it (lower part).
+
+  function cancelDrag() {
+    press = null;
     dragFrom = null;
-    dropOn = null;
-    if (!from) return;
-    const intoSub = target.item.type === 'submenu';
+    dropAt = null;
+  }
+
+  /** The row under the pointer and the part of it, or `null` outside every row. */
+  function hit(clientY: number): { row: FlatRow; zone: DropZone } | null {
+    const els = treeEl?.querySelectorAll<HTMLElement>('li[role="treeitem"]');
+    if (!els) return null;
+    for (let i = 0; i < els.length && i < flat.length; i++) {
+      const r = els[i].getBoundingClientRect();
+      if (clientY < r.top || clientY >= r.bottom) continue;
+      const row = flat[i];
+      const f = r.height > 0 ? (clientY - r.top) / r.height : 0.5;
+      const zone: DropZone =
+        row.item.type === 'submenu'
+          ? f < 1 / 3
+            ? 'before'
+            : f > 2 / 3
+              ? 'after'
+              : 'into'
+          : f < 0.5
+            ? 'before'
+            : 'after';
+      return { row, zone };
+    }
+    return null;
+  }
+
+  function onRowDown(row: FlatRow, e: PointerEvent) {
+    if (e.button !== 0) return;
+    press = { path: row.path, id: e.pointerId, x: e.clientX, y: e.clientY };
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+  }
+
+  function onTreeMove(e: PointerEvent) {
+    if (press && !dragFrom) {
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= DRAG_THRESHOLD) return;
+      dragFrom = press.path;
+      sel = press.path;
+    }
+    if (!dragFrom) return;
+    const h = hit(e.clientY);
+    dropAt = h ? { key: key(h.row.path), zone: h.zone } : null;
+  }
+
+  function onTreeUp(e: PointerEvent) {
+    const from = dragFrom;
+    const h = from ? hit(e.clientY) : null;
+    const wasDrag = from !== null;
+    cancelDrag();
+    if (!wasDrag) return;
+    swallowClick = true; // the click that follows a drag must not re-select
+    setTimeout(() => (swallowClick = false), 0);
+    if (!from || !h) return;
+    if (key(h.row.path) === key(from)) return; // dropped on itself: nothing to do
+    const target = h.row;
+    const intoSub = h.zone === 'into' && target.item.type === 'submenu';
     const parent = intoSub ? target.path : target.path.slice(0, -1);
     const index = intoSub
-      ? (getAt(draft, target.path) as { items: HotItem[] }).items.length
-      : target.path[target.path.length - 1];
+      ? (target.item as { items: HotItem[] }).items.length
+      : target.path[target.path.length - 1] + (h.zone === 'after' ? 1 : 0);
     const r = moveTo(draft, from, parent, index);
     if (r) edit(r.items, r.path);
     else hotlist.say("That item can't be moved there.");
+  }
+
+  function onRowClick(row: FlatRow) {
+    if (swallowClick) return;
+    sel = row.path;
   }
 
   // ── Total Commander import ──
@@ -383,6 +498,10 @@
           tabindex="0"
           bind:this={treeEl}
           onkeydown={onTreeKey}
+          onpointermove={onTreeMove}
+          onpointerup={onTreeUp}
+          onpointercancel={cancelDrag}
+          onlostpointercapture={cancelDrag}
         >
           {#each flat as row (key(row.path))}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -391,28 +510,28 @@
               aria-level={row.depth + 1}
               aria-selected={sel !== null && key(sel) === key(row.path)}
               class:sel={sel !== null && key(sel) === key(row.path)}
-              class:drop={dropOn === key(row.path)}
               style:padding-left="{row.depth * 16 + 8}px"
-              draggable="true"
-              ondragstart={() => (dragFrom = row.path)}
-              ondragover={(e) => {
-                e.preventDefault();
-                dropOn = key(row.path);
-              }}
-              ondragleave={() => (dropOn = null)}
-              ondrop={(e) => onDrop(row, e)}
-              ondragend={() => {
-                dragFrom = null;
-                dropOn = null;
-              }}
-              onclick={() => (sel = row.path)}
+              class:drop-before={dropAt?.key === key(row.path) && dropAt.zone === 'before'}
+              class:drop-after={dropAt?.key === key(row.path) && dropAt.zone === 'after'}
+              class:drop-into={dropAt?.key === key(row.path) && dropAt.zone === 'into'}
+              class:dragging={dragFrom !== null && key(dragFrom) === key(row.path)}
+              onpointerdown={(e) => onRowDown(row, e)}
+              onclick={() => onRowClick(row)}
             >
               {#if row.item.type === 'separator'}
                 <span class="dim">— separator —</span>
               {:else}
-                <span class="glyph" aria-hidden="true"
+                <span
+                  class="glyph"
+                  class:fold={row.item.type === 'submenu'}
+                  aria-hidden="true"
+                  onclick={row.item.type === 'submenu'
+                    ? () => setFold(row.path, !folded[key(row.path)])
+                    : undefined}
                   >{row.item.type === 'submenu'
-                    ? '▸'
+                    ? folded[key(row.path)]
+                      ? '▸'
+                      : '▾'
                     : row.item.type === 'command'
                       ? '▶︎'
                       : '·'}</span
@@ -436,7 +555,14 @@
           <button onclick={remove} disabled={!sel}>Delete item</button>
           <button onclick={() => move(-1)} disabled={!sel}>Up</button>
           <button onclick={() => move(1)} disabled={!sel}>Down</button>
+          <button onclick={() => reparent(indent)} disabled={!canIndent}>Into submenu</button>
+          <button onclick={() => reparent(outdent)} disabled={!canOutdent}>Out of submenu</button>
           <button onclick={() => (importOpen = true)}>Import from Total Commander…</button>
+          <p class="dim hint kinds">
+            Item = shortcut to a folder. Submenu = a group. Separator = a divider line. Command =
+            runs a program (asks first). Drag rows to reorder or into a submenu; Ctrl+←/→ moves an
+            item out of or into the submenu above.
+          </p>
         </div>
       </div>
 
@@ -610,6 +736,7 @@
     border-radius: var(--r);
     background: var(--bg);
     outline: none;
+    user-select: none;
   }
   .tree:focus-visible {
     box-shadow: 0 0 0 1.5px var(--accentLine);
@@ -630,13 +757,26 @@
     background: var(--accentSoft);
     outline: 1px solid var(--accentLine);
   }
-  .tree li.drop {
+  .tree li.drop-before {
     box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .tree li.drop-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .tree li.drop-into {
+    background: var(--accentSoft);
+    outline: 1.5px dashed var(--accent);
+  }
+  .tree li.dragging {
+    opacity: 0.55;
   }
   .glyph {
     width: 10px;
     flex: none;
     color: var(--text3);
+  }
+  .glyph.fold {
+    cursor: pointer;
   }
   .name {
     color: var(--text);

@@ -161,6 +161,27 @@ contain such items, so:
 - rendering the menu, the palette or the history never touches the network: the marks are string
   checks. A drive letter mapped to a share is not recognisable from the path and is not marked.
 
+## Editing the tree (Configure)
+
+Item kinds: **Item** = shortcut to a folder, **Submenu** = a group, **Separator** = a divider line,
+**Command** = runs a program (it asks for confirmation first).
+
+- **Drag** a row with the mouse (it starts after 4 px of movement; a plain click only selects). The
+  middle third of a submenu row drops the item **into** it, as its last entry, also when the submenu
+  is empty. The upper or lower part of a row drops it before or after that row. **Esc** cancels the
+  drag. A submenu cannot be dropped into itself or its own contents, and the depth and item limits
+  still apply ("That item can't be moved there.").
+- **Into submenu** (`Ctrl+→`) moves the selected item to the end of the submenu directly above it;
+  **Out of submenu** (`Ctrl+←`) moves it out, to the level of its submenu, right after it.
+- **Up** / **Down** (`Ctrl+↑` / `Ctrl+↓`, also `Ctrl+PageUp` / `Ctrl+PageDown`) swap with the
+  neighbour in the same list.
+- **Add item / submenu / separator / command** inserts after the selected row; when the selected row
+  is a submenu, the new entry goes **inside** it, at the end.
+- Submenus show ▾ (open) or ▸ (folded); click the arrow, or press `←` / `→`, to fold or unfold.
+
+Dragging uses pointer events, not the HTML5 drag-and-drop API, so it keeps working while dropping
+files from Explorer onto the main window is enabled.
+
 ## Import from Total Commander
 
 Configure › **Import from Total Commander…** reads `[DirMenu]` of a `wincmd.ini` (default
