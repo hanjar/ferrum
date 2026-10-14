@@ -190,10 +190,13 @@ backend memeriksa folder dengan `symlink_metadata` saja (reparse point tidak dii
 
 Hasilnya dikirim ke UI sebagai `warnings`:
 
-- **Aider, opencode, Gemini CLI, omp, agy**: belum ada yang dijalankan (`needsConfirm`). UI
-  menampilkan dialog "Buka <agent> di folder ini?" berisi daftar temuan, dengan tombol **Batal**
-  (fokus awal; Enter = Batal) dan **Buka tetap**. "Buka tetap" memanggil `agent_terminal_open` lagi
-  dengan `confirmedUntrusted: true`.
+- **Aider, opencode, Gemini CLI, omp, agy**: backend sendiri memunculkan konfirmasi **native**
+  Windows (FER-516) berisi nama agent, path lengkap folder kerja, dan peringatan bahwa konfigurasi
+  proyek bisa menjalankan program. Tombol bawaan = Batal. Webview tidak ikut memutuskan: request
+  `agent_terminal_open` tidak punya field konfirmasi (`confirmedUntrusted` ditolak). Batal atau
+  gagal membuat dialog = `cancelled`; dialog lain sedang terbuka = `busy`; path dengan karakter
+  format/bidi/kontrol ditolak (`folder_invalid`) tanpa dialog. Tidak ada proses yang dijalankan
+  pada ketiga kasus itu.
 - **Claude Code, Codex**: keduanya sudah punya dialog trust folder sendiri. Agent langsung dibuka dan
   temuan hanya ditampilkan sebagai catatan di toast.
 

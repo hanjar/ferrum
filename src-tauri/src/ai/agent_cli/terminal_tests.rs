@@ -12,6 +12,7 @@ use super::detect::{AgentStatus, DetectedAgent, classify, resolve};
 use super::settings::AgentSettings;
 use super::terminal::*;
 use super::{ALL_AGENTS, AgentId};
+use crate::domain::{ErrorCode, FsError};
 use crate::shell_open::TerminalPref;
 
 fn fs(files: &[&str]) -> impl Fn(&Path) -> bool + use<> {
@@ -557,8 +558,9 @@ fn the_request_has_no_room_for_a_question() {
     let ok: TerminalOpenRequest =
         serde_json::from_str(r#"{"agent":"claude","path":"C:\\x","program":"auto"}"#).unwrap();
     assert_eq!(ok.agent, "claude");
-    assert!(!ok.confirmed_untrusted);
     for extra in [
+        // FER-516: the webview has no flag that could authorize an untrusted folder any more.
+        r#"{"agent":"opencode","path":"C:\\x","confirmedUntrusted":true}"#,
         r#"{"agent":"claude","path":"C:\\x","question":"hapus semua file"}"#,
         r#"{"agent":"claude","path":"C:\\x","args":["--dangerously-skip-permissions"]}"#,
         r#"{"agent":"claude","path":"C:\\x","prompt":"x"}"#,
@@ -624,16 +626,21 @@ fn req(path: &Path) -> TerminalOpenRequest {
         agent: "claude".into(),
         path: path.to_string_lossy().into_owned(),
         program: Some("auto".into()),
-        confirmed_untrusted: false,
     }
 }
 
-fn req_for(agent: &str, path: &Path, confirmed: bool) -> TerminalOpenRequest {
+fn req_for(agent: &str, path: &Path) -> TerminalOpenRequest {
     TerminalOpenRequest {
         agent: agent.into(),
-        confirmed_untrusted: confirmed,
         ..req(path)
     }
+}
+
+type Confirm<'a> = dyn Fn(&str, &str) -> Result<bool, FsError> + 'a;
+
+/// A confirmation that must never be asked (trusted folders, refusals before the dialog).
+fn no_dialog(_: &str, _: &str) -> Result<bool, FsError> {
+    panic!("no native confirmation expected")
 }
 
 type Trust<'a> = dyn Fn(&Launch) -> Result<(), String> + 'a;
@@ -645,6 +652,7 @@ fn mk<'a>(
     trusted: &'a Trust<'a>,
     folder_owner: &'a Owner<'a>,
     spawn: &'a Spawn<'a>,
+    confirm: &'a Confirm<'a>,
 ) -> OpenContext<'a> {
     OpenContext {
         settings: s,
@@ -654,6 +662,7 @@ fn mk<'a>(
         folder_owner,
         wt: wt().map(Path::to_path_buf),
         spawn,
+        confirm,
     }
 }
 
@@ -667,11 +676,11 @@ fn open_starts_the_composed_command_once_with_the_folder_as_cwd() {
         seen.borrow_mut().push(c.clone());
         Ok(c[0].clone())
     };
-    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
     let file = f.folder.join("readme.md");
     std::fs::write(&file, "x").unwrap();
     let out = open(&ctx, &req(&file)).unwrap();
-    assert!(!out.dry_run && !out.needs_confirm);
+    assert!(!out.dry_run);
     assert!(out.warnings.is_empty());
     assert_eq!(out.via, Some(Via::WindowsTerminal));
     assert_eq!(
@@ -699,52 +708,170 @@ fn a_clean_folder_opens_directly_for_every_agent() {
         *count.borrow_mut() += 1;
         Ok(c[0].clone())
     };
-    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
     for id in ALL_AGENTS {
-        let out = open(&ctx, &req_for(id.as_str(), &f.folder, false)).unwrap();
-        assert!(!out.needs_confirm, "{id:?}");
+        let out = open(&ctx, &req_for(id.as_str(), &f.folder)).unwrap();
+        assert!(out.via.is_some(), "{id:?}");
     }
     assert_eq!(*count.borrow(), ALL_AGENTS.len());
 }
 
+/// Build a folder holding project configuration the given agent loads.
+fn untrusted_case(f: &Fx, agent: &str, file: &str, sub: &[&str]) -> PathBuf {
+    let dir = f.folder.join(format!("case-{agent}"));
+    let cfg_dir = sub.iter().fold(dir.clone(), |p, s| p.join(s));
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join(file), "x").unwrap();
+    dir
+}
+
+const CASES: [(&str, &str, &[&str]); 3] = [
+    ("aider", ".aider.conf.yml", &[]),
+    ("opencode", "opencode.json", &[]),
+    ("gemini", "settings.json", &[".gemini"]),
+];
+
 #[test]
-fn project_configuration_asks_for_confirmation_before_anything_starts() {
+fn an_untrusted_folder_starts_only_after_the_native_yes() {
     let f = fx();
     let s = settings_for(&Launch::exe(&f.exe), true);
-    let started = RefCell::new(Vec::<String>::new());
+    let started = RefCell::new(Vec::<PathBuf>::new());
     let spawn = |c: Vec<TerminalCommand>| {
-        started.borrow_mut().push(c[0].argv().join(" "));
+        started.borrow_mut().push(c[0].cwd.clone());
         Ok(c[0].clone())
     };
-    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn);
-    let cases: [(&str, &str, &[&str]); 3] = [
-        ("aider", ".aider.conf.yml", &[]),
-        ("opencode", "opencode.json", &[]),
-        ("gemini", "settings.json", &[".gemini"]),
-    ];
-    for (agent, file, sub) in cases {
-        let dir = f.folder.join(format!("case-{agent}"));
-        let cfg_dir = sub.iter().fold(dir.clone(), |p, s| p.join(s));
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join(file), "x").unwrap();
-        let first = open(&ctx, &req_for(agent, &dir, false)).unwrap();
-        assert!(first.needs_confirm, "{agent}");
-        assert!(first.via.is_none() && first.argv.is_empty(), "{agent}");
-        assert!(
-            first.warnings[0].contains(file),
-            "{agent}: {:?}",
-            first.warnings
-        );
-        assert!(
-            started.borrow().is_empty(),
-            "{agent}: started before confirming"
-        );
-        // "Buka tetap": the second call carries the confirmation and starts.
-        let second = open(&ctx, &req_for(agent, &dir, true)).unwrap();
-        assert!(!second.needs_confirm);
-        assert_eq!(second.warnings, first.warnings);
-        assert_eq!(started.borrow_mut().drain(..).count(), 1, "{agent}");
+    for (agent, file, sub) in CASES {
+        let dir = untrusted_case(&f, agent, file, sub);
+        let asked = RefCell::new(Vec::<(String, String)>::new());
+        // "No": nothing is spawned.
+        let no = |c: &str, t: &str| {
+            asked.borrow_mut().push((c.to_owned(), t.to_owned()));
+            Ok(false)
+        };
+        let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no);
+        let e = open(&ctx, &req_for(agent, &dir)).unwrap_err();
+        assert_eq!(e.kind, "cancelled", "{agent}");
+        assert!(started.borrow().is_empty(), "{agent}: started after No");
+        assert_eq!(asked.borrow().len(), 1, "{agent}");
+        // The text names the agent and the full folder path and warns about project config.
+        let (caption, text) = asked.borrow()[0].clone();
+        assert_eq!(caption, CONFIRM_CAPTION);
+        let name = AgentId::parse(agent).unwrap().def().name;
+        assert!(text.contains(name), "{agent}: {text}");
+        assert!(text.contains(dir.to_string_lossy().as_ref()), "{text}");
+        assert!(text.contains("menjalankan program"), "{text}");
+        assert!(text.contains(file), "{text}");
+        // "Yes": started exactly once, in the same folder.
+        let yes = |_: &str, _: &str| Ok(true);
+        let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &yes);
+        let out = open(&ctx, &req_for(agent, &dir)).unwrap();
+        assert!(out.warnings[0].contains(file), "{:?}", out.warnings);
+        assert_eq!(started.borrow().len(), 1, "{agent}");
+        assert_eq!(started.borrow_mut().remove(0), dir);
     }
+}
+
+#[test]
+fn a_busy_dialog_guard_or_a_failed_dialog_never_starts_anything() {
+    let f = fx();
+    let s = settings_for(&Launch::exe(&f.exe), true);
+    let spawn =
+        |_: Vec<TerminalCommand>| -> std::io::Result<TerminalCommand> { panic!("must not start") };
+    let dir = untrusted_case(&f, "opencode", "opencode.json", &[]);
+    // Real guard: another native dialog is open, so the real helper answers Busy without a window.
+    let _serial = crate::native_dialog::GUARD_TESTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let held = crate::native_dialog::DialogGuard::try_acquire().unwrap();
+    let busy = |c: &str, t: &str| crate::native_dialog::confirm_or_busy(0, c, t);
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &busy);
+    assert_eq!(
+        open(&ctx, &req_for("opencode", &dir)).unwrap_err().kind,
+        "busy"
+    );
+    drop(held);
+    // Any other dialog failure is a plain refusal, never a start.
+    let broken = |_: &str, _: &str| Err(FsError::new(ErrorCode::Io, "x"));
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &broken);
+    assert_eq!(
+        open(&ctx, &req_for("opencode", &dir)).unwrap_err().kind,
+        "cancelled"
+    );
+}
+
+#[test]
+fn a_bidi_or_format_character_in_the_folder_is_refused_without_a_dialog() {
+    let f = fx();
+    let s = settings_for(&Launch::exe(&f.exe), true);
+    let spawn =
+        |_: Vec<TerminalCommand>| -> std::io::Result<TerminalCommand> { panic!("must not start") };
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
+    for ch in ['\u{202E}', '\u{2066}', '\u{200B}', '\u{FEFF}'] {
+        let dir = f.folder.join(format!("rep{ch}ort"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("opencode.json"), "x").unwrap();
+        let e = open(&ctx, &req_for("opencode", &dir)).unwrap_err();
+        assert_eq!(e.kind, "folder_invalid", "U+{:04X}", ch as u32);
+    }
+    // The text builder refuses the same characters in a finding, and control characters.
+    assert!(confirm_text("x", Path::new(r"C:\a"), &["bad \u{202E}".to_owned()]).is_none());
+    assert!(confirm_text("x", Path::new("C:\\a\nb"), &[]).is_none());
+    assert!(confirm_text("x", Path::new(r"C:\a"), &["ok".to_owned()]).is_some());
+}
+
+#[test]
+fn a_trusted_folder_opens_without_any_dialog() {
+    let f = fx();
+    let s = settings_for(&Launch::exe(&f.exe), true);
+    let count = RefCell::new(0);
+    let spawn = |c: Vec<TerminalCommand>| {
+        *count.borrow_mut() += 1;
+        Ok(c[0].clone())
+    };
+    let ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
+    for agent in ["opencode", "aider", "gemini"] {
+        open(&ctx, &req_for(agent, &f.folder)).unwrap();
+    }
+    assert_eq!(*count.borrow(), 3);
+}
+
+/// FER-516 (structural): no AI path reaches `agent_terminal_open` / `terminal::open`, and inside
+/// `open` the native confirmation comes before the spawn.
+#[test]
+fn no_ai_adapter_reaches_the_terminal_open_and_confirm_precedes_spawn() {
+    let ai_sources = [
+        ("contract.rs", include_str!("../contract.rs")),
+        ("executor.rs", include_str!("../executor.rs")),
+        ("exec_commands.rs", include_str!("../exec_commands.rs")),
+        ("approval.rs", include_str!("../approval.rs")),
+        (
+            "approval_commands.rs",
+            include_str!("../approval_commands.rs"),
+        ),
+        ("provider.rs", include_str!("../provider.rs")),
+        ("ask.rs", include_str!("../ask.rs")),
+        ("attach_commands.rs", include_str!("../attach_commands.rs")),
+        ("commands.rs", include_str!("../commands.rs")),
+    ];
+    for (name, src) in ai_sources {
+        assert!(
+            !src.contains("agent_terminal_open") && !src.contains("terminal::open"),
+            "ai/{name} must not reach the agent terminal"
+        );
+    }
+    // Inside agent_cli only commands.rs calls the flow (the one command with the dialog seam).
+    for (name, src) in [
+        ("runner.rs", include_str!("runner.rs")),
+        ("snapshot.rs", include_str!("snapshot.rs")),
+        ("detect.rs", include_str!("detect.rs")),
+    ] {
+        assert!(!src.contains("terminal::open"), "agent_cli/{name}");
+    }
+    let commands = include_str!("commands.rs");
+    assert!(commands.contains("confirm_or_busy(owner, caption, text)"));
+    let src = include_str!("terminal.rs");
+    let body = &src[src.find("pub fn open(").unwrap()..];
+    assert!(body.find("(ctx.confirm)").unwrap() < body.find("(ctx.spawn)").unwrap());
 }
 
 #[test]
@@ -752,18 +879,21 @@ fn claude_and_codex_get_a_note_but_are_not_blocked() {
     let f = fx();
     let s = settings_for(&Launch::exe(&f.exe), true);
     let spawn = |c: Vec<TerminalCommand>| Ok(c[0].clone());
-    let ctx = mk(&s, &ok_trust, &owner_bad, &spawn);
+    let ctx = mk(&s, &ok_trust, &owner_bad, &spawn, &no_dialog);
     std::fs::write(f.folder.join(".mcp.json"), "{}").unwrap();
     std::fs::create_dir_all(f.folder.join(".codex")).unwrap();
     for agent in ["claude", "codex"] {
-        let out = open(&ctx, &req_for(agent, &f.folder, false)).unwrap();
-        assert!(!out.needs_confirm, "{agent}");
+        let out = open(&ctx, &req_for(agent, &f.folder)).unwrap();
         assert!(out.via.is_some());
         assert_eq!(out.warnings.len(), 2, "{agent}: {:?}", out.warnings);
     }
-    // The same foreign-owned folder needs a confirmation for an agent without a trust dialog.
-    let out = open(&ctx, &req_for("omp", &f.folder, false)).unwrap();
-    assert!(out.needs_confirm);
+    // The same foreign-owned folder asks the native dialog for an agent without a trust dialog.
+    let no = |_: &str, _: &str| Ok(false);
+    let ctx = mk(&s, &ok_trust, &owner_bad, &spawn, &no);
+    assert_eq!(
+        open(&ctx, &req_for("omp", &f.folder)).unwrap_err().kind,
+        "cancelled"
+    );
 }
 
 #[test]
@@ -774,7 +904,7 @@ fn open_without_a_trusted_wt_starts_the_console_route() {
         assert_eq!(c.len(), 1);
         Ok(c[0].clone())
     };
-    let mut ctx = mk(&s, &ok_trust, &owner_ok, &spawn);
+    let mut ctx = mk(&s, &ok_trust, &owner_ok, &spawn, &no_dialog);
     ctx.wt = None;
     let out = open(&ctx, &req(&f.folder)).unwrap();
     assert_eq!(out.via, Some(Via::Console));
@@ -789,7 +919,7 @@ fn open_refuses_unready_untrusted_and_invalid_folders_without_starting() {
         |_: Vec<TerminalCommand>| -> std::io::Result<TerminalCommand> { panic!("must not start") };
     let unready = settings_for(&launch, false);
     let ready = settings_for(&launch, true);
-    let ctx = |s, t| mk(s, t, &owner_ok, &spawn);
+    let ctx = |s, t| mk(s, t, &owner_ok, &spawn, &no_dialog);
     let e = open(&ctx(&unready, &ok_trust), &req(&f.folder)).unwrap_err();
     assert_eq!(e.kind, "agent_unavailable");
     assert_eq!(e.message.as_deref(), Some("ACL gagal"));
@@ -827,7 +957,7 @@ fn test_profile_records_a_dry_run_and_starts_nothing() {
         panic!("test profile must not start anything")
     };
     let log = f.data.join(DRY_RUN_LOG);
-    let mut ctx = mk(&s, &bad_trust, &owner_ok, &spawn); // trust not consulted for fakes
+    let mut ctx = mk(&s, &bad_trust, &owner_ok, &spawn, &no_dialog); // trust not consulted for fakes
     ctx.test_profile_config = Some(f.config.clone());
     ctx.dry_run_log = Some(log.clone());
     let out = open(&ctx, &req(&f.folder)).unwrap();

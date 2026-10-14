@@ -167,7 +167,6 @@ function injectTauriMock(page: Page) {
                 agent: string;
                 path: string;
                 program: string;
-                confirmedUntrusted: boolean;
               };
             }
           ).request;
@@ -183,15 +182,13 @@ function injectTauriMock(page: Page) {
               ]
             : [];
           const ownTrust = agent.id === 'claude' || agent.id === 'codex';
-          if (warnings.length && !ownTrust && !req.confirmedUntrusted)
-            return Promise.resolve({
-              agent: req.agent,
-              argv: [],
-              cwd,
-              dryRun: false,
-              needsConfirm: true,
-              warnings,
-            });
+          // FER-516: the confirmation is a NATIVE dialog raised by the backend. This mock
+          // stands in for it; the test sets the answer in `__nativeAnswer` (default: No).
+          if (warnings.length && !ownTrust) {
+            const answer = (w as unknown as { __nativeAnswer?: string }).__nativeAnswer ?? 'no';
+            if (answer === 'busy') return Promise.reject({ kind: 'busy' });
+            if (answer !== 'yes') return Promise.reject({ kind: 'cancelled' });
+          }
           return Promise.resolve({
             agent: req.agent,
             via: 'windowsTerminal',
@@ -204,7 +201,6 @@ function injectTauriMock(page: Page) {
             cwd,
             dryRun: false,
             note: agent.terminalNote,
-            needsConfirm: false,
             warnings,
           });
         }
@@ -260,7 +256,6 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
       agent: 'claude',
       path: 'C:\\Users\\demo',
       program: 'auto',
-      confirmedUntrusted: false,
     });
     await expect(page.getByTestId('toast')).toContainText('Claude Code dibuka di terminal.');
   });
@@ -276,7 +271,6 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
       agent: 'codex',
       path: `C:\\Users\\demo\\${FOLDER}`,
       program: 'auto',
-      confirmedUntrusted: false,
     });
     // Codex note: it can read other files.
     await expect(page.getByTestId('toast')).toContainText('Codex dapat membaca file lain');
@@ -290,7 +284,6 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
       agent: 'omp',
       path: 'C:\\Users\\demo\\q3-report.pdf',
       program: 'auto',
-      confirmedUntrusted: false,
     });
   });
 
@@ -310,7 +303,6 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
       agent: 'claude',
       path: 'C:\\Users\\demo\\q3-report.pdf',
       program: 'auto',
-      confirmedUntrusted: false,
     });
     expect(JSON.stringify(await launches(page))).not.toContain('ringkas');
     // No other command carried the question either (nothing was asked or planned).
@@ -326,38 +318,36 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(question);
   });
 
-  test('a folder with project configuration asks first (focus on Batal); Buka tetap opens', async () => {
+  test('a folder with project configuration: the native answer decides, the webview draws nothing', async () => {
     const folder = 'repo-with-aider-conf';
     const openAider = async () => {
       await row(page, folder).click({ button: 'right' });
       await page.getByRole('menuitem', { name: 'Buka di agent ▸' }).click();
       await page.getByRole('menuitem', { name: 'Aider' }).click();
     };
+    const answer = (a: string) =>
+      page.evaluate(
+        (v) => ((window as unknown as { __nativeAnswer?: string }).__nativeAnswer = v),
+        a,
+      );
+    // Native "No": a neutral note, no webview dialog, no process.
+    await answer('no');
     await openAider();
-    const dialog = page.getByRole('dialog', { name: 'agentTerminalConfirm' });
-    await expect(dialog).toContainText('Buka Aider di folder ini?');
-    await expect(dialog.getByTestId('agent-terminal-warnings')).toContainText('.aider.conf.yml');
-    await expect(dialog.getByTestId('agent-terminal-warnings')).toContainText(
-      'menjalankan perintah otomatis',
-    );
-    // Default focus: the safe choice.
-    await expect(dialog.getByRole('button', { name: 'Batal' })).toBeFocused();
-    expect(await launches(page)).toHaveLength(1);
-    // Enter on the focused Batal cancels; nothing more is requested.
-    await page.keyboard.press('Enter');
-    await expect(dialog).toHaveCount(0);
-    expect(await launches(page)).toHaveLength(1);
-
+    await expect(page.getByTestId('toast')).toContainText('Aider tidak dibuka.');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    // Another native confirmation is open.
+    await answer('busy');
     await openAider();
-    await dialog.getByRole('button', { name: 'Buka tetap' }).click();
+    await expect(page.getByTestId('toast')).toContainText('Konfirmasi lain masih terbuka');
+    // Native "Yes": opened, with the same request shape (no flag).
+    await answer('yes');
+    await openAider();
     await expect.poll(() => launches(page)).toHaveLength(3);
     const reqs = await launches(page);
-    expect(reqs[1]).toMatchObject({ agent: 'aider', confirmedUntrusted: false });
     expect(reqs[2]).toEqual({
       agent: 'aider',
       path: `C:\\Users\\demo\\${folder}`,
       program: 'auto',
-      confirmedUntrusted: true,
     });
     await expect(page.getByTestId('toast')).toContainText('Aider dibuka di terminal.');
 
@@ -366,7 +356,7 @@ test.describe('FER-494 Buka di terminal (fake launcher)', () => {
     await page.getByRole('menuitem', { name: 'Buka di agent ▸' }).click();
     await page.getByRole('menuitem', { name: 'Claude Code' }).click();
     await expect.poll(() => launches(page)).toHaveLength(4);
-    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.getByTestId('toast')).toContainText('Catatan: Claude Code akan membaca');
   });
 });

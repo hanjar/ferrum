@@ -22,7 +22,8 @@
 //! - T1/T3: project configuration the agent would load (per agent, [`AgentDef::project_configs`]),
 //!   a UNC or linked folder, or a folder owned by another account produce `warnings`. Agents
 //!   without their own folder-trust dialog need an explicit confirmation (`needsConfirm`, then a
-//!   second call with `confirmedUntrusted`); Claude Code and Codex get a note only.
+//!   a NATIVE confirmation owned by the backend, FER-516); Claude Code and Codex get a note only.
+//!   The webview cannot answer that confirmation and its request carries no flag for it.
 //! - The folder is validated with `path_guard::check_str` (no device namespace, no `\\?\`, no odd
 //!   UNC host, no ADS) plus: no control characters, no `"`/wildcards, no `.`/`..` segments, must be
 //!   an existing directory (a file means its parent folder). Plain UNC shares are allowed.
@@ -41,6 +42,7 @@ use super::args::Launch;
 use super::commands::AgentError;
 use super::detect::{self, launch_ok};
 use super::settings::AgentSettings;
+use crate::domain::{ErrorCode, FsError};
 use crate::shell_open::TerminalPref;
 
 /// One agent Ferrum knows: label, where its executable lives, and how it opens interactively.
@@ -647,16 +649,13 @@ pub struct TerminalOpenRequest {
     pub path: String,
     #[serde(default)]
     pub program: Option<String>,
-    /// FER-494 T1: the user confirmed the warnings of a first call ("Buka tetap").
-    #[serde(default)]
-    pub confirmed_untrusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpened {
     pub agent: AgentId,
-    /// `None` when nothing was started (a confirmation is needed first).
+    /// Always set on success (nothing is returned when nothing started).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<Via>,
     /// The argv that was started (or, in the test profile, would have been).
@@ -666,9 +665,6 @@ pub struct TerminalOpened {
     pub dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<&'static str>,
-    /// FER-494 T1: nothing was started; ask the user (warnings) and call again with
-    /// `confirmedUntrusted`.
-    pub needs_confirm: bool,
     /// FER-494 T1: project configuration, UNC or foreign-owned folder (one line each).
     pub warnings: Vec<String>,
 }
@@ -687,6 +683,43 @@ pub struct OpenContext<'a> {
     /// FER-494 T2: absolute, ACL-checked `wt.exe` (`None` = console route only).
     pub wt: Option<PathBuf>,
     pub spawn: &'a dyn Fn(Vec<TerminalCommand>) -> std::io::Result<TerminalCommand>,
+    /// FER-516: the native confirmation for an untrusted folder, called with (caption, text).
+    /// Production: `native_dialog::confirm_or_busy` (one dialog at a time app-wide; `Err(Busy)`
+    /// shows nothing). Never answered by the webview.
+    pub confirm: &'a dyn Fn(&str, &str) -> Result<bool, FsError>,
+}
+
+pub const CONFIRM_CAPTION: &str = "Konfirmasi membuka agent";
+
+/// The native dialog text, built by the backend only: agent, the full folder path and a short
+/// warning (plus the first findings). `None` when any character could reorder or hide text
+/// (control or format characters, e.g. U+202E) in the folder or in a finding: then no dialog is
+/// shown at all and nothing starts.
+pub fn confirm_text(agent_name: &str, folder: &Path, warnings: &[String]) -> Option<String> {
+    let path = folder.to_string_lossy();
+    let findings: Vec<&String> = warnings.iter().take(5).collect();
+    let bad = |c: char| c.is_control() || crate::hotlist::model::is_format_char(c);
+    if path.chars().any(bad) || findings.iter().any(|w| w.chars().any(bad)) {
+        return None;
+    }
+    let mut text = format!(
+        "Buka {agent_name} di folder ini?
+
+{path}
+
+"
+    );
+    text.push_str(
+        "Konfigurasi proyek di folder ini (mis. server MCP atau hook) bisa menjalankan program          di komputer ini saat agent dimulai. Lanjutkan hanya jika Anda memercayai folder dan          isinya.",
+    );
+    for w in findings {
+        text.push_str(
+            "
+- ",
+        );
+        text.push_str(w);
+    }
+    Some(text)
 }
 
 pub const DRY_RUN_LOG: &str = "agent-terminal-dry-run.jsonl";
@@ -753,17 +786,17 @@ pub fn open(
     })?;
     let warnings = assess(agent, &folder, ctx.folder_owner);
     let note = agent.def().terminal_note;
-    if !warnings.is_empty() && !agent.def().own_trust_prompt && !req.confirmed_untrusted {
-        return Ok(TerminalOpened {
-            agent,
-            via: None,
-            argv: Vec::new(),
-            cwd: folder.to_string_lossy().into_owned(),
-            dry_run: ctx.test_profile_config.is_some(),
-            note,
-            needs_confirm: true,
-            warnings,
-        });
+    if !warnings.is_empty() && !agent.def().own_trust_prompt {
+        // FER-516: the only authorization is a native dialog the backend raises itself; nothing
+        // the webview sends can stand in for it. A refusal, a busy guard or a text that cannot
+        // be shown safely all mean nothing starts.
+        let text = confirm_text(agent.def().name, &folder, &warnings)
+            .ok_or_else(|| AgentError::at("folder_invalid", &req.path))?;
+        match (ctx.confirm)(CONFIRM_CAPTION, &text) {
+            Ok(true) => {}
+            Err(e) if e.code == ErrorCode::Busy => return Err(AgentError::new("busy")),
+            Ok(false) | Err(_) => return Err(AgentError::new("cancelled")),
+        }
     }
     let pref = TerminalPref::parse(req.program.as_deref().unwrap_or("auto"));
     let cands = candidates(pref, agent, launch, &folder, ctx.wt.as_deref());
@@ -774,7 +807,6 @@ pub fn open(
         cwd: cmd.cwd.to_string_lossy().into_owned(),
         dry_run,
         note,
-        needs_confirm: false,
         warnings: warnings.clone(),
     };
     if ctx.test_profile_config.is_some() {
