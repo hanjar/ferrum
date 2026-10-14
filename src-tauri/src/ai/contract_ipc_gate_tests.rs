@@ -227,7 +227,8 @@ fn ai_intents_are_structurally_isolated_from_shell_open_and_execution() {
             "intent": {
                 "capability": "directories.sync",
                 "leftPane": "left",
-                "rightPane": "right"
+                "rightPane": "right",
+                "mode": "bidirectional"
             }
         }),
         json!({
@@ -249,10 +250,9 @@ fn ai_intents_are_structurally_isolated_from_shell_open_and_execution() {
 
     for sample in valid_samples {
         let req_id = sample["requestId"].as_str().unwrap().to_string();
-        let envelope = parse_intent_offered(sample, &req_id, &ALL_CAPABILITIES);
-        if let Ok(env) = envelope {
-            verify_intent_structure(&env.intent);
-        }
+        let env = parse_intent_offered(sample, &req_id, &ALL_CAPABILITIES)
+            .expect("valid sample envelope must parse successfully");
+        verify_intent_structure(&env.intent);
     }
 
     // 3. Any envelope specifying any execution capability or field is rejected by the schema parser.
