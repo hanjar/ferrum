@@ -16,12 +16,20 @@
   import { activity } from '../stores/activityStore.svelte';
   import { folderSizes } from '../stores/folderSizesStore.svelte';
   import { getAction, isEnabled, labelOf, runAction, shortcutLabel } from '../actions';
+  import ColumnResizeHandle from './ColumnResizeHandle.svelte';
+  import { columns as columnsStore } from '../stores/columnsStore.svelte';
   import {
     columnLayout,
     extensionText,
     displayName,
     DEFAULT_COLUMN_CONFIG,
+    DEFAULT_FILE_LIST_COLUMN_WIDTHS,
+    FILE_LIST_COLUMN_MINS,
+    FILE_LIST_COLUMN_MAX,
+    FILE_LIST_DEFAULT_COMMENT_WIDTH,
     type ColumnConfig,
+    type FileListColumnWidths,
+    type ResizableColumnId,
   } from '../columns';
 
   let {
@@ -35,6 +43,8 @@
     mode = 'full',
     /** F2-365 Custom Columns: visible columns + order for Full mode. */
     columns = DEFAULT_COLUMN_CONFIG,
+    /** FER-541: Optional column widths override / external state. */
+    columnWidths,
     /** F2-27 Comments view: extra comment column fed by the sidecar map. */
     showComments = false,
     comments,
@@ -43,6 +53,8 @@
     sortKey = 'name',
     sortDir = 1,
     onsort,
+    oncolumnwidthchange,
+    oncolumnwidthcommit,
     onlistkey,
     onlistfocus,
     onrowclick,
@@ -58,12 +70,15 @@
     notice?: string | null;
     mode?: 'brief' | 'full' | 'thumbnail';
     columns?: ColumnConfig;
+    columnWidths?: FileListColumnWidths;
     showComments?: boolean;
     comments?: Record<string, string>;
     viewportOverride?: number;
     sortKey?: 'name' | 'size' | 'modified' | 'extension' | 'unsorted';
     sortDir?: 1 | -1;
     onsort?: (key: 'name' | 'size' | 'modified' | 'extension') => void;
+    oncolumnwidthchange?: (col: ResizableColumnId, width: number) => void;
+    oncolumnwidthcommit?: (col: ResizableColumnId, width: number) => void;
     onlistkey?: (e: KeyboardEvent) => void;
     /** FER-489: the list container received focus (pane puts a cursor on a row). */
     onlistfocus?: () => void;
@@ -77,10 +92,119 @@
   const thumbnails = $derived(mode === 'thumbnail');
   // Comments column (F2-27) exists only in Full mode, like Size/Modified.
   const commentsView = $derived(showComments && !brief);
+
+  let commentHeadEl = $state<HTMLElement | undefined>();
+  let measuredCommentWidth = $state(FILE_LIST_DEFAULT_COMMENT_WIDTH);
+
+  $effect(() => {
+    const el = commentHeadEl;
+    if (!el) return;
+    const initial = el.getBoundingClientRect().width;
+    if (Number.isFinite(initial) && initial > 0) {
+      measuredCommentWidth = Math.round(initial);
+    }
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
+        if (Number.isFinite(w) && w > 0) measuredCommentWidth = Math.round(w);
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  let dragWidths = $state<Partial<FileListColumnWidths>>({});
+
+  const committedWidths = $derived<FileListColumnWidths>({
+    ...columnsStore.widths,
+    ...columnWidths,
+  });
+
+  const liveWidths = $derived<FileListColumnWidths>({
+    ...committedWidths,
+    ...dragWidths,
+  });
+
+  function effectiveColWidth(col: ResizableColumnId): number {
+    if (col === 'comment') {
+      if (liveWidths.comment !== null) return liveWidths.comment;
+      return measuredCommentWidth;
+    }
+    return liveWidths[col] ?? DEFAULT_FILE_LIST_COLUMN_WIDTHS[col] ?? 72;
+  }
+
+  let rafId: number | null = null;
+  let pendingDrag: { col: ResizableColumnId; width: number } | null = null;
+
+  function handleColChange(col: ResizableColumnId, width: number): void {
+    // In production browser environments, throttle pointermove to screen refresh rate (60/120Hz)
+    // via requestAnimationFrame so rapid pointer events don't trigger redundant updates.
+    // In test environments (node/jsdom), update synchronously so tests can verify live updates.
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.requestAnimationFrame === 'function' &&
+      typeof process === 'undefined'
+    ) {
+      pendingDrag = { col, width };
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          if (pendingDrag) {
+            dragWidths = { ...dragWidths, [pendingDrag.col]: pendingDrag.width };
+            oncolumnwidthchange?.(pendingDrag.col, pendingDrag.width);
+            pendingDrag = null;
+          }
+        });
+      }
+    } else {
+      dragWidths = { ...dragWidths, [col]: width };
+      oncolumnwidthchange?.(col, width);
+    }
+  }
+
+  function handleColCommit(col: ResizableColumnId, width: number): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+    columnsStore.setWidth(col, width);
+    oncolumnwidthcommit?.(col, width);
+  }
+
+  function handleColCancel(col: ResizableColumnId): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+  }
+
+  function handleColReset(col: ResizableColumnId): void {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingDrag = null;
+    const next = { ...dragWidths };
+    delete next[col];
+    dragWidths = next;
+    columnsStore.resetWidth(col);
+  }
+
   // F2-365: Full mode renders the configured columns; the default config
   // reproduces the built-in Name/Size/Modified grid exactly.
   const layout = $derived(
-    brief || thumbnails ? null : columnLayout(columns, { comments: commentsView }),
+    brief || thumbnails
+      ? null
+      : columnLayout(columns, { comments: commentsView, widths: liveWidths }),
   );
 
   let bodyEl = $state<HTMLElement | undefined>();
@@ -299,20 +423,64 @@
           Name <span class="arrow">{sortKey === 'name' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
         </button>
       {:else if c.id === 'comment'}
-        <div class="hComment">Comment</div>
+        <div class="hComment" bind:this={commentHeadEl}>
+          <span>Comment</span>
+          <ColumnResizeHandle
+            label="Resize Comment column"
+            value={effectiveColWidth('comment')}
+            min={FILE_LIST_COLUMN_MINS.comment}
+            max={FILE_LIST_COLUMN_MAX}
+            step={16}
+            side="left"
+            onchange={(w) => handleColChange('comment', w)}
+            oncommit={(w) => handleColCommit('comment', w)}
+            oncancel={() => handleColCancel('comment')}
+            onreset={() => handleColReset('comment')}
+          />
+        </div>
       {:else}
-        <button
-          class={c.id === 'size' ? 'hSize' : c.id === 'extension' ? 'hExt' : 'hMod'}
-          onclick={() => onsort?.(c.id as 'size' | 'extension' | 'modified')}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div
+          class="{c.id === 'size' ? 'hSize' : c.id === 'extension' ? 'hExt' : 'hMod'} hCol"
+          onclick={(e) => {
+            if (
+              e.target !== e.currentTarget &&
+              (e.target as HTMLElement).closest('[role="separator"]')
+            )
+              return;
+            onsort?.(c.id as 'size' | 'extension' | 'modified');
+          }}
         >
-          {#if c.id === 'size'}
-            <span class="arrow">{sortKey === 'size' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
-          {/if}
-          {c.label}
-          {#if c.id !== 'size'}
-            <span class="arrow">{sortKey === c.id ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
-          {/if}
-        </button>
+          <button
+            type="button"
+            class="sortBtn"
+            class:hSizeBtn={c.id === 'size'}
+            onclick={(e) => {
+              e.stopPropagation();
+              onsort?.(c.id as 'size' | 'extension' | 'modified');
+            }}
+          >
+            {#if c.id === 'size'}
+              <span class="arrow">{sortKey === 'size' ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
+            {/if}
+            {c.label}
+            {#if c.id !== 'size'}
+              <span class="arrow">{sortKey === c.id ? (sortDir === 1 ? '↑' : '↓') : ''}</span>
+            {/if}
+          </button>
+          <ColumnResizeHandle
+            label={`Resize ${c.label} column`}
+            value={effectiveColWidth(c.id as ResizableColumnId)}
+            min={FILE_LIST_COLUMN_MINS[c.id as ResizableColumnId]}
+            max={FILE_LIST_COLUMN_MAX}
+            step={16}
+            side="left"
+            onchange={(w) => handleColChange(c.id as ResizableColumnId, w)}
+            oncommit={(w) => handleColCommit(c.id as ResizableColumnId, w)}
+            oncancel={() => handleColCancel(c.id as ResizableColumnId)}
+            onreset={() => handleColReset(c.id as ResizableColumnId)}
+          />
+        </div>
       {/if}
     {/each}
   {:else}
@@ -509,7 +677,9 @@
   .row.withComments {
     grid-template-columns: minmax(0, 1fr) 72px 132px minmax(0, 1.6fr);
   }
-  .head > button {
+  .head > button,
+  .sortBtn {
+    position: relative;
     border: 0;
     padding: 0;
     background: transparent;
@@ -519,9 +689,29 @@
     white-space: nowrap;
     overflow: hidden;
     text-align: left;
+    cursor: pointer;
   }
-  .head > button:hover {
+  .head > button:hover,
+  .sortBtn:hover {
     color: var(--text2);
+  }
+  .hCol {
+    position: relative;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .sortBtn {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .hSize .sortBtn {
+    justify-content: flex-end;
+    text-align: right;
   }
   .arrow {
     color: var(--accentInk);
@@ -637,6 +827,7 @@
     text-overflow: ellipsis;
   }
   .hComment {
+    position: relative;
     white-space: nowrap;
     overflow: hidden;
   }

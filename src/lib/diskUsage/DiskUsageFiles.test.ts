@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
 
 const duMocks = vi.hoisted(() => ({
   start: vi.fn(),
@@ -547,5 +548,55 @@ describe('column resizing (FER-540)', () => {
 
     getItemSpy.mockRestore();
     setItemSpy.mockRestore();
+  });
+
+  it('reactive auto-width: resize observer changes aria-valuenow and first drag does not jump', async () => {
+    let observerCallback: ResizeObserverCallback | undefined;
+    class TestResizeObserver implements ResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        observerCallback = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = TestResizeObserver;
+
+    try {
+      preloadFiles();
+      const { container } = renderFiles();
+      const nameResizer = container.querySelector(
+        '[aria-label="Ubah lebar kolom Nama"]',
+      ) as HTMLElement;
+      expect(nameResizer.getAttribute('aria-valuenow')).toBe('400');
+
+      observerCallback?.(
+        [
+          {
+            contentRect: { width: 340, height: 100 },
+            borderBoxSize: [{ inlineSize: 340, blockSize: 100 }],
+          } as unknown as ResizeObserverEntry,
+        ],
+        {} as ResizeObserver,
+      );
+      await tick();
+
+      expect(nameResizer.getAttribute('aria-valuenow')).toBe('340');
+
+      nameResizer.setPointerCapture = vi.fn();
+      nameResizer.hasPointerCapture = vi.fn(() => true);
+      nameResizer.releasePointerCapture = vi.fn();
+
+      fireEvent.pointerDown(nameResizer, { button: 0, clientX: 500, pointerId: 1 });
+      fireEvent.pointerMove(nameResizer, { clientX: 520, pointerId: 1 });
+      fireEvent.pointerUp(nameResizer, { clientX: 520, pointerId: 1 });
+      await tick();
+
+      expect(nameResizer.getAttribute('aria-valuenow')).toBe('360');
+      expect(loadDuFilesColumnWidths().name).toBe(360);
+    } finally {
+      globalThis.ResizeObserver = origRO;
+    }
   });
 });

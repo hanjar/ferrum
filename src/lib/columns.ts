@@ -10,8 +10,59 @@
  * configures visibility and order of the remaining columns.
  */
 import type { SortSpec } from './selection';
+import { createColumnResize } from './columnResize';
 
 export type ColumnId = 'name' | 'extension' | 'size' | 'modified';
+
+export type ResizableColumnId = 'extension' | 'size' | 'modified' | 'comment';
+
+export const RESIZABLE_COLUMNS: readonly ResizableColumnId[] = [
+  'extension',
+  'size',
+  'modified',
+  'comment',
+] as const;
+
+export type FileListColumnWidths = Record<ResizableColumnId, number | null>;
+
+export const DEFAULT_FILE_LIST_COLUMN_WIDTHS: FileListColumnWidths = {
+  extension: 72,
+  size: 72,
+  modified: 132,
+  comment: null,
+};
+
+export const FILE_LIST_COLUMN_MINS: Record<ResizableColumnId, number> = {
+  extension: 40,
+  size: 56,
+  modified: 90,
+  comment: 80,
+};
+
+export const FILE_LIST_COLUMN_MAX = 2000;
+export const FILE_LIST_DEFAULT_COMMENT_WIDTH = 200;
+
+export const fileListColumnResize = createColumnResize<ResizableColumnId>({
+  keys: RESIZABLE_COLUMNS,
+  defaults: DEFAULT_FILE_LIST_COLUMN_WIDTHS,
+  mins: FILE_LIST_COLUMN_MINS,
+  max: FILE_LIST_COLUMN_MAX,
+});
+
+export function clampFileListColumnWidth(col: ResizableColumnId, width: number): number {
+  return fileListColumnResize.clamp(col, width);
+}
+
+export function sanitizeFileListColumnWidths(raw: unknown): FileListColumnWidths {
+  return fileListColumnResize.sanitize(raw) as FileListColumnWidths;
+}
+
+export function isDefaultFileListColumnWidths(widths: FileListColumnWidths): boolean {
+  for (const k of RESIZABLE_COLUMNS) {
+    if (widths[k] !== DEFAULT_FILE_LIST_COLUMN_WIDTHS[k]) return false;
+  }
+  return true;
+}
 
 /** Ordered visible-column list; `name` first (validated invariant). */
 export type ColumnConfig = ColumnId[];
@@ -40,6 +91,9 @@ const isColumnId = (v: unknown): v is ColumnId =>
  * built-in default; a valid list is normalised so `name` leads.
  */
 export function parseColumnConfig(raw: unknown): ColumnConfig {
+  if (typeof raw === 'object' && raw !== null && 'columns' in raw) {
+    return parseColumnConfig((raw as { columns: unknown }).columns);
+  }
   if (!Array.isArray(raw)) return [...DEFAULT_COLUMN_CONFIG];
   if (!raw.every(isColumnId)) return [...DEFAULT_COLUMN_CONFIG];
   const ids = raw as ColumnId[];
@@ -73,6 +127,8 @@ export interface ColumnLayout {
   gridTemplate: string;
 }
 
+export type ColumnWidths = Partial<Record<ColumnId | 'comment', number | null>>;
+
 const TRACKS: Record<ColumnId, string> = {
   name: 'minmax(0, 1fr)',
   extension: '72px',
@@ -80,18 +136,45 @@ const TRACKS: Record<ColumnId, string> = {
   modified: '132px',
 };
 
-/** Built-in Full mode layout, with the optional Comments column appended. */
+/** Built-in Full mode layout, with the optional Comments column appended and optional width overrides. */
 export function columnLayout(
   config: ColumnConfig = DEFAULT_COLUMN_CONFIG,
-  opts: { comments?: boolean } = {},
+  opts: {
+    comments?: boolean;
+    widths?: ColumnWidths;
+    useCssVars?: boolean;
+  } = {},
 ): ColumnLayout {
-  const columns: ColumnLayoutColumn[] = config.map((id) => ({
-    id,
-    label: COLUMN_LABELS[id],
-    track: TRACKS[id],
-  }));
+  const columns: ColumnLayoutColumn[] = config.map((id) => {
+    let track = TRACKS[id];
+    if (id !== 'name') {
+      const fallback =
+        opts.widths &&
+        typeof opts.widths[id] === 'number' &&
+        Number.isFinite(opts.widths[id]) &&
+        (opts.widths[id] as number) > 0
+          ? `${Math.round(opts.widths[id] as number)}px`
+          : TRACKS[id];
+      track = opts.useCssVars ? `var(--col-${id}, ${fallback})` : fallback;
+    }
+    return {
+      id,
+      label: COLUMN_LABELS[id],
+      track,
+    };
+  });
   if (opts.comments) {
-    columns.push({ id: 'comment', label: 'Comment', track: 'minmax(0, 1.6fr)' });
+    let commentFallback = 'minmax(0, 1.6fr)';
+    if (opts.widths) {
+      const w = opts.widths.comment;
+      if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
+        commentFallback = `${Math.round(w)}px`;
+      }
+    }
+    const commentTrack = opts.useCssVars
+      ? `var(--col-comment, ${commentFallback})`
+      : commentFallback;
+    columns.push({ id: 'comment', label: 'Comment', track: commentTrack });
   }
   return { columns, gridTemplate: columns.map((c) => c.track).join(' ') };
 }

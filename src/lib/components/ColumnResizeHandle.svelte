@@ -8,6 +8,15 @@
    * - Keyboard ArrowLeft / ArrowRight adjusts by step; Home/End jumps to min/max.
    * - Double-click resets to default via onreset.
    * - Changes are committed on pointerup, keyboard, or reset (not on every pointermove).
+   *
+   * NOTE: The parent element of ColumnResizeHandle MUST have `position: relative`
+   * (or sticky/absolute) because this handle is absolutely positioned (`top: 0;`).
+   *
+   * NOTE on `side="left"`: When `side="left"` (used for trailing columns whose left boundary
+   * is dragged against a flexible leading column like Name in FileList), dragging to the left
+   * increases column width and dragging to the right decreases it. Keyboard ArrowLeft and
+   * ArrowRight directions are inverted accordingly (ArrowLeft widens the column to the left,
+   * while ArrowRight narrows it), matching user expectations and drag behavior.
    */
   let {
     label,
@@ -15,8 +24,10 @@
     min,
     max = 2000,
     step = 16,
+    side = 'right',
     onchange,
     oncommit,
+    oncancel,
     onreset,
   }: {
     label: string;
@@ -24,8 +35,10 @@
     min: number;
     max?: number;
     step?: number;
+    side?: 'left' | 'right';
     onchange: (width: number) => void;
     oncommit?: (width: number) => void;
+    oncancel?: () => void;
     onreset?: () => void;
   } = $props();
 
@@ -49,7 +62,8 @@
 
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
-    const delta = e.clientX - dragStartX;
+    const sign = side === 'left' ? -1 : 1;
+    const delta = (e.clientX - dragStartX) * sign;
     const next = clamp(dragStartWidth + delta);
     onchange(next);
   }
@@ -58,17 +72,37 @@
     if (!dragging) return;
     dragging = false;
     if (el?.hasPointerCapture?.(e.pointerId)) {
-      el.releasePointerCapture(e.pointerId);
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
     }
-    const delta = e.clientX - dragStartX;
+    const sign = side === 'left' ? -1 : 1;
+    const delta = (e.clientX - dragStartX) * sign;
     const finalWidth = clamp(dragStartWidth + delta);
     oncommit?.(finalWidth);
   }
 
+  function cancelDrag(e?: PointerEvent) {
+    if (!dragging) return;
+    dragging = false;
+    if (e && el?.hasPointerCapture?.(e.pointerId)) {
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+    onchange(dragStartWidth);
+    oncancel?.();
+  }
+
   function onKeydown(e: KeyboardEvent) {
+    const sign = side === 'left' ? -1 : 1;
     let next: number | null = null;
-    if (e.key === 'ArrowLeft') next = value - step;
-    else if (e.key === 'ArrowRight') next = value + step;
+    if (e.key === 'ArrowLeft') next = value - step * sign;
+    else if (e.key === 'ArrowRight') next = value + step * sign;
     else if (e.key === 'Home') next = min;
     else if (e.key === 'End') next = max;
 
@@ -77,6 +111,10 @@
     const clamped = clamp(next);
     onchange(clamped);
     oncommit?.(clamped);
+  }
+
+  function onClick(e: MouseEvent) {
+    e.stopPropagation();
   }
 
   function onDblClick(e: MouseEvent) {
@@ -101,6 +139,8 @@
 <div
   bind:this={el}
   class="colResizer"
+  class:side-left={side === 'left'}
+  class:side-right={side === 'right'}
   class:dragging
   role="separator"
   tabindex="0"
@@ -112,8 +152,9 @@
   onpointerdown={onPointerDown}
   onpointermove={onPointerMove}
   onpointerup={endDrag}
-  onpointercancel={endDrag}
-  onlostpointercapture={endDrag}
+  onpointercancel={cancelDrag}
+  onlostpointercapture={cancelDrag}
+  onclick={onClick}
   ondblclick={onDblClick}
   onkeydown={onKeydown}
 ></div>
@@ -122,7 +163,6 @@
   .colResizer {
     position: absolute;
     top: 0;
-    right: 0;
     width: 8px;
     height: 100%;
     cursor: col-resize;
@@ -130,12 +170,27 @@
     touch-action: none;
     z-index: 2;
   }
-  .colResizer::after {
+  .colResizer.side-right {
+    right: 0;
+  }
+  .colResizer.side-left {
+    left: 0;
+  }
+  .colResizer.side-right::after {
     content: '';
     position: absolute;
     top: 20%;
     bottom: 20%;
     right: 3px;
+    width: 1px;
+    background: var(--line2);
+  }
+  .colResizer.side-left::after {
+    content: '';
+    position: absolute;
+    top: 20%;
+    bottom: 20%;
+    left: 3px;
     width: 1px;
     background: var(--line2);
   }

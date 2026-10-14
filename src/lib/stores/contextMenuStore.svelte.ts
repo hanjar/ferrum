@@ -79,7 +79,7 @@ class ContextMenuStore {
 export const contextMenu = new ContextMenuStore();
 
 export interface MenuFocusReturn<T = string> {
-  activeId: T | null;
+  readonly activeId: T | null;
   setOpener(el: HTMLElement | undefined, id?: T | null): void;
   clear(): void;
 }
@@ -88,6 +88,9 @@ export interface MenuFocusReturn<T = string> {
  * Shared helper for components opening contextMenu from trigger buttons (e.g. action dropdowns).
  * Retains the trigger element and restores focus to it when the menu closes,
  * tracking the currently active item id for aria-expanded states.
+ *
+ * NOTE: This helper uses Svelte's `$effect` rune internally, so it must only
+ * be invoked during component initialization (top-level `<script>` block).
  */
 export function createMenuFocusReturn<T = string>(): MenuFocusReturn<T> {
   let opener: HTMLElement | undefined;
@@ -104,9 +107,6 @@ export function createMenuFocusReturn<T = string>(): MenuFocusReturn<T> {
   return {
     get activeId(): T | null {
       return activeId;
-    },
-    set activeId(v: T | null) {
-      activeId = v;
     },
     setOpener(el: HTMLElement | undefined, id?: T | null): void {
       opener = el;

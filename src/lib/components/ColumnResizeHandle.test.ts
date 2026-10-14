@@ -145,4 +145,124 @@ describe('ColumnResizeHandle', () => {
     fireEvent.dblClick(handle);
     expect(onreset).toHaveBeenCalledTimes(1);
   });
+
+  it('pointercancel does NOT commit and reverts to start width', () => {
+    const onchange = vi.fn();
+    const oncommit = vi.fn();
+    const { getByRole } = render(ColumnResizeHandle, {
+      label: 'Ukuran',
+      value: 100,
+      min: 56,
+      max: 500,
+      onchange,
+      oncommit,
+    });
+
+    const handle = getByRole('separator');
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 150, pointerId: 1 });
+    expect(onchange).toHaveBeenLastCalledWith(150);
+
+    // Cancel drag
+    fireEvent.pointerCancel(handle, { pointerId: 1 });
+    expect(onchange).toHaveBeenLastCalledWith(100);
+    expect(oncommit).not.toHaveBeenCalled();
+  });
+
+  it('lostpointercapture without pointerup reverts to start width and does NOT commit', () => {
+    const onchange = vi.fn();
+    const oncommit = vi.fn();
+    const { getByRole } = render(ColumnResizeHandle, {
+      label: 'Ukuran',
+      value: 100,
+      min: 56,
+      max: 500,
+      onchange,
+      oncommit,
+    });
+
+    const handle = getByRole('separator');
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 160, pointerId: 1 });
+    expect(onchange).toHaveBeenLastCalledWith(160);
+
+    // Lost capture while still dragging
+    fireEvent(handle, new Event('lostpointercapture'));
+    expect(onchange).toHaveBeenLastCalledWith(100);
+    expect(oncommit).not.toHaveBeenCalled();
+  });
+
+  it('supports side="left": dragging/arrow left widens, dragging/arrow right shrinks', () => {
+    const onchange = vi.fn();
+    const oncommit = vi.fn();
+    const { getByRole } = render(ColumnResizeHandle, {
+      label: 'Ext',
+      value: 72,
+      min: 40,
+      max: 500,
+      step: 16,
+      side: 'left',
+      onchange,
+      oncommit,
+    });
+
+    const handle = getByRole('separator');
+    expect(handle.classList.contains('side-left')).toBe(true);
+
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    // Drag left (clientX 100 -> 70, delta -30): side=left widens by 30 -> 72 + 30 = 102
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 70, pointerId: 1 });
+    expect(onchange).toHaveBeenLastCalledWith(102);
+
+    fireEvent.pointerUp(handle, { clientX: 70, pointerId: 1 });
+    expect(oncommit).toHaveBeenLastCalledWith(102);
+
+    // ArrowLeft widens (+16) -> 72 + 16 = 88
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    expect(onchange).toHaveBeenLastCalledWith(88);
+    expect(oncommit).toHaveBeenLastCalledWith(88);
+
+    // ArrowRight shrinks (-16) -> 72 - 16 = 56
+    fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    expect(onchange).toHaveBeenLastCalledWith(56);
+    expect(oncommit).toHaveBeenLastCalledWith(56);
+  });
+
+  it('stops propagation on click, dblclick, and pointerdown', () => {
+    const { getByRole } = render(ColumnResizeHandle, {
+      label: 'Size',
+      value: 80,
+      min: 50,
+      onchange: vi.fn(),
+    });
+
+    const handle = getByRole('separator');
+
+    const clickEvent = new MouseEvent('click', { bubbles: true });
+    vi.spyOn(clickEvent, 'stopPropagation');
+    handle.dispatchEvent(clickEvent);
+    expect(clickEvent.stopPropagation).toHaveBeenCalled();
+
+    const dblClickEvent = new MouseEvent('dblclick', { bubbles: true });
+    vi.spyOn(dblClickEvent, 'stopPropagation');
+    handle.dispatchEvent(dblClickEvent);
+    expect(dblClickEvent.stopPropagation).toHaveBeenCalled();
+
+    const pointerDownEvent = new PointerEvent('pointerdown', { bubbles: true, button: 0 });
+    vi.spyOn(pointerDownEvent, 'stopPropagation');
+    handle.dispatchEvent(pointerDownEvent);
+    expect(pointerDownEvent.stopPropagation).toHaveBeenCalled();
+  });
 });
