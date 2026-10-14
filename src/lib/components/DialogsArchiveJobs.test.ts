@@ -169,6 +169,35 @@ describe('cancel is not shown as an error', () => {
     expect(screen.queryByText(/Gagal/)).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
   });
+
+  it('FER-508 (P3): sanitizes bidi, control characters, and line/paragraph separators in test report failure list', async () => {
+    render(Dialogs);
+    dialogs.open({
+      kind: 'testReport',
+      title: 'Hasil tes',
+      reports: [
+        {
+          archivePath: 'corrupt.zip',
+          status: 'failed',
+          passed: 0,
+          total: 1,
+          failures: [
+            {
+              memberPath: 'evil\u202Edir/\u2028file\u2029\nname.txt',
+              status: 'failed',
+              message: 'CRC mismatch',
+            },
+          ],
+        },
+      ],
+    });
+    await tick();
+    const sanitized = 'evil\\u{202E}dir/\\u{2028}file\\u{2029}\\nname.txt';
+    expect(screen.getByText(sanitized)).toBeTruthy();
+    expect(screen.queryByText(/\u202E/)).toBeNull();
+    expect(screen.queryByText(/\u2028/)).toBeNull();
+    expect(screen.queryByText(/\u2029/)).toBeNull();
+  });
 });
 
 describe('multipart dialog', () => {

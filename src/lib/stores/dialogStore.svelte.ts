@@ -277,31 +277,105 @@ async function safeListenProgress(
   return () => {};
 }
 
+/**
+ * P3-2: Display sanitizer for member names in error messages and test reports.
+ * Replaces control characters (\n, \r, \t, \0, C0/C1), bidi override/isolate/mark
+ * characters (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C), and Unicode line/paragraph
+ * separators (U+2028, U+2029) with visible escapes (e.g. \u{202E}, \n, \u{2028}) so raw
+ * archive member paths cannot spoof UI text or break layouts.
+ */
+export function sanitizeMemberPath(member: string): string {
+  return member.replace(
+    /[\p{Cc}\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu,
+    (ch) => {
+      switch (ch) {
+        case '\n':
+          return '\\n';
+        case '\r':
+          return '\\r';
+        case '\t':
+          return '\\t';
+        case '\0':
+          return '\\0';
+        default: {
+          const hex = (ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+          return `\\u{${hex}}`;
+        }
+      }
+    },
+  );
+}
+
 class DialogStore {
-  current = $state<Dialog | null>(null);
+  private _current = $state<Dialog | null>(null);
+  queue = $state<Dialog[]>([]);
+
+  get current(): Dialog | null {
+    return this._current;
+  }
+
+  set current(val: Dialog | null) {
+    const prev = this._current;
+    this._current = val;
+    if (val === null) {
+      if (prev?.kind === 'password') prev.cancel?.();
+      if (prev?.kind === 'fastScanOffer') prev.choose(null, false);
+      for (const d of this.queue) {
+        if (d.kind === 'password') d.cancel?.();
+        if (d.kind === 'fastScanOffer') d.choose(null, false);
+      }
+      this.queue = [];
+    }
+  }
+
+  closeAll(): void {
+    this.current = null;
+  }
+
+  reset(): void {
+    this.current = null;
+  }
 
   open(d: Dialog) {
-    this.current = d;
+    if (this._current === null) {
+      this._current = d;
+      return;
+    }
+    const isPrompt = (item: Dialog | null): boolean =>
+      item?.kind === 'password' || item?.kind === 'fastScanOffer';
+
+    if (isPrompt(d)) {
+      this.queue.push(d);
+      return;
+    }
+
+    if (isPrompt(this._current)) {
+      this.queue.unshift(this._current);
+    }
+
+    this._current = d;
   }
 
   close() {
-    const d = this.current;
+    if (this._current === null) return;
+    const d = this._current;
     // FER-79: closing a running job's dialog (Esc) cancels the job. The dialog stays up, marked
     // "cancelling", until the job really stops and `withProgress` closes it.
-    if (d?.kind === 'archiveProgress') {
+    if (d.kind === 'archiveProgress') {
       this.cancelArchiveJob();
       return;
     }
-    this.current = null;
     // FER-460: a dismissed scan offer must still settle its caller (no scan).
-    if (d?.kind === 'fastScanOffer') d.choose(null, false);
+    if (d.kind === 'fastScanOffer') d.choose(null, false);
     // FER-73: a dismissed password prompt settles its caller and lets it drop the password.
-    if (d?.kind === 'password') d.cancel?.();
+    if (d.kind === 'password') d.cancel?.();
+
+    this._current = this.queue.shift() ?? null;
   }
 
   /** Close without any cancel/settle hooks: a flow moving on to its next step. */
   private dismiss() {
-    this.current = null;
+    this._current = this.queue.shift() ?? null;
   }
 
   // ── FER-79: cancellable job with progress ─────────────────────────────
@@ -334,8 +408,10 @@ class DialogStore {
       return await run(requestId);
     } finally {
       unlisten();
-      const d = this.current;
-      if (d?.kind === 'archiveProgress' && d.requestId === requestId) this.current = null;
+      const d = this._current;
+      if (d?.kind === 'archiveProgress' && d.requestId === requestId) {
+        this._current = this.queue.shift() ?? null;
+      }
     }
   }
 
@@ -673,7 +749,9 @@ class DialogStore {
               void this.showMultipart(job.archivePath, msg, errorTitle);
               return;
             }
-            this.open({ kind: 'error', title: errorTitle, message: msg });
+            const member = e instanceof FsError ? e.memberPath : undefined;
+            const displayMsg = member ? `Gagal di: ${sanitizeMemberPath(member)}\n${msg}` : msg;
+            this.open({ kind: 'error', title: errorTitle, message: displayMsg });
             return;
           }
           this.open({
@@ -787,7 +865,7 @@ class DialogStore {
             await this.showMultipart(job.archivePath, msg, errorTitle);
             return;
           }
-          const displayMsg = member ? `Gagal di: ${member}\n${msg}` : msg;
+          const displayMsg = member ? `Gagal di: ${sanitizeMemberPath(member)}\n${msg}` : msg;
           this.open({ kind: 'error', title: errorTitle, message: displayMsg });
           return;
         }

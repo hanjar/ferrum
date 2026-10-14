@@ -191,6 +191,10 @@ JSON object matching the schema. Reply again with exactly one JSON object and no
 pub enum ProviderErrorKind {
     InvalidConfig,
     UnsafeEndpoint,
+    /// FER-512 P3-1: the request carries an endpoint that differs from the saved AI setup
+    /// (or there is no saved setup). The request is refused BEFORE any network is touched;
+    /// the endpoint an outgoing AI request uses is always the saved one, never the webview's.
+    EndpointMismatch,
     Credential,
     Auth,
     RateLimited,
@@ -215,6 +219,9 @@ impl ProviderErrorKind {
         match self {
             Self::InvalidConfig => "Invalid provider configuration",
             Self::UnsafeEndpoint => "Provider endpoint must use HTTPS or explicit localhost HTTP",
+            Self::EndpointMismatch => {
+                "The AI endpoint differs from the saved setup; reload Settings and save it first"
+            }
             Self::Credential => "Provider credential is missing or unavailable",
             Self::Auth => "Provider rejected the credential",
             Self::RateLimited => "Provider rate limit reached",

@@ -175,7 +175,8 @@ class UiState {
   indexerFolderSizes: boolean = $state(false);
   /** FER-477b: sync may skip content reads the indexer journal proves unnecessary (opt-in). */
   syncJournalSkip: boolean = $state(false);
-  /** FER-505: path to user's WinRAR Rar.exe (null = disabled). */
+  /** FER-505/511: display-only mirror of the Rar.exe path stored on disk. Never persisted by
+   *  the webview — it changes only through archive_rar_tool_set_path (native confirmation). */
   rarExePath: string | null = $state(null);
   /** Preferred terminal for Open Terminal Here (F2-25), persisted in prefs. */
   terminal: TerminalChoice = $state('auto');

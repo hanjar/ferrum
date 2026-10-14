@@ -341,6 +341,32 @@ describe('AiSettings with the desktop backend (FER-430)', () => {
     expect(localStorage.getItem(SETUP_STORAGE_KEY)).toBeNull();
     expect(JSON.stringify(invokeMock.mock.calls)).not.toContain(KEY);
   });
+
+  it('FER-512: a declined native confirmation saves nothing and never sends the key', async () => {
+    render(AiSettings, {});
+    await waitFor(() =>
+      expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('m1'),
+    );
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'ai_setup_save') throw { kind: 'not_confirmed' };
+      if (command === 'ai_credential_status') return { configured };
+      throw new Error('unexpected ' + command);
+    });
+    await fill();
+    await fireEvent.input(keyField(), { target: { value: KEY } });
+    await fireEvent.click(button('Save'));
+    await waitFor(() =>
+      expect(screen.getByRole('alert', { name: 'Save result' }).textContent).toContain(
+        'not_confirmed',
+      ),
+    );
+    expect(screen.getByRole('alert', { name: 'Save result' }).textContent).toContain(
+      'native confirmation was declined',
+    );
+    // The key never travels: the setup was not stored, so the key step never ran.
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'ai_credential_save')).toBe(false);
+    expect(keyField().value).toBe(KEY);
+  });
 });
 
 describe('AiSettings in a test profile (FER-457)', () => {

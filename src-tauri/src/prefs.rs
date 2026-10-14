@@ -81,8 +81,36 @@ pub struct Prefs {
     pub preserve_timestamps: bool,
     pub preserve_permissions: bool,
     /// FER-505: optional path to user's Rar.exe for creating RAR archives (default None).
+    /// FER-511: written only by `archive_rar_tool_set_path` after a native confirmation;
+    /// `save_prefs` from the webview always keeps the value on disk.
     #[serde(default)]
     pub rar_exe_path: Option<String>,
+    /// FER-511: identity of the `Rar.exe` the user confirmed. A path without a fingerprint is
+    /// "not confirmed" and is never executed.
+    #[serde(default)]
+    pub rar_exe_fingerprint: Option<RarExeFingerprint>,
+}
+
+/// FER-511: `{ size, modified, sha256 }` of the confirmed `Rar.exe`, re-checked before every run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RarExeFingerprint {
+    /// File size in bytes.
+    pub size: u64,
+    /// Last write time, nanoseconds since the Unix epoch.
+    pub modified: u64,
+    /// Lowercase hex SHA-256 of the file content (64 chars).
+    pub sha256: String,
+}
+
+impl RarExeFingerprint {
+    fn is_well_formed(&self) -> bool {
+        self.sha256.len() == 64
+            && self
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
 }
 
 /// FER-395 tab behavior: how tabs open, close, size and persist.
@@ -191,6 +219,7 @@ impl Default for Prefs {
             preserve_timestamps: true,
             preserve_permissions: false,
             rar_exe_path: None,
+            rar_exe_fingerprint: None,
         }
     }
 }
@@ -336,6 +365,16 @@ impl Prefs {
                 self.rar_exe_path = Some(trimmed.to_string());
             }
         }
+        // FER-511: a fingerprint only means something next to its path, and a malformed one
+        // is dropped (the path then counts as not confirmed).
+        if self.rar_exe_path.is_none()
+            || self
+                .rar_exe_fingerprint
+                .as_ref()
+                .is_some_and(|f| !f.is_well_formed())
+        {
+            self.rar_exe_fingerprint = None;
+        }
     }
 }
 
@@ -410,6 +449,44 @@ pub fn load_from(dir: &Path) -> Prefs {
     let mut p = parsed;
     p.normalize();
     p
+}
+
+/// FER-511: serializes the read-modify-write sequences below, so a webview save and a
+/// confirmed Rar.exe change can never interleave and resurrect an old value.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// FER-511: the only way prefs coming from the webview reach disk. The Rar.exe path and its
+/// fingerprint are ALWAYS taken from the prefs already on disk; whatever the request carries
+/// for them is ignored. Returns what was written.
+pub fn save_from_webview(dir: &Path, incoming: &Prefs) -> Result<Prefs, FsError> {
+    let _guard = write_lock();
+    let disk = load_from(dir);
+    let mut p = incoming.clone();
+    p.rar_exe_path = disk.rar_exe_path;
+    p.rar_exe_fingerprint = disk.rar_exe_fingerprint;
+    save_to(dir, &p)?;
+    Ok(p)
+}
+
+/// FER-511: store a Rar.exe path together with its confirmed fingerprint (or clear both).
+/// Called only by the native-confirmation flow in `archive_rar_tool`; every other field keeps
+/// its value on disk.
+pub fn set_rar_exe(
+    dir: &Path,
+    path: Option<String>,
+    fingerprint: Option<RarExeFingerprint>,
+) -> Result<(), FsError> {
+    let _guard = write_lock();
+    let mut p = load_from(dir);
+    p.rar_exe_fingerprint = path.as_ref().and(fingerprint);
+    p.rar_exe_path = path;
+    save_to(dir, &p)
 }
 
 /// Atomic write (temp + rename) so a crash never leaves a half file.
@@ -527,6 +604,7 @@ mod tests {
             preserve_timestamps: false,
             preserve_permissions: true,
             rar_exe_path: None,
+            rar_exe_fingerprint: None,
         };
         save_to(&dir, &p).unwrap();
         assert_eq!(load_from(&dir), p);
@@ -670,6 +748,7 @@ mod tests {
                 preserve_timestamps: false,
                 preserve_permissions: false,
                 rar_exe_path: None,
+                rar_exe_fingerprint: None,
             },
         )
         .unwrap();
@@ -1052,6 +1131,110 @@ mod tests {
         p_empty.normalize();
         assert_eq!(p_empty.rar_exe_path, None);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── FER-511: the webview cannot write the Rar.exe setting ───────────────
+
+    fn fp(tag: u8) -> RarExeFingerprint {
+        RarExeFingerprint {
+            size: u64::from(tag),
+            modified: 1_000 + u64::from(tag),
+            sha256: format!("{tag:064x}"),
+        }
+    }
+
+    #[test]
+    fn save_from_webview_never_changes_the_rar_exe_setting() {
+        let dir = temp("rarwebview");
+        let confirmed_path = r"C:\Program Files\WinRAR\Rar.exe".to_string();
+        set_rar_exe(&dir, Some(confirmed_path.clone()), Some(fp(1))).unwrap();
+
+        // A compromised webview tries to switch the path and the fingerprint in one save;
+        // both are ignored and the confirmed pair survives. Everything else is saved.
+        let incoming = Prefs {
+            theme: "light".into(),
+            rar_exe_path: Some(r"C:\evil\Rar.exe".into()),
+            rar_exe_fingerprint: Some(fp(2)),
+            ..Prefs::default()
+        };
+        let written = save_from_webview(&dir, &incoming).unwrap();
+        assert_eq!(written.theme, "light", "unrelated fields are saved");
+        assert_eq!(written.rar_exe_path, Some(confirmed_path.clone()));
+        assert_eq!(written.rar_exe_fingerprint, Some(fp(1)));
+
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.rar_exe_path, Some(confirmed_path));
+        assert_eq!(loaded.rar_exe_fingerprint, Some(fp(1)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_rar_exe_stores_and_clears_path_and_fingerprint_together() {
+        let dir = temp("setrarexe");
+        save_to(
+            &dir,
+            &Prefs {
+                theme: "light".into(),
+                ..Prefs::default()
+            },
+        )
+        .unwrap();
+
+        set_rar_exe(&dir, Some(r"C:\T\Rar.exe".into()), Some(fp(3))).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(
+            loaded.theme, "light",
+            "other prefs survive the targeted write"
+        );
+        assert_eq!(loaded.rar_exe_path, Some(r"C:\T\Rar.exe".into()));
+        assert_eq!(loaded.rar_exe_fingerprint, Some(fp(3)));
+
+        // Clearing drops both, never the fingerprint alone.
+        set_rar_exe(&dir, None, Some(fp(4))).unwrap();
+        let cleared = load_from(&dir);
+        assert_eq!(cleared.rar_exe_path, None);
+        assert_eq!(cleared.rar_exe_fingerprint, None);
+        assert_eq!(cleared.theme, "light");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fingerprint_needs_its_path_and_a_well_formed_hash() {
+        let dir = temp("fpshape");
+
+        // Legacy config: path without fingerprint stays unconfirmed (path kept, fp None).
+        fs::write(
+            dir.join(FILE_NAME),
+            r#"{"rarExePath":"C:\\Program Files\\WinRAR\\Rar.exe"}"#,
+        )
+        .unwrap();
+        let legacy = load_from(&dir);
+        assert!(legacy.rar_exe_path.is_some());
+        assert_eq!(legacy.rar_exe_fingerprint, None);
+
+        // Fingerprint without a path is meaningless and dropped.
+        fs::write(
+            dir.join(FILE_NAME),
+            format!(
+                r#"{{"rarExeFingerprint":{{"size":1,"modified":2,"sha256":"{}"}}}}"#,
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        let orphan = load_from(&dir);
+        assert_eq!(orphan.rar_exe_path, None);
+        assert_eq!(orphan.rar_exe_fingerprint, None);
+
+        // A malformed hash (not 64 lowercase hex) is dropped with its path kept.
+        fs::write(
+            dir.join(FILE_NAME),
+            r#"{"rarExePath":"C:\\T\\Rar.exe","rarExeFingerprint":{"size":1,"modified":2,"sha256":"DEADBEEF"}}"#,
+        )
+        .unwrap();
+        let malformed = load_from(&dir);
+        assert_eq!(malformed.rar_exe_path, Some(r"C:\T\Rar.exe".into()));
+        assert_eq!(malformed.rar_exe_fingerprint, None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -655,6 +655,115 @@ pub trait ArchiveProvider {
     }
 }
 
+/// (name, is_dir, size, modified_ms)
+pub type RawLevelRow = (String, bool, u64, Option<i64>);
+
+/// One raw member path → the row it contributes to the level under `prefix`
+/// (`""` for the root, otherwise `"<dir>/"`), or `None` when the member lies
+/// outside that level. A deeper member implies its first path segment as a
+/// folder row.
+pub fn level_row(
+    prefix: &str,
+    raw: &str,
+    is_dir: bool,
+    size: u64,
+    modified_ms: Option<i64>,
+) -> Option<RawLevelRow> {
+    let rest = raw.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.find('/') {
+        Some(slash) => {
+            let child = &rest[..slash];
+            if child.is_empty() {
+                None
+            } else {
+                let is_direct_dir = slash == rest.len() - 1;
+                Some((
+                    child.to_owned(),
+                    true,
+                    0,
+                    if is_direct_dir { modified_ms } else { None },
+                ))
+            }
+        }
+        None => Some((
+            rest.to_owned(),
+            is_dir,
+            if is_dir { 0 } else { size },
+            modified_ms,
+        )),
+    }
+}
+
+/// FER-504, FER-508: type-aware dedup of one directory level's raw listing rows.
+///
+/// A folder is listed once whether it came from an explicit directory entry
+/// or was implied by a deeper member path — but only when the names match
+/// **exactly** (case-sensitively). Folders differing only in case (`docs` / `Docs`)
+/// stay two rows, because the subfolder listing matches its prefix case-sensitively:
+/// merging them would hide `Docs/*` members that extraction still writes.
+///
+/// A name shared by two files, or by a file and a folder, is a `Conflict` —
+/// the same verdict the extract preflight reaches (`archive_extract::preflight`
+/// rejects any repeated normalized name) — carrying the clashing member path.
+/// That comparison folds to lowercase like the pipeline's `normalize()`, so
+/// `X` and `x` clash on the case-insensitive Windows target. First occurrence
+/// wins for merged folder rows (updating `modified_ms` if previously absent).
+pub fn dedup_level(
+    directory: &str,
+    rows: Vec<RawLevelRow>,
+) -> Result<Vec<RawLevelRow>, ArchiveError> {
+    let mut seen_lower: std::collections::HashMap<String, bool /* is_dir */> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut seen_dirs: std::collections::HashMap<String /* exact */, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut merged: Vec<RawLevelRow> = Vec::with_capacity(rows.len());
+
+    for (name, is_dir, size, modified_ms) in rows {
+        let lower = name.to_lowercase();
+        match seen_lower.entry(lower) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let idx = merged.len();
+                merged.push((name.clone(), is_dir, size, modified_ms));
+                v.insert(is_dir);
+                if is_dir {
+                    seen_dirs.insert(name, idx);
+                }
+            }
+            std::collections::hash_map::Entry::Occupied(o) => {
+                if is_dir && *o.get() {
+                    // Folder + folder: merge only on an exact (case-sensitive) match;
+                    // a case variant is its own row so its members stay reachable.
+                    if let Some(&idx) = seen_dirs.get(&name) {
+                        let existing = &mut merged[idx];
+                        if existing.3.is_none() && modified_ms.is_some() {
+                            existing.3 = modified_ms;
+                        }
+                    } else {
+                        let idx = merged.len();
+                        seen_dirs.insert(name.clone(), idx);
+                        merged.push((name, true, size, modified_ms));
+                    }
+                    continue;
+                }
+                // File + file, or file + folder (case-insensitive): extraction would
+                // refuse this archive, so the listing refuses to show a quiet row.
+                let mut err =
+                    ArchiveError::new(ArchiveErrorCode::Conflict, "Duplicate archive member");
+                err.member_path = Some(if directory.is_empty() {
+                    name
+                } else {
+                    format!("{directory}/{name}")
+                });
+                return Err(err);
+            }
+        }
+    }
+    Ok(merged)
+}
+
 #[cfg(test)]
 mod debug_redaction_tests {
     use super::*;
@@ -719,5 +828,73 @@ mod debug_redaction_tests {
         let shown = format!("{list:?}");
         assert!(shown.contains("password: None"), "{shown}");
         assert!(shown.contains("request_token: 7"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod dedup_scale_tests {
+    use super::*;
+
+    #[test]
+    fn dedup_level_linear_scale_test() {
+        let mut rows = Vec::with_capacity(40_000);
+        // 20k unique folder entries
+        for i in 0..20_000 {
+            rows.push((format!("unique_dir_{i}"), true, 0, None));
+        }
+        // 20k duplicate folder entries (1,000 distinct names repeated 20 times)
+        for _ in 0..20 {
+            for i in 0..1_000 {
+                rows.push((format!("dup_dir_{i}"), true, 0, None));
+            }
+        }
+        let start = std::time::Instant::now();
+        let res = dedup_level("", rows).expect("dedup should succeed");
+        let elapsed = start.elapsed();
+        assert_eq!(res.len(), 21_000);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "dedup_level took {:?}, expected < 2s (quadratic regression)",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn dedup_level_case_variant_scale_test() {
+        const BASE: &str = "abcdefghijklmnopqrst"; // 20 letters
+        assert_eq!(BASE.len(), 20);
+        let mut variants = Vec::with_capacity(30_000);
+        for i in 0..30_000u32 {
+            let mut s = String::with_capacity(20);
+            for (bit, ch) in BASE.chars().enumerate() {
+                if (i & (1 << bit)) != 0 {
+                    s.push(ch.to_ascii_uppercase());
+                } else {
+                    s.push(ch.to_ascii_lowercase());
+                }
+            }
+            variants.push(s);
+        }
+
+        // 30k distinct case variants, 2 rows each -> 60k total rows
+        let mut rows = Vec::with_capacity(60_000);
+        for s in &variants {
+            rows.push((s.clone(), true, 0, None));
+        }
+        for s in variants {
+            rows.push((s, true, 0, Some(12345)));
+        }
+
+        let start = std::time::Instant::now();
+        let res = dedup_level("", rows).expect("dedup should succeed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(res.len(), 30_000);
+        assert_eq!(res[0].3, Some(12345));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "dedup_level case variants took {:?}, expected < 2s (quadratic regression)",
+            elapsed
+        );
     }
 }

@@ -42,6 +42,21 @@ use std::sync::atomic::AtomicBool;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// FER-512 P3-3: paths of MUTATING commands pass the same string gate as content reads
+/// (`path_guard::check_str`): device namespaces (`\\.\`, `\\?\`), alternate data streams
+/// (`C:\x.txt:ads`), control characters and relative paths are refused uniformly. Plain UNC
+/// (`\\server\share\...`) and well-formed drive paths stay allowed — Ferrum browses shares.
+fn check_mutation_path(path: &str) -> Result<(), FsError> {
+    crate::path_guard::check_str(path).map(|_| ())
+}
+
+fn check_mutation_paths<'a>(paths: impl IntoIterator<Item = &'a String>) -> Result<(), FsError> {
+    for p in paths {
+        check_mutation_path(p)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_dir(path: String) -> Result<Vec<FileEntry>, FsError> {
     validate_path(&path)?;
@@ -99,12 +114,18 @@ pub async fn path_resolve(
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
 }
 
+/// FER-512 Info-1: ticks of the queue harness job, capped so the webview can
+/// never queue an unbounded sleep (at most 10 s).
+fn dummy_ticks(duration_ms: u64) -> u64 {
+    duration_ms.min(10_000) / 50
+}
+
 #[tauri::command]
 pub fn enqueue_dummy_op(
     duration_ms: u64,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
-    let ticks = duration_ms / 50;
+    let ticks = dummy_ticks(duration_ms);
     // F2-26 BTM: retryable so the panel's retry path can be exercised end to
     // end without touching real files.
     let make_body = move || {
@@ -234,9 +255,7 @@ pub fn delete_entries(
     permanent: bool,
     app: AppHandle,
 ) -> Result<crate::mutations::DeleteReport, FsError> {
-    for p in &paths {
-        validate_path(p)?;
-    }
+    check_mutation_paths(&paths)?;
     let report = if permanent {
         crate::mutations::delete_permanent(&paths)
     } else {
@@ -767,12 +786,15 @@ pub async fn archive_test(
 }
 
 /// Probe Rar.exe tool configured in user preferences (FER-505).
-/// Reads path from prefs on disk, validates, and returns { ok, version, reason }.
+/// FER-511: reads the path AND its confirmed fingerprint from the prefs on disk; the probe only
+/// executes the file after the fingerprint matches. Every other state answers `ok: false` with
+/// a reason the UI can show as-is.
 #[tauri::command]
 pub fn archive_rar_tool_probe(
     app: tauri::AppHandle,
 ) -> Result<crate::archive_rar_tool::RarToolProbeResult, FsError> {
-    let prefs = load_prefs(app);
+    let dir = crate::profile::config_dir(&app).unwrap_or_else(std::env::temp_dir);
+    let prefs = crate::prefs::load_from(&dir);
     let Some(path_str) = prefs.rar_exe_path else {
         return Ok(crate::archive_rar_tool::RarToolProbeResult {
             ok: false,
@@ -780,7 +802,10 @@ pub fn archive_rar_tool_probe(
             reason: Some("Path Rar.exe belum diatur".to_string()),
         });
     };
-    match crate::archive_rar_tool::validate_rar_exe(std::path::Path::new(&path_str)) {
+    match crate::archive_rar_tool::validate_confirmed_rar_exe(
+        std::path::Path::new(&path_str),
+        prefs.rar_exe_fingerprint.as_ref(),
+    ) {
         Ok(tool) => Ok(crate::archive_rar_tool::RarToolProbeResult {
             ok: true,
             version: Some(tool.version().to_string()),
@@ -800,16 +825,117 @@ pub fn archive_rar_tool_detect() -> Result<Option<String>, FsError> {
     Ok(crate::archive_rar_tool::detect_rar_exe().map(|p| p.to_string_lossy().into_owned()))
 }
 
-// ── F2-14: selection save/load files ─────────────────────────────────────
+/// Result for the UI: `saved: true` once the path (or its removal) is stored.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RarToolSetPathResult {
+    pub saved: bool,
+}
 
+/// FER-511: the ONLY command that changes the configured Rar.exe path. `None` (or blank) clears
+/// the setting without any confirmation. `Some(path)` validates the file WITHOUT executing it,
+/// then asks in a NATIVE message box owned by the Ferrum window (the webview can neither draw
+/// it nor answer it); only OK stores path + fingerprint. Cancel answers the `Cancelled` error
+/// and stores nothing.
 #[tauri::command]
-pub fn save_selection(file_path: String, dir: String, names: Vec<String>) -> Result<(), FsError> {
-    crate::selection_file::save_selection_file(&file_path, &dir, &names)
+pub async fn archive_rar_tool_set_path(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    path: Option<String>,
+) -> Result<RarToolSetPathResult, FsError> {
+    let dir = crate::profile::config_dir(&app).unwrap_or_else(std::env::temp_dir);
+    let owner = rar_owner_hwnd(&window);
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        crate::archive_rar_tool::set_rar_exe_path_in(&dir, path, |text| {
+            crate::archive_rar_tool::native_confirm(owner, text)
+        })
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+    .map_err(|e| {
+        let code = match &e {
+            crate::archive_rar_tool::RarValidationError::Unconfirmed(_)
+            | crate::archive_rar_tool::RarValidationError::FingerprintChanged(_) => {
+                crate::domain::ErrorCode::Unsupported
+            }
+            _ => crate::domain::ErrorCode::InvalidPath,
+        };
+        FsError::new(code, e.to_string())
+    })?;
+    match outcome {
+        crate::archive_rar_tool::SetPathOutcome::Cancelled => Err(FsError::new(
+            crate::domain::ErrorCode::Cancelled,
+            "Konfirmasi WinRAR dibatalkan; path tidak disimpan",
+        )),
+        crate::archive_rar_tool::SetPathOutcome::Saved
+        | crate::archive_rar_tool::SetPathOutcome::Cleared => {
+            Ok(RarToolSetPathResult { saved: true })
+        }
+    }
+}
+
+/// FER-511: read-only status of the configured Rar.exe for the Settings display. Hashes the
+/// file but NEVER runs it. `unset` = no path stored; `unconfirmed` = path without a confirmed
+/// fingerprint (old prefs — migration, or the file state changed so re-confirmation is due);
+/// `ready` = fingerprint matches, the tool may run.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RarToolStatus {
+    pub path: Option<String>,
+    pub state: &'static str,
 }
 
 #[tauri::command]
-pub fn load_selection(file_path: String) -> Result<crate::selection_file::SelectionFile, FsError> {
-    crate::selection_file::load_selection_file(&file_path)
+pub fn archive_rar_tool_status(app: tauri::AppHandle) -> Result<RarToolStatus, FsError> {
+    let dir = crate::profile::config_dir(&app).unwrap_or_else(std::env::temp_dir);
+    let prefs = crate::prefs::load_from(&dir);
+    let Some(path) = prefs.rar_exe_path else {
+        return Ok(RarToolStatus {
+            path: None,
+            state: "unset",
+        });
+    };
+    let state = match prefs.rar_exe_fingerprint.as_ref() {
+        None => "unconfirmed",
+        Some(fp) => match crate::archive_rar_tool::fingerprint_exe(std::path::Path::new(&path)) {
+            Ok(actual) if &actual == fp => "ready",
+            _ => "changed",
+        },
+    };
+    Ok(RarToolStatus {
+        path: Some(path),
+        state,
+    })
+}
+
+#[cfg(windows)]
+fn rar_owner_hwnd(window: &tauri::Window) -> isize {
+    window.hwnd().map(|h| h.0 as isize).unwrap_or(0)
+}
+
+#[cfg(not(windows))]
+fn rar_owner_hwnd(_window: &tauri::Window) -> isize {
+    0
+}
+
+// ── F2-14: selection save/load files ─────────────────────────────────────
+
+/// FER-512 P3-4: the file's location is `check_str(dir)` + a single basename
+/// (`name`, validated like `create_entry`) — the webview can no longer name an
+/// arbitrary path to write the selection JSON to.
+#[tauri::command]
+pub fn save_selection(dir: String, name: String, names: Vec<String>) -> Result<(), FsError> {
+    crate::selection_file::save_selection_file(&dir, &name, &names)
+}
+
+/// FER-512 P3-4: reads `check_str(dir)` + basename only; the document itself is
+/// still validated strictly (version, names = basenames).
+#[tauri::command]
+pub fn load_selection(
+    dir: String,
+    name: String,
+) -> Result<crate::selection_file::SelectionFile, FsError> {
+    crate::selection_file::load_selection_file(&dir, &name)
 }
 
 // ── F2-16: streaming file/folder search ──────────────────────────────────
@@ -1454,12 +1580,13 @@ fn watch_hub(app: &AppHandle) -> &'static Arc<crate::watch::WatchHub> {
 
 #[tauri::command]
 pub fn watch_start(path: String, app: AppHandle) -> Result<(), FsError> {
-    validate_path(&path)?;
+    check_mutation_path(&path)?;
     watch_hub(&app).watch_start(&path)
 }
 
 #[tauri::command]
 pub fn watch_stop(path: String, app: AppHandle) -> Result<(), FsError> {
+    check_mutation_path(&path)?;
     watch_hub(&app).watch_stop(&path)
 }
 
@@ -1486,7 +1613,9 @@ fn remember_copy_defaults(prefs: &Prefs) {
 pub fn save_prefs(app: AppHandle, prefs: Prefs) -> Result<(), FsError> {
     let dir = crate::profile::config_dir(&app).unwrap_or_else(std::env::temp_dir);
     remember_copy_defaults(&prefs);
-    crate::prefs::save_to(&dir, &prefs)
+    // FER-511: the webview cannot write the Rar.exe path or its fingerprint — both always keep
+    // the value already stored on disk, whatever the request carries.
+    crate::prefs::save_from_webview(&dir, &prefs).map(|_| ())
 }
 
 // ── Activity (phase-4; renderer never touches SQL) ──────────────────────
@@ -1691,7 +1820,7 @@ pub fn activity_exclude(
     app: AppHandle,
     activity: State<'_, ActivityHandle>,
 ) -> Result<u64, FsError> {
-    validate_path(&path)?;
+    check_mutation_path(&path)?;
     let service = activity_service_of(&activity)?;
     let removed = service.exclude(&path).map_err(fs_io)?;
     broadcast_state(&app, service);
@@ -2157,9 +2286,7 @@ fn compare_sink(app: tauri::AppHandle) -> crate::compare::ProgressSink {
 pub fn rename_batch(
     pairs: Vec<crate::rename_batch::RenamePair>,
 ) -> Result<crate::rename_batch::RenameBatchReport, FsError> {
-    for p in &pairs {
-        validate_path(&p.from)?;
-    }
+    check_mutation_paths(pairs.iter().map(|p| &p.from))?;
     Ok(crate::rename_batch::rename_batch(&pairs))
 }
 
@@ -2241,7 +2368,7 @@ pub fn set_attributes(
     read_only: Option<bool>,
     hidden: Option<bool>,
 ) -> Result<(), FsError> {
-    validate_path(&path)?;
+    check_mutation_path(&path)?;
     crate::properties::set_attributes(&path, read_only, hidden)
 }
 
@@ -2816,7 +2943,7 @@ fn report_failures(outcome: &crate::codecs::CodecReport) -> Result<(), FsError> 
 /// atomic; an empty map removes the sidecar file.
 #[tauri::command]
 pub async fn comment_set(path: String, comment: Option<String>) -> Result<(), FsError> {
-    validate_path(&path)?;
+    check_mutation_path(&path)?;
     spawn_blocking(move || crate::comments::set_comment(&path, comment.as_deref()))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
@@ -3083,5 +3210,57 @@ mod preflight_request_debug_tests {
         assert!(shown.contains(r#"password: Some("***")"#), "{shown}");
         request.password = None;
         assert!(format!("{request:?}").contains("password: None"));
+    }
+}
+
+/// FER-512 P3-3 / Info-1: the mutation guard and the queue-harness cap.
+#[cfg(test)]
+mod fer512_ipc_gate_tests {
+    use super::{check_mutation_path, check_mutation_paths, dummy_ticks};
+    use crate::domain::ErrorCode;
+
+    /// The exact audit cases: an ADS spelling and a device namespace are
+    /// refused at the command boundary.
+    #[test]
+    fn mutation_paths_refuse_ads_and_device_namespaces() {
+        for bad in [
+            r"C:\x.txt:ads",
+            r"\\.\C:",
+            r"\\?\C:\x",
+            r"C:\a:b\c",
+            "relative",
+            "",
+        ] {
+            let err = check_mutation_path(bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidPath, "{bad:?}");
+        }
+        assert!(check_mutation_paths(&[r"C:\ok.txt".into()]).is_ok());
+        let err = check_mutation_paths(&[r"C:\ok.txt".into(), r"C:\x.txt:ads".into()]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidPath);
+    }
+
+    /// Plain UNC and long-but-well-formed drive paths are NOT refused by the
+    /// guard (Ferrum browses shares; `\\?\` long paths stay the concern of the
+    /// read guard that already accepts what the UI produces).
+    #[test]
+    fn mutation_paths_keep_plain_unc_and_drive_paths() {
+        for good in [
+            r"\\server\share\file.txt",
+            r"\\SERVER\share\folder\a b.txt",
+            r"C:\Users\u\x.txt",
+            r"c:/mixed/slashes.txt",
+        ] {
+            assert!(check_mutation_path(good).is_ok(), "{good}");
+        }
+    }
+
+    /// Info-1: the harness job can never sleep longer than 10 s.
+    #[test]
+    fn dummy_op_ticks_are_capped() {
+        assert_eq!(dummy_ticks(0), 0);
+        assert_eq!(dummy_ticks(5_000), 100);
+        assert_eq!(dummy_ticks(10_000), 200);
+        assert_eq!(dummy_ticks(60_000), 200, "capped at 10 s");
+        assert_eq!(dummy_ticks(u64::MAX), 200);
     }
 }

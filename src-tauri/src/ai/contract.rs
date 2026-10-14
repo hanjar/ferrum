@@ -1141,3 +1141,11 @@ mod disk_usage_tests;
 #[cfg(test)]
 #[path = "contract_indexer_tests.rs"]
 mod indexer_tests;
+
+#[cfg(test)]
+#[path = "contract_rar_tests.rs"]
+mod rar_boundary_tests;
+
+#[cfg(test)]
+#[path = "contract_ipc_gate_tests.rs"]
+mod ipc_gate_tests;

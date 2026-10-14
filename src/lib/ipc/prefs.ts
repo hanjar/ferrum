@@ -93,6 +93,14 @@ export const COPY_THREAD_CHOICES = [0, 1, 2, 4, 8, 16] as const;
 export const COPY_BUFFER_MIN_KIB = 64;
 export const COPY_BUFFER_MAX_KIB = 8192;
 
+/** FER-511: identity of the confirmed Rar.exe, computed by the backend. Read-only for the
+ *  webview: `save_prefs` never writes this field (only `archive_rar_tool_set_path` does). */
+export interface RarExeFingerprint {
+  size: number;
+  modified: number;
+  sha256: string;
+}
+
 export interface Prefs extends Partial<FileOperationPrefs> {
   theme: Theme;
   palette: PaletteName;
@@ -128,8 +136,12 @@ export interface Prefs extends Partial<FileOperationPrefs> {
   indexerFolderSizes?: boolean;
   /** FER-477b: sync may skip reading files the indexer journal proves unchanged (absent = false). */
   syncJournalSkip?: boolean;
-  /** FER-505: path to WinRAR Rar.exe (absent/null = feature disabled). */
+  /** FER-505: path to WinRAR Rar.exe (absent/null = feature disabled).
+   *  FER-511: the webview cannot change it — save_prefs keeps the disk value. */
   rarExePath?: string | null;
+  /** FER-511: fingerprint of the confirmed Rar.exe; absent = the stored path is NOT
+   *  confirmed and is never executed (legacy configs must re-confirm in Settings). */
+  rarExeFingerprint?: RarExeFingerprint | null;
 }
 
 /** FER-464: hours after which a cached Disk usage scan is flagged old.
@@ -225,6 +237,7 @@ export function defaultPrefs(): Prefs {
     indexerFolderSizes: false,
     syncJournalSkip: false,
     rarExePath: null,
+    rarExeFingerprint: null,
     preview: { ...PREVIEW_DEFAULTS },
     ...DEFAULT_FILE_OPERATION_PREFS,
   };

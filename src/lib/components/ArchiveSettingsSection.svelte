@@ -2,21 +2,49 @@
   /**
    * "Archive" section of Settings (FER-505): configuration of the user's Rar.exe
    * for optional RAR archive creation. Ferrum does not bundle WinRAR.
+   *
+   * FER-511: the input below is a DRAFT only — nothing here writes prefs. The path
+   * changes solely through `archive_rar_tool_set_path`, which validates the file
+   * WITHOUT running it, then pops a NATIVE confirmation dialog (the webview can
+   * neither draw it nor answer it) and stores a fingerprint of the confirmed exe.
+   * A stored path without (or with a stale) fingerprint never runs: re-confirm.
    */
-  import { archiveRarToolDetect, archiveRarToolProbe } from '../ipc/archive';
+  import {
+    archiveRarToolDetect,
+    archiveRarToolProbe,
+    archiveRarToolSetPath,
+    archiveRarToolStatus,
+    type RarToolStatusState,
+  } from '../ipc/archive';
   import { ui } from '../uiState.svelte';
-  import { prefs } from '../stores/prefsStore.svelte';
 
+  let draftPath = $state('');
   let probeStatus = $state<{ ok: boolean; message: string } | null>(null);
+  let confirmState = $state<RarToolStatusState>('unset');
   let busy = $state(false);
+
+  const savedPath = $derived(ui.rarExePath);
+
+  $effect(() => {
+    void refreshStatus();
+  });
+
+  async function refreshStatus(): Promise<void> {
+    try {
+      confirmState = (await archiveRarToolStatus()).state;
+    } catch {
+      confirmState = 'unset';
+    }
+  }
 
   async function detect() {
     busy = true;
     probeStatus = null;
     try {
+      // Detection only fills the draft: storing still needs the native confirmation.
       const detected = await archiveRarToolDetect();
       if (detected) {
-        ui.rarExePath = detected;
+        draftPath = detected;
         probeStatus = { ok: true, message: `Ditemukan: ${detected}` };
       } else {
         probeStatus = {
@@ -31,20 +59,41 @@
     }
   }
 
+  /** "Pakai path ini": the only write path. Empty draft = remove the setting (no dialog). */
+  async function applyDraft() {
+    busy = true;
+    probeStatus = null;
+    const value = draftPath.trim();
+    try {
+      await archiveRarToolSetPath(value.length > 0 ? value : null);
+      ui.rarExePath = value.length > 0 ? value : null;
+      draftPath = ui.rarExePath ?? '';
+      await refreshStatus();
+      probeStatus = {
+        ok: true,
+        message:
+          value.length > 0
+            ? 'Path tersimpan. Jalankan "Tes" untuk memverifikasi WinRAR.'
+            : 'Pengaturan WinRAR dihapus.',
+      };
+    } catch (e) {
+      // Includes the native dialog's No: nothing was stored.
+      probeStatus = { ok: false, message: e instanceof Error ? e.message : String(e) };
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function clearSaved() {
+    draftPath = '';
+    await applyDraft();
+  }
+
   async function probe() {
     busy = true;
     probeStatus = null;
     try {
-      // The probe reads rarExePath from prefs on disk (never from the UI), so
-      // persist the path being edited first — without the save debounce.
-      const saved = await prefs.flush();
-      if (!saved) {
-        probeStatus = {
-          ok: false,
-          message: 'Gagal menyimpan pengaturan; path belum bisa dites.',
-        };
-        return;
-      }
+      // The probe runs the SAVED, CONFIRMED exe from prefs on disk — never the draft.
       const res = await archiveRarToolProbe();
       if (res.ok) {
         probeStatus = {
@@ -75,8 +124,9 @@
     <div class="lbl">
       <label for="rar-exe-path" class="name">Path WinRAR (Rar.exe)</label>
       <div class="desc">
-        Lokasi file Rar.exe (CLI) dari instalasi WinRAR Anda. Biarkan kosong jika tidak ingin
-        membuat arsip RAR.
+        Lokasi file Rar.exe (CLI) dari instalasi WinRAR Anda. Mengubah path memunculkan dialog
+        konfirmasi sistem (bukan jendela web), lalu Ferrum memverifikasi file itu sebelum setiap
+        eksekusi.
       </div>
     </div>
   </div>
@@ -87,10 +137,8 @@
       class="textInput mono"
       type="text"
       placeholder="C:\Program Files\WinRAR\Rar.exe"
-      value={ui.rarExePath ?? ''}
-      oninput={(e) => {
-        const val = e.currentTarget.value.trim();
-        ui.rarExePath = val.length > 0 ? val : null;
+      bind:value={draftPath}
+      oninput={() => {
         probeStatus = null;
       }}
       disabled={busy}
@@ -109,14 +157,56 @@
       <button
         type="button"
         class="btn primary"
+        onclick={() => void applyDraft()}
+        disabled={busy || draftPath.trim().length === 0}
+        data-testid="rar-apply-btn"
+      >
+        Pakai path ini
+      </button>
+      {#if savedPath}
+        <button
+          type="button"
+          class="btn"
+          onclick={() => void clearSaved()}
+          disabled={busy}
+          data-testid="rar-clear-btn"
+        >
+          Hapus
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="btn"
         onclick={() => void probe()}
-        disabled={busy || !ui.rarExePath}
+        disabled={busy || confirmState !== 'ready'}
         data-testid="rar-probe-btn"
+        title={confirmState === 'ready'
+          ? 'Menjalankan Rar.exe tersimpan untuk membaca versinya'
+          : 'Tersedia setelah path dikonfirmasi lewat "Pakai path ini"'}
       >
         Tes
       </button>
     </div>
   </div>
+
+  <p
+    class="statusMsg"
+    role="status"
+    data-testid="rar-status"
+    class:success={confirmState === 'ready'}
+    class:error={confirmState === 'unconfirmed' || confirmState === 'changed'}
+  >
+    {#if confirmState === 'ready'}
+      ✓ Path terkonfirmasi dan siap digunakan.
+    {:else if confirmState === 'unconfirmed'}
+      ✗ Path tersimpan tetapi BELUM dikonfirmasi (pengaturan lama) — Ferrum tidak akan
+      menjalankannya. Klik "Pakai path ini" untuk mengonfirmasi.
+    {:else if confirmState === 'changed'}
+      ✗ WinRAR berubah sejak dikonfirmasi; atur ulang di Settings.
+    {:else}
+      Belum ada path WinRAR yang diatur; pembuatan arsip RAR nonaktif.
+    {/if}
+  </p>
 
   {#if probeStatus}
     <p

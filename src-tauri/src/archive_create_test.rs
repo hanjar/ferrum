@@ -215,20 +215,122 @@ fn zip_err(e: zip::result::ZipError, what: &str) -> ArchiveError {
 
 /// `.<name>.<pid>-<n>.ferrum-tmp` / `.<name>.<pid>-<n>.ferrum-tmp.rar`: an archive Ferrum is writing right now.
 fn is_ferrum_staging(name: &str) -> bool {
-    let Some(inner) = name.strip_prefix('.').and_then(|n| {
+    parse_staging_pid(name).is_some()
+}
+
+/// A leftover only qualifies once it is at least this old: a just-created staging entry of a
+/// concurrent create (whose PID could be reused or unknown) is never swept. (FER-510)
+pub const MIN_STAGING_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// FER-510: parses a strict Ferrum staging name `.<anything>.<pid>-<n>.ferrum-tmp` (also the
+/// `.ferrum-tmp.rar` variant) and returns its `<pid>`. Every part is checked: leading dot,
+/// exact suffix, digits-only `<pid>-<n>` tag behind the last dot. Lookalikes
+/// (`out.ferrum-tmp`, `.out.zip.ferrum-tmp`, `.out.zip.12-x.ferrum-tmp`) parse to `None`.
+fn parse_staging_pid(name: &str) -> Option<u32> {
+    let inner = name.strip_prefix('.').and_then(|n| {
         n.strip_suffix(".ferrum-tmp")
             .or_else(|| n.strip_suffix(".ferrum-tmp.rar"))
-    }) else {
-        return false;
-    };
-    let Some((_, tag)) = inner.rsplit_once('.') else {
-        return false;
-    };
-    let Some((pid, n)) = tag.split_once('-') else {
-        return false;
-    };
+    })?;
+    let (_, tag) = inner.rsplit_once('.')?;
+    let (pid, n) = tag.split_once('-')?;
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    digits(pid) && digits(n)
+    if !digits(pid) || !digits(n) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// FER-510: fail-closed PID liveness (Windows): opening or querying the process counts as
+/// alive on any error, so nothing is deleted on doubt. A PID reused by another process also
+/// reports alive.
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: OpenProcess with query-only access on a numeric PID; the handle is closed on
+    // every path below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // Refuse to delete on anything but the definite "invalid parameter" = the PID does
+        // not exist.
+        return std::io::Error::last_os_error().raw_os_error() != Some(87); // ERROR_INVALID_PARAMETER
+    }
+    let mut code: u32 = 0;
+    // SAFETY: `handle` is a valid process handle and `code` a valid u32 out-slot.
+    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    // SAFETY: `handle` was returned by OpenProcess above.
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return true; // cannot tell → treat as alive
+    }
+    code == STILL_ACTIVE as u32
+}
+
+/// FER-510: fail-closed — without the Windows API there is no safe answer, so never delete.
+#[cfg(not(windows))]
+fn pid_alive(_pid: u32) -> bool {
+    true
+}
+
+/// FER-510: sweep Ferrum staging leftovers (dead PID and older than [`MIN_STAGING_AGE`]) from
+/// the folder that would hold `dest`, before a create starts there. A crash can leave the
+/// ZIP/7z staging file `.<dest>.<pid>-<n>.ferrum-tmp` or the RAR job folder
+/// `.<dest>.<pid>-<rand>.ferrum-tmp` behind. Best effort: returns how many entries were
+/// removed; any unreadable or ambiguous entry is skipped untouched.
+///
+/// Safety rails: only exact Ferrum staging names; only the destination folder of THIS job;
+/// symlink/junction entries are neither followed nor removed (the no-follow stance of
+/// `archive_publish`); a future mtime, unreadable metadata or a live/unknown PID all mean
+/// "do not delete".
+pub fn clean_stale_staging(dest: &Path) -> usize {
+    let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return 0;
+    };
+    let Ok(children) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for child in children.flatten() {
+        let Some(pid) = parse_staging_pid(&child.file_name().to_string_lossy()) else {
+            continue;
+        };
+        // No-follow: DirEntry::file_type/metadata report the link itself, never its target.
+        let Ok(kind) = child.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue; // a reparse point is never followed and never removed
+        }
+        let Ok(meta) = child.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = modified.elapsed() else {
+            continue; // mtime in the future: never delete
+        };
+        if age < MIN_STAGING_AGE {
+            continue;
+        }
+        if pid_alive(pid) {
+            continue;
+        }
+        let path = child.path();
+        let done = if kind.is_dir() {
+            // std's remove_dir_all does not follow symlinks/junctions (the guarantee JobDir's
+            // Drop relies on); the entry itself was verified to be no reparse point above.
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if done.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
@@ -262,6 +364,30 @@ pub struct SourceEntry {
     pub disk_path: PathBuf,
     pub archive_name: String,
     pub is_dir: bool,
+}
+
+/// FER-510: two sources from different base folders can produce the same relative member name
+/// (selecting `docs\a.txt` together with `other\a.txt`). Rar.exe only fails on such listfiles
+/// AFTER running (cryptic "exit code 10"), and ZIP/7z would silently write duplicate members
+/// that extraction later refuses as conflicts — so every create refuses them up front,
+/// case-insensitively like the Windows filesystem, before any process starts or a byte is
+/// written.
+fn check_duplicate_members(entries: &[SourceEntry]) -> Result<(), ArchiveError> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in entries {
+        if !seen.insert(e.archive_name.to_lowercase()) {
+            let mut err = ArchiveError::new(
+                ArchiveErrorCode::Conflict,
+                format!(
+                    "Duplicate archive member name '{}' from different source folders; pack from one folder or separately",
+                    e.archive_name
+                ),
+            );
+            err.member_path = Some(e.archive_name.clone());
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Collect every source and drop what must never become input: the destination itself (a file
@@ -335,6 +461,7 @@ pub(crate) fn collect_sources(
     if entries.len() > limits.max_entries as usize {
         return Err(err(ArchiveErrorCode::LimitExceeded, "Too many files"));
     }
+    check_duplicate_members(&entries)?;
     Ok(entries)
 }
 
@@ -710,6 +837,7 @@ fn create_zip_via_progress_with_level(
 ) -> Result<PathBuf, ArchiveError> {
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
+    clean_stale_staging(destination_path);
     let files = collect_sources(sources, destination_path, policy, limits)?;
     if files.len() > limits.max_entries as usize {
         return Err(err(ArchiveErrorCode::LimitExceeded, "Too many files"));
@@ -1289,6 +1417,7 @@ pub fn create_7z_progress_with_level(
 ) -> Result<PathBuf, ArchiveError> {
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
+    clean_stale_staging(destination_path);
     let default_limits = ArchiveLimits {
         max_entries: 100_000,
         max_total_bytes: u64::MAX,
@@ -1807,6 +1936,66 @@ mod edge_tests {
         assert_eq!(names, vec!["proj/a.txt"]);
     }
 
+    /// FER-510: two sources from different base folders with the same relative member name are
+    /// refused up front with `Conflict` + `member_path` — before any process runs or a byte is
+    /// written. ZIP and 7z share the same pipeline, so all three formats refuse identically.
+    #[test]
+    fn duplicate_member_names_from_different_folders_are_refused_up_front() {
+        let dir = Dir::new("dup");
+        dir.write("left/same.txt", b"one");
+        dir.write("right/Same.txt", b"two");
+        // Two FILES from different folders: members are their base names only.
+        let sources = [
+            s(&dir.path("left/same.txt")),
+            s(&dir.path("right/Same.txt")),
+        ];
+
+        // ZIP: refused, case-insensitively (same.txt vs Same.txt), with the member named.
+        let dest = dir.path("out.zip");
+        let e = create_zip_with_policy(&sources, &dest, &limits(), ArchiveConflictPolicy::Skip)
+            .unwrap_err();
+        assert_eq!(e.code, ArchiveErrorCode::Conflict);
+        assert_eq!(e.member_path.as_deref(), Some("Same.txt"));
+        assert!(
+            e.message.contains("Duplicate archive member name"),
+            "{}",
+            e.message
+        );
+        assert!(!dest.exists(), "nothing written");
+        assert!(dir.staging_files().is_empty(), "no temp file left");
+
+        // 7z: identical refusal through the shared pipeline.
+        let e = create_7z_with_policy(&sources, &dir.path("out.7z"), ArchiveConflictPolicy::Skip)
+            .unwrap_err();
+        assert_eq!(e.code, ArchiveErrorCode::Conflict);
+        assert_eq!(e.member_path.as_deref(), Some("Same.txt"));
+
+        // A nested duplicate: two FOLDERS with the same name under different parents both
+        // contribute `docs/x.txt`.
+        dir.write("left2/docs/x.txt", b"x1");
+        dir.write("right2/docs/x.txt", b"x2");
+        let e = create_zip_with_policy(
+            &[s(&dir.path("left2/docs")), s(&dir.path("right2/docs"))],
+            &dest,
+            &limits(),
+            ArchiveConflictPolicy::Skip,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ArchiveErrorCode::Conflict);
+        assert_eq!(e.member_path.as_deref(), Some("docs/x.txt"));
+
+        // Distinct names still pack from multiple folders (folder + single file).
+        dir.write("right/z.txt", b"zee");
+        let written = create_zip_with_policy(
+            &[s(&dir.path("left")), s(&dir.path("right/z.txt"))],
+            &dest,
+            &limits(),
+            ArchiveConflictPolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(members(&written), vec!["left/same.txt", "z.txt"]);
+    }
+
     #[cfg(windows)]
     fn lock_exclusively(path: &Path) -> File {
         use std::os::windows::fs::OpenOptionsExt;
@@ -2001,5 +2190,257 @@ mod edge_tests {
         create_7z(&[s(&dir.path("proj"))], &dest_7z).unwrap();
         let report = test_7z(&dest_7z, None).unwrap();
         assert_eq!(report.entries.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod staging_cleanup_tests {
+    //! FER-510: the sweep of Ferrum's own stale staging entries (dead PID, older than
+    //! [`MIN_STAGING_AGE`]) — pattern strictness, age/PID rails, and the no-follow stance.
+    use super::*;
+    use std::time::SystemTime;
+
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "ferrum-staging-clean-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Sets the mtime to twice [`MIN_STAGING_AGE`] ago. Directories need
+    /// FILE_FLAG_BACKUP_SEMANTICS to be opened on Windows.
+    #[cfg(windows)]
+    fn age_old(path: &Path) {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true);
+        if path.is_dir() {
+            opts.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        let f = opts.open(path).unwrap();
+        f.set_modified(SystemTime::now() - MIN_STAGING_AGE * 2)
+            .unwrap();
+    }
+
+    /// A PID that is provably dead right now: a short-lived child that already exited.
+    #[cfg(windows)]
+    fn a_dead_pid() -> Option<u32> {
+        use std::os::windows::process::CommandExt;
+        for _ in 0..16 {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/C", "exit", "0"])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            let pid = child.id();
+            let _ = child.wait();
+            if !pid_alive(pid) {
+                return Some(pid);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn parses_only_exact_ferrum_staging_names() {
+        assert_eq!(parse_staging_pid(".out.zip.123-0.ferrum-tmp"), Some(123));
+        assert_eq!(
+            parse_staging_pid(".a b (2).zip.7-99.ferrum-tmp.rar"),
+            Some(7)
+        );
+        assert_eq!(
+            parse_staging_pid(".out.rar.999-123456789012345.ferrum-tmp"),
+            Some(999)
+        );
+        // Lookalikes never parse.
+        assert_eq!(parse_staging_pid("out.ferrum-tmp"), None);
+        assert_eq!(parse_staging_pid(".out.zip.ferrum-tmp"), None);
+        assert_eq!(parse_staging_pid(".out.zip.12-x.ferrum-tmp"), None);
+        assert_eq!(parse_staging_pid(".out.zip.12x-0.ferrum-tmp"), None);
+        assert_eq!(parse_staging_pid(".out.zip.123-0.ferrum-tmp.txt"), None);
+        assert_eq!(parse_staging_pid("ferrum-tmp"), None);
+        assert_eq!(parse_staging_pid(""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_staging_of_dead_pids_is_removed_files_and_job_folders() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("dead");
+        let stale_file = d.0.join(format!(".out.zip.{dead}-3.ferrum-tmp"));
+        std::fs::write(&stale_file, b"half written").unwrap();
+        age_old(&stale_file);
+        let stale_job = d.0.join(format!(".out.rar.{dead}-77.ferrum-tmp"));
+        std::fs::create_dir_all(&stale_job).unwrap();
+        std::fs::write(stale_job.join("archive.rar"), b"partial").unwrap();
+        age_old(&stale_job);
+
+        assert_eq!(clean_stale_staging(&d.0.join("out.zip")), 2);
+        assert!(!stale_file.exists(), "stale staging file removed");
+        assert!(!stale_job.exists(), "stale job folder removed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_of_live_pids_and_young_entries_is_never_touched() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("live");
+        // Our own (alive) PID, even when old.
+        let live =
+            d.0.join(format!(".out.zip.{}-1.ferrum-tmp", std::process::id()));
+        std::fs::write(&live, b"another create in progress").unwrap();
+        age_old(&live);
+        // Dead PID, but too young (< MIN_STAGING_AGE): could still belong to a start-up race.
+        let young = d.0.join(format!(".out.zip.{dead}-2.ferrum-tmp"));
+        std::fs::write(&young, b"fresh leftover").unwrap();
+
+        assert_eq!(clean_stale_staging(&d.0.join("out.zip")), 0);
+        assert!(live.exists(), "a live PID's staging is kept");
+        assert!(young.exists(), "a young leftover is kept");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lookalike_names_are_never_removed_even_when_old_and_the_pid_is_dead() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("lookalike");
+        let lookalikes: Vec<String> = vec![
+            "out.ferrum-tmp".into(),                   // no leading dot
+            ".out.zip.ferrum-tmp".into(),              // no pid-tag
+            format!(".out.zip.{dead}-x.ferrum-tmp"),   // non-digit tag
+            format!(".notes.{dead}-5.ferrum-tmp.txt"), // wrong suffix
+            format!("folder{dead}-5.ferrum-tmp"),      // no leading dot
+        ];
+        for name in &lookalikes {
+            let p = d.0.join(name);
+            std::fs::write(&p, b"not ferrum's").unwrap();
+            age_old(&p);
+        }
+        assert_eq!(clean_stale_staging(&d.0.join("out.zip")), 0);
+        for name in &lookalikes {
+            assert!(d.0.join(name).exists(), "{name} must survive");
+        }
+    }
+
+    /// A junction named exactly like a staging folder is neither followed nor removed, and its
+    /// target is untouched (no-follow, fail-closed).
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_looking_like_staging_is_never_followed_or_removed() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("junction");
+        let target = d.0.join("precious-target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("user data.txt"), b"keep me").unwrap();
+        let link = d.0.join(format!(".out.zip.{dead}-9.ferrum-tmp"));
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        assert!(ok, "mklink /J must succeed without privileges");
+
+        // The junction is young, so the age rail alone would keep it; the point is that an
+        // entry matching the staging pattern which IS a reparse point is never followed into
+        // its target and never removed.
+        assert_eq!(clean_stale_staging(&d.0.join("out.zip")), 0);
+        assert!(link.exists(), "the junction itself is not removed");
+        assert_eq!(
+            std::fs::read_to_string(target.join("user data.txt")).unwrap(),
+            "keep me",
+            "the junction target is untouched"
+        );
+    }
+
+    /// Wiring: a ZIP create into the folder sweeps an old dead-PID leftover next to it.
+    #[cfg(windows)]
+    #[test]
+    fn a_zip_create_sweeps_stale_staging_in_the_destination_folder() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("wiring");
+        let stale = d.0.join(format!(".out.zip.{dead}-42.ferrum-tmp"));
+        std::fs::write(&stale, b"from a crashed run").unwrap();
+        age_old(&stale);
+        let source = d.0.join("doc.txt");
+        std::fs::write(&source, b"payload").unwrap();
+
+        let dest = d.0.join("out.zip");
+        create_zip_with_policy(
+            &[source.to_string_lossy().into_owned()],
+            &dest,
+            &ArchiveLimits {
+                max_entries: 100,
+                max_total_bytes: u64::MAX,
+                max_entry_bytes: u64::MAX,
+                max_depth: 8,
+            },
+            ArchiveConflictPolicy::Skip,
+        )
+        .unwrap();
+        assert!(dest.is_file(), "the archive was created");
+        assert!(
+            !stale.exists(),
+            "the stale leftover was swept by the create"
+        );
+    }
+
+    /// The sweep only ever looks at the destination's own folder: leftovers elsewhere stay.
+    #[cfg(windows)]
+    #[test]
+    fn the_sweep_never_touches_any_folder_but_the_destination_folder() {
+        let Some(dead) = a_dead_pid() else {
+            eprintln!("SKIP: no provably dead PID available");
+            return;
+        };
+        let d = Dir::new("scope");
+        let elsewhere = d.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let stranger = elsewhere.join(format!(".out.zip.{dead}-1.ferrum-tmp"));
+        std::fs::write(&stranger, b"not this job's folder").unwrap();
+        age_old(&stranger);
+
+        // Destination is d.0/out.zip → its folder is d.0; "elsewhere" is never looked at.
+        assert_eq!(clean_stale_staging(&d.0.join("out.zip")), 0);
+        assert!(stranger.exists(), "another folder is never swept");
+
+        // A destination without a parent folder is simply not swept.
+        assert_eq!(clean_stale_staging(Path::new("out.zip")), 0);
+        assert!(stranger.exists());
     }
 }

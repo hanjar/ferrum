@@ -264,13 +264,23 @@ pub struct ActivityService {
     /// Shared with the identity worker (periodic purge prunes hidden ids).
     settings: Arc<Mutex<Settings>>,
     dir: PathBuf,
-    jobs: SyncSender<Job>,
+    jobs: Option<SyncSender<Job>>,
     dropped_jobs: AtomicU64,
     dropped_visits: AtomicU64,
     /// Bumped (before the store lock is taken) by every privacy-epoch-changing
     /// operation; compared by the worker against each queued visit.
     generation: Arc<AtomicU64>,
     recovered: bool,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ActivityService {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 // chat-reader:begin
@@ -987,7 +997,7 @@ impl ActivityService {
             dir: dir.to_path_buf(),
             interval: purge_interval,
         };
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("activity-identity".into())
             .spawn(move || run_worker(worker_store, worker_generation, inbox, schedule))
             .map_err(|e| e.to_string())?;
@@ -995,14 +1005,17 @@ impl ActivityService {
             store,
             settings,
             dir: dir.to_path_buf(),
-            jobs,
+            jobs: Some(jobs),
             dropped_jobs: AtomicU64::new(0),
             dropped_visits: AtomicU64::new(0),
             generation,
             recovered,
+            worker: Some(worker),
         };
         // Volume identity is established off the startup path.
-        let _ = service.jobs.try_send(Job::SyncVolumes);
+        if let Some(jobs) = &service.jobs {
+            let _ = jobs.try_send(Job::SyncVolumes);
+        }
         // Retention is enforced on startup, then periodically by the worker;
         // queries also floor at `now - retention` between purges.
         if let Err(error) = purge_expired(&service.store, &service.settings, dir, now_ms()) {
@@ -1023,11 +1036,13 @@ impl ActivityService {
         if changes.is_empty() {
             return;
         }
-        match self.jobs.try_send(Job::Changes(changes)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                let dropped = self.dropped_jobs.fetch_add(1, Ordering::Relaxed) + 1;
-                log::warn!("activity: identity queue full or closed ({dropped} dropped)");
+        if let Some(jobs) = &self.jobs {
+            match jobs.try_send(Job::Changes(changes)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                    let dropped = self.dropped_jobs.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::warn!("activity: identity queue full or closed ({dropped} dropped)");
+                }
             }
         }
     }
@@ -1063,7 +1078,9 @@ impl ActivityService {
     /// Blocks until identity jobs queued so far are applied (tests, shutdown).
     pub fn flush(&self) {
         let (ack, wait) = sync_channel(1);
-        if self.jobs.send(Job::Flush(ack)).is_ok() {
+        if let Some(jobs) = &self.jobs
+            && jobs.send(Job::Flush(ack)).is_ok()
+        {
             let _ = wait.recv_timeout(Duration::from_secs(10));
         }
     }
@@ -1151,17 +1168,18 @@ impl ActivityService {
     pub fn record_visit(&self, path: &str, visit: VisitKind) -> Result<String, String> {
         let receipt = build_receipt(path, visit)?;
         let seen = self.generation.load(Ordering::SeqCst);
-        Ok(
-            match self.jobs.try_send(Job::Visit(Box::new(receipt), seen)) {
-                Ok(()) => "queued",
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                    let dropped = self.dropped_visits.fetch_add(1, Ordering::Relaxed) + 1;
-                    log::warn!("activity: visit queue full or closed ({dropped} dropped)");
-                    "dropped"
-                }
+        let Some(jobs) = &self.jobs else {
+            return Ok("dropped".to_owned());
+        };
+        Ok(match jobs.try_send(Job::Visit(Box::new(receipt), seen)) {
+            Ok(()) => "queued",
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                let dropped = self.dropped_visits.fetch_add(1, Ordering::Relaxed) + 1;
+                log::warn!("activity: visit queue full or closed ({dropped} dropped)");
+                "dropped"
             }
-            .to_owned(),
-        )
+        }
+        .to_owned())
     }
 
     /// Invalidate queued visits before a privacy-epoch-changing operation.

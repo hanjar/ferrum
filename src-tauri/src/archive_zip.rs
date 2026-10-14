@@ -8,7 +8,7 @@
 use crate::archive_contract::{
     ArchiveCapabilities, ArchiveEntry, ArchiveError, ArchiveErrorCode, ArchiveFormat,
     ArchiveListRequest, ArchiveListResponse, ArchiveProvider, ArchiveReadRequest, Location,
-    MemberPath,
+    MemberPath, dedup_level, level_row,
 };
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -198,11 +198,10 @@ fn list_from(
         None => ZipProvider::open_archive(Path::new(archive_path))?,
     };
     // Direct children of `member_path`; implicit dirs synthesized and
-    // deduped by child-name. Encrypted members list with unknown size /
+    // deduped by child-name (FER-508). Encrypted members list with unknown size /
     // mtime (central-directory name only) instead of failing the whole
     // listing.
-    let mut names: Vec<(String, bool, u64, Option<i64>)> = Vec::new();
-    let mut seen_dirs = std::collections::HashSet::new();
+    let mut rows: Vec<(String, bool, u64, Option<i64>)> = Vec::new();
     for i in 0..archive.len() {
         let opened = archive.by_index(i);
         let opened = opened.map(|file| {
@@ -233,24 +232,13 @@ fn list_from(
             }
         };
         let (raw, is_dir, size, modified) = meta;
-        let Some(rest) = raw.strip_prefix(&prefix) else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue; // the requested dir itself
-        }
-        if let Some(slash) = rest.find('/') {
-            // nested under a child dir: synthesize the direct child
-            let child = &rest[..slash];
-            if !child.is_empty() && seen_dirs.insert(child.to_owned()) {
-                names.push((child.to_owned(), true, 0, None));
-            }
-        } else {
-            names.push((rest.to_owned(), is_dir, size, modified));
+        if let Some(row) = level_row(&prefix, &raw, is_dir, size, modified) {
+            rows.push(row);
         }
     }
+    let rows = dedup_level(member_path.as_str(), rows)?;
 
-    let mut entries: Vec<ArchiveEntry> = names
+    let mut entries: Vec<ArchiveEntry> = rows
         .into_iter()
         .map(|(name, is_dir, size, modified_ms)| {
             let full = if prefix.is_empty() {
@@ -600,5 +588,82 @@ impl ArchiveProvider for ZipProvider {
             Path::new(&request.archive_path),
             request.password.as_deref(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archive_contract::RawLevelRow;
+
+    fn row(name: &str, is_dir: bool, size: u64) -> RawLevelRow {
+        (name.to_owned(), is_dir, size, None)
+    }
+
+    fn names(rows: &[RawLevelRow]) -> Vec<(&str, bool)> {
+        rows.iter().map(|(n, d, _, _)| (n.as_str(), *d)).collect()
+    }
+
+    fn list_level(
+        dir: &str,
+        members: &[(&str, bool, u64)],
+    ) -> Result<Vec<RawLevelRow>, ArchiveError> {
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let rows = members
+            .iter()
+            .filter_map(|(raw, d, s)| level_row(&prefix, raw, *d, *s, None))
+            .collect();
+        dedup_level(dir, rows)
+    }
+
+    #[test]
+    fn zip_synthetic_duplicate_files_conflict() {
+        let err = dedup_level(
+            "",
+            vec![row("file.txt", false, 10), row("file.txt", false, 20)],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("file.txt"));
+    }
+
+    #[test]
+    fn zip_synthetic_case_variant_files_conflict() {
+        let err = dedup_level(
+            "",
+            vec![row("file.txt", false, 10), row("FILE.TXT", false, 20)],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("FILE.TXT"));
+    }
+
+    #[test]
+    fn zip_synthetic_file_and_folder_conflict() {
+        let err =
+            dedup_level("", vec![row("items", false, 10), row("items", true, 0)]).unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+        assert_eq!(err.member_path.as_deref(), Some("items"));
+    }
+
+    #[test]
+    fn zip_synthetic_folder_case_variants_stay_separate() {
+        let members = [("docs/a.txt", false, 5), ("Docs/b.txt", false, 10)];
+        let root = list_level("", &members).unwrap();
+        assert_eq!(names(&root), vec![("docs", true), ("Docs", true)]);
+        let lower = list_level("docs", &members).unwrap();
+        assert_eq!(names(&lower), vec![("a.txt", false)]);
+        let upper = list_level("Docs", &members).unwrap();
+        assert_eq!(names(&upper), vec![("b.txt", false)]);
+    }
+
+    #[test]
+    fn zip_synthetic_identical_folders_merge() {
+        let merged = dedup_level("", vec![row("docs", true, 0), row("docs", true, 0)]).unwrap();
+        assert_eq!(names(&merged), vec![("docs", true)]);
     }
 }

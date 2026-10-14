@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use super::provider::{
     CancelToken, ConnectionReport, Deps, NullLog, OsCredentials, PlanOutcome, PlanRequest,
-    ProviderConfig, ProviderError, ProviderErrorKind, SystemClock, gate_control_capabilities,
+    ProviderConfig, ProviderError, ProviderErrorKind, SystemClock, fail, gate_control_capabilities,
     gate_indexer_capabilities, gate_read_capabilities, plan, test_connection,
 };
+use super::setup_commands::{config_dir, locked_endpoint_in};
 use super::transport::UreqTransport;
 
 /// Cancel tokens of in-flight plan requests, keyed by request id.
@@ -60,29 +61,43 @@ fn outcome_json(outcome: PlanOutcome) -> Result<Value, ProviderError> {
     }
 }
 
-fn run_plan(
+/// The plan step with injectable deps, split from the production wiring so tests can prove
+/// refusals happen with a counted, never-called transport (FER-512 P3-1).
+fn run_plan_with(
+    deps: &Deps<'_>,
     config: &ProviderConfig,
     request: &PlanRequest,
     cancel: &CancelToken,
 ) -> Result<Value, ProviderError> {
-    let transport = UreqTransport;
-    let clock = SystemClock::default();
-    let deps = Deps {
-        transport: &transport,
-        credentials: &OsCredentials,
-        clock: &clock,
-        log: &NullLog,
+    outcome_json(plan(deps, config, request, cancel)?)
+}
+
+/// The send core of `ai_plan_intent` without Tauri types (FER-512 P3-1): the endpoint gate runs
+/// strictly FIRST, so a refused request reaches `deps.transport` never.
+fn run_gated_plan(
+    dir: &std::path::Path,
+    config: &ProviderConfig,
+    request: &PlanRequest,
+    cancel: &CancelToken,
+    deps: &Deps<'_>,
+) -> Result<Value, ProviderError> {
+    let endpoint = locked_endpoint_in(dir, &config.endpoint).map_err(|kind| fail(kind, 0))?;
+    let config = ProviderConfig {
+        endpoint,
+        ..config.clone()
     };
-    outcome_json(plan(&deps, config, request, cancel)?)
+    run_plan_with(deps, &config, request, cancel)
 }
 
 #[tauri::command]
 pub async fn ai_plan_intent(
     state: State<'_, AiState>,
     activity: State<'_, crate::activity_service::ActivityHandle>,
+    app: AppHandle,
     config: ProviderConfig,
     mut request: PlanRequest,
 ) -> Result<Value, ProviderError> {
+    let dir = config_dir(&app);
     // ACT-08: the read capability is only offered while the activity store is available and
     // (FER-432) its first-run disclosure was acknowledged.
     gate_read_capabilities(
@@ -95,9 +110,19 @@ pub async fn ai_plan_intent(
     gate_indexer_capabilities(&mut request, cfg!(windows));
     let token = state.register(&request.request_id)?;
     let id = request.request_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || run_plan(&config, &request, &token))
-        .await
-        .unwrap_or_else(|_| Err(internal()));
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let transport = UreqTransport;
+        let clock = SystemClock::default();
+        let deps = Deps {
+            transport: &transport,
+            credentials: &OsCredentials,
+            clock: &clock,
+            log: &NullLog,
+        };
+        run_gated_plan(&dir, &config, &request, &token, &deps)
+    })
+    .await
+    .unwrap_or_else(|_| Err(internal()));
     state.finish(&id);
     result
 }
@@ -108,7 +133,15 @@ pub fn ai_cancel_plan(state: State<'_, AiState>, request_id: String) {
 }
 
 #[tauri::command]
-pub async fn ai_test_connection(config: ProviderConfig) -> Result<ConnectionReport, ProviderError> {
+pub async fn ai_test_connection(
+    app: AppHandle,
+    config: ProviderConfig,
+) -> Result<ConnectionReport, ProviderError> {
+    // FER-512 P3-1: the test pings the SAVED endpoint only; a draft that differs must be saved
+    // (with its native confirmation) first.
+    let endpoint = locked_endpoint_in(&config_dir(&app), &config.endpoint)
+        .map_err(|kind| super::provider::fail(kind, 0))?;
+    let config = ProviderConfig { endpoint, ..config };
     tauri::async_runtime::spawn_blocking(move || {
         let transport = UreqTransport;
         let clock = SystemClock::default();
@@ -122,4 +155,152 @@ pub async fn ai_test_connection(config: ProviderConfig) -> Result<ConnectionRepo
     })
     .await
     .map_err(|_| internal())
+}
+
+#[cfg(test)]
+mod fer512_gate_tests {
+    use super::super::credential::CREDENTIAL_TARGET;
+    use super::super::provider::{
+        Clock, CredentialSource, HttpRequest, HttpResponse, HttpTransport, LogSink, Secret,
+        StructuredMode, TransportError,
+    };
+    use super::*;
+    use serde_json::json;
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    /// Counting transport: any call would mean the request left the machine.
+    struct CountingTransport(RefCell<usize>);
+    impl HttpTransport for CountingTransport {
+        fn post_json(
+            &self,
+            _req: &HttpRequest,
+            _cancel: &CancelToken,
+        ) -> Result<HttpResponse, TransportError> {
+            *self.0.borrow_mut() += 1;
+            // A valid QUESTION plan reply: the outcome does not matter here, only that a call
+            // happened (or not).
+            let content = json!({"kind": "question", "text": "hi"}).to_string();
+            Ok(HttpResponse {
+                status: 200,
+                retry_after: None,
+                body: json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]})
+                    .to_string(),
+            })
+        }
+    }
+    struct FakeCredentials;
+    impl CredentialSource for FakeCredentials {
+        fn read(
+            &self,
+            _reference: &str,
+        ) -> Result<Secret, super::super::credential::CredentialError> {
+            Ok(Secret::new("sk-test-DUMMY-not-a-real-key".to_owned()))
+        }
+    }
+    struct FakeClock;
+    impl Clock for FakeClock {
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn sleep(&self, _delay: Duration, _cancel: &CancelToken) -> bool {
+            true
+        }
+    }
+    struct SilentLog;
+    impl LogSink for SilentLog {
+        fn log(&self, _line: &str) {}
+    }
+
+    fn saved_config() -> ProviderConfig {
+        ProviderConfig {
+            endpoint: "https://api.example.com/v1".into(),
+            model: "m".into(),
+            timeout_ms: 5000,
+            credential_ref: CREDENTIAL_TARGET.into(),
+            structured: StructuredMode::JsonObject,
+        }
+    }
+
+    fn plan_request() -> PlanRequest {
+        PlanRequest {
+            request_id: "req_gate".into(),
+            user_text: "hello".into(),
+            context: super::super::provider::OutboundContext {
+                active_pane: super::super::provider::PaneName::Left,
+                left_location: super::super::provider::LocationKind::Disk,
+                right_location: super::super::provider::LocationKind::Disk,
+                left_count: 0,
+                right_count: 0,
+                show_hidden: false,
+                filter_active: false,
+            },
+            capabilities: None,
+        }
+    }
+
+    /// The required FER-512 proof: a request whose endpoint differs from the saved setup is
+    /// refused and the transport is called ZERO times — nothing (and no key) leaves the machine.
+    #[test]
+    fn a_different_endpoint_is_refused_before_any_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = CountingTransport(RefCell::new(0));
+        let clock = FakeClock;
+        let deps = Deps {
+            transport: &transport,
+            credentials: &FakeCredentials,
+            clock: &clock,
+            log: &SilentLog,
+        };
+        // No saved setup at all: refused without a call.
+        let err = run_gated_plan(
+            dir.path(),
+            &saved_config(),
+            &plan_request(),
+            &CancelToken::default(),
+            &deps,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ProviderErrorKind::EndpointMismatch);
+        assert_eq!(*transport.0.borrow(), 0, "no request may be sent");
+        // Saved setup, different request endpoint: same refusal, still no call.
+        super::super::setup_commands::save_setup_in(dir.path(), &saved_config(), |_| true).unwrap();
+        let mut evil = saved_config();
+        evil.endpoint = "https://attacker.example/v1".into();
+        let err = run_gated_plan(
+            dir.path(),
+            &evil,
+            &plan_request(),
+            &CancelToken::default(),
+            &deps,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ProviderErrorKind::EndpointMismatch);
+        assert_eq!(*transport.0.borrow(), 0, "still no request");
+    }
+
+    /// The saved endpoint passes exactly once, and the URL the transport sees is built from the
+    /// STORED endpoint (the webview string could not have swapped it).
+    #[test]
+    fn the_saved_endpoint_passes_and_reaches_the_transport_once() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::setup_commands::save_setup_in(dir.path(), &saved_config(), |_| true).unwrap();
+        let transport = CountingTransport(RefCell::new(0));
+        let clock = FakeClock;
+        let deps = Deps {
+            transport: &transport,
+            credentials: &FakeCredentials,
+            clock: &clock,
+            log: &SilentLog,
+        };
+        run_gated_plan(
+            dir.path(),
+            &saved_config(),
+            &plan_request(),
+            &CancelToken::default(),
+            &deps,
+        )
+        .unwrap();
+        assert_eq!(*transport.0.borrow(), 1);
+    }
 }

@@ -2,38 +2,50 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ArchiveSettingsSection from './ArchiveSettingsSection.svelte';
+import { FsError } from '../ipc/types';
 import { ui } from '../uiState.svelte';
 
 const archiveMocks = vi.hoisted(() => ({
   archiveRarToolDetect: vi.fn(),
   archiveRarToolProbe: vi.fn(),
-  flush: vi.fn(),
-  order: [] as string[],
+  archiveRarToolStatus: vi.fn(),
+  archiveRarToolSetPath: vi.fn(),
 }));
 
 vi.mock('../ipc/archive', () => ({
   archiveRarToolDetect: () => archiveMocks.archiveRarToolDetect(),
-  archiveRarToolProbe: () => {
-    archiveMocks.order.push(`probe:${ui.rarExePath}`);
-    return archiveMocks.archiveRarToolProbe();
-  },
+  archiveRarToolProbe: () => archiveMocks.archiveRarToolProbe(),
+  archiveRarToolStatus: () => archiveMocks.archiveRarToolStatus(),
+  archiveRarToolSetPath: (path: string | null) => archiveMocks.archiveRarToolSetPath(path),
+}));
+
+// FER-511: the section must have NO prefs-save path at all. Both are spied so a regression
+// that starts saving the path through save_prefs/flush fails these tests.
+const prefsMocks = vi.hoisted(() => ({
+  savePrefs: vi.fn(),
+  flush: vi.fn(),
+}));
+
+vi.mock('../ipc/prefs', () => ({
+  savePrefs: () => prefsMocks.savePrefs(),
 }));
 
 vi.mock('../stores/prefsStore.svelte', () => ({
   prefs: {
-    flush: () => {
-      archiveMocks.order.push(`flush:${ui.rarExePath}`);
-      return archiveMocks.flush();
-    },
+    flush: () => prefsMocks.flush(),
   },
 }));
 
+const READY = { path: 'C:\\Program Files\\WinRAR\\Rar.exe', state: 'ready' };
+
+function statusState(state: string): { path: string | null; state: string } {
+  return { path: state === 'unset' ? null : 'C:\\Program Files\\WinRAR\\Rar.exe', state };
+}
+
 beforeEach(() => {
-  archiveMocks.archiveRarToolDetect.mockReset();
-  archiveMocks.archiveRarToolProbe.mockReset();
-  archiveMocks.flush.mockReset();
-  archiveMocks.flush.mockResolvedValue(true);
-  archiveMocks.order.length = 0;
+  for (const mock of Object.values(archiveMocks)) mock.mockReset();
+  for (const mock of Object.values(prefsMocks)) mock.mockReset();
+  archiveMocks.archiveRarToolStatus.mockResolvedValue({ path: null, state: 'unset' });
   ui.rarExePath = null;
 });
 
@@ -41,116 +53,146 @@ afterEach(() => {
   ui.rarExePath = null;
 });
 
-describe('FER-505: ArchiveSettingsSection component', () => {
+describe('FER-505/511: ArchiveSettingsSection component', () => {
   it('renders section and disclaimer text', () => {
     const { getByText } = render(ArchiveSettingsSection);
     expect(getByText(/Ferrum tidak menyertakan WinRAR/i)).toBeTruthy();
   });
 
-  it('Cari otomatis populates the path field and updates ui.rarExePath on success', async () => {
+  it('Cari otomatis fills the draft input only — nothing is stored', async () => {
     archiveMocks.archiveRarToolDetect.mockResolvedValue('C:\\Program Files\\WinRAR\\Rar.exe');
     const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
 
-    const detectBtn = getByTestId('rar-detect-btn');
-    await fireEvent.click(detectBtn);
+    await fireEvent.click(getByTestId('rar-detect-btn'));
     await tick();
 
     expect(archiveMocks.archiveRarToolDetect).toHaveBeenCalledTimes(1);
-    expect(ui.rarExePath).toBe('C:\\Program Files\\WinRAR\\Rar.exe');
-
     const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
     expect(input.value).toBe('C:\\Program Files\\WinRAR\\Rar.exe');
-
-    const status = getByTestId('rar-probe-status');
-    expect(status.textContent).toContain('Ditemukan: C:\\Program Files\\WinRAR\\Rar.exe');
+    expect(archiveMocks.archiveRarToolSetPath).not.toHaveBeenCalled();
+    expect(prefsMocks.savePrefs).not.toHaveBeenCalled();
+    expect(prefsMocks.flush).not.toHaveBeenCalled();
   });
 
   it('Cari otomatis shows not found message if detection returns null', async () => {
     archiveMocks.archiveRarToolDetect.mockResolvedValue(null);
     const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
 
-    const detectBtn = getByTestId('rar-detect-btn');
-    await fireEvent.click(detectBtn);
+    await fireEvent.click(getByTestId('rar-detect-btn'));
     await tick();
-
-    expect(archiveMocks.archiveRarToolDetect).toHaveBeenCalledTimes(1);
-    expect(ui.rarExePath).toBeNull();
 
     const status = getByTestId('rar-probe-status');
     expect(status.textContent).toContain('tidak ditemukan di lokasi standar');
   });
 
-  it('Tes button calls probe and displays version when probe succeeds', async () => {
-    ui.rarExePath = 'C:\\Program Files\\WinRAR\\Rar.exe';
-    archiveMocks.archiveRarToolProbe.mockResolvedValue({
-      ok: true,
-      version: 'RAR 7.00 x64',
-    });
+  it('"Pakai path ini" calls archive_rar_tool_set_path — never save_prefs', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(READY);
+    archiveMocks.archiveRarToolSetPath.mockResolvedValue({ saved: true });
     const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
-
-    const probeBtn = getByTestId('rar-probe-btn');
-    await fireEvent.click(probeBtn);
-    await tick();
-
-    expect(archiveMocks.archiveRarToolProbe).toHaveBeenCalledTimes(1);
-    const status = getByTestId('rar-probe-status');
-    expect(status.textContent).toContain('RAR 7.00 x64');
-  });
-
-  it('Tes button displays reason when probe fails', async () => {
-    ui.rarExePath = 'C:\\Bad\\Rar.exe';
-    archiveMocks.archiveRarToolProbe.mockResolvedValue({
-      ok: false,
-      reason: 'File tidak ditemukan di path yang ditentukan',
-    });
-    const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
-
-    const probeBtn = getByTestId('rar-probe-btn');
-    await fireEvent.click(probeBtn);
-    await tick();
-
-    expect(archiveRarToolProbeMockTimes(archiveMocks.archiveRarToolProbe)).toBe(1);
-    const status = getByTestId('rar-probe-status');
-    expect(status.textContent).toContain('File tidak ditemukan');
-  });
-
-  it('Tes saves the path being edited (flush, no debounce) before probing it', async () => {
-    archiveMocks.archiveRarToolProbe.mockResolvedValue({ ok: true, version: 'RAR 7.00 x64' });
-    const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
 
     const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'D:\\Tools\\WinRAR\\Rar.exe' } });
-    await tick();
-    await fireEvent.click(getByTestId('rar-probe-btn'));
+    await fireEvent.click(getByTestId('rar-apply-btn'));
     await tick();
     await tick();
 
-    expect(archiveMocks.order).toEqual([
-      'flush:D:\\Tools\\WinRAR\\Rar.exe',
-      'probe:D:\\Tools\\WinRAR\\Rar.exe',
-    ]);
+    expect(archiveMocks.archiveRarToolSetPath).toHaveBeenCalledTimes(1);
+    expect(archiveMocks.archiveRarToolSetPath).toHaveBeenCalledWith('D:\\Tools\\WinRAR\\Rar.exe');
+    // FER-511: the path never travels through save_prefs or the prefs store flush.
+    expect(prefsMocks.savePrefs).not.toHaveBeenCalled();
+    expect(prefsMocks.flush).not.toHaveBeenCalled();
+    expect(getByTestId('rar-probe-status').textContent).toContain('Path tersimpan');
   });
 
-  it('Tes does not probe when saving the prefs fails', async () => {
-    ui.rarExePath = 'C:\\Program Files\\WinRAR\\Rar.exe';
-    archiveMocks.flush.mockResolvedValue(false);
+  it('cancelling the native dialog shows that nothing was stored', async () => {
+    archiveMocks.archiveRarToolSetPath.mockRejectedValue(
+      new FsError({
+        code: 'cancelled',
+        message: 'Konfirmasi WinRAR dibatalkan; path tidak disimpan',
+      }),
+    );
     const { getByTestId } = render(ArchiveSettingsSection);
-    await tick();
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
 
+    const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'D:\\Tools\\WinRAR\\Rar.exe' } });
+    await fireEvent.click(getByTestId('rar-apply-btn'));
+    await vi.waitFor(() =>
+      expect(getByTestId('rar-probe-status').textContent).toContain('tidak disimpan'),
+    );
+
+    expect(archiveMocks.archiveRarToolSetPath).toHaveBeenCalledTimes(1);
+    expect(ui.rarExePath).toBeNull();
+  });
+
+  it('shows the re-confirmation-required status for unconfirmed legacy paths', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(statusState('unconfirmed'));
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() =>
+      expect(getByTestId('rar-status').textContent).toContain('BELUM dikonfirmasi'),
+    );
+
+    // The stored-but-unconfirmed path may not be probed either (the backend would refuse).
+    expect((getByTestId('rar-probe-btn') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows the changed-exe warning when the fingerprint no longer matches', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(statusState('changed'));
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() =>
+      expect(getByTestId('rar-status').textContent).toContain('berubah sejak dikonfirmasi'),
+    );
+  });
+
+  it('Tes probes the SAVED confirmed path (no prefs flush first) and shows the version', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(READY);
+    ui.rarExePath = 'C:\\Program Files\\WinRAR\\Rar.exe';
+    archiveMocks.archiveRarToolProbe.mockResolvedValue({ ok: true, version: 'RAR 7.00 x64' });
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
+
+    // Editing the draft must not touch the probe: it runs the stored exe only.
+    const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'D:\\Elsewhere\\Rar.exe' } });
     await fireEvent.click(getByTestId('rar-probe-btn'));
     await tick();
     await tick();
 
-    expect(archiveMocks.archiveRarToolProbe).not.toHaveBeenCalled();
-    expect(getByTestId('rar-probe-status').textContent).toContain('Gagal menyimpan');
+    expect(archiveMocks.archiveRarToolProbe).toHaveBeenCalledTimes(1);
+    expect(prefsMocks.flush).not.toHaveBeenCalled();
+    expect(getByTestId('rar-probe-status').textContent).toContain('RAR 7.00 x64');
+  });
+
+  it('Tes shows the backend reason when the probe fails', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(READY);
+    archiveMocks.archiveRarToolProbe.mockResolvedValue({
+      ok: false,
+      reason: 'WinRAR berubah sejak dikonfirmasi; atur ulang di Settings',
+    });
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
+
+    await fireEvent.click(getByTestId('rar-probe-btn'));
+    await tick();
+
+    expect(getByTestId('rar-probe-status').textContent).toContain('berubah sejak dikonfirmasi');
+  });
+
+  it('Hapus clears the stored setting through set_path(null) without any dialog', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(READY);
+    ui.rarExePath = 'C:\\Program Files\\WinRAR\\Rar.exe';
+    archiveMocks.archiveRarToolSetPath.mockResolvedValue({ saved: true });
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolStatus).toHaveBeenCalled());
+
+    await fireEvent.click(getByTestId('rar-clear-btn'));
+    await tick();
+    await tick();
+
+    expect(archiveMocks.archiveRarToolSetPath).toHaveBeenCalledWith(null);
+    expect(ui.rarExePath).toBeNull();
   });
 });
-
-function archiveRarToolProbeMockTimes(mock: ReturnType<typeof vi.fn>): number {
-  return mock.mock.calls.length;
-}

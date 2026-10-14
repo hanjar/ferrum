@@ -3,7 +3,7 @@
 //! sensitive tick, sends the question through the answer-only path and returns the answer text
 //! plus a content-free summary of what was sent. Cancel with `ai_cancel_plan(requestId)`.
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use super::ask::{AskError, AskOutcome, AskRequest, ask, check_sensitive, sent_summary};
 use super::attach::{self, InspectResult};
@@ -11,6 +11,7 @@ use super::commands::AiState;
 use super::provider::{
     CancelToken, Deps, NullLog, OsCredentials, ProviderConfig, ProviderErrorKind, SystemClock,
 };
+use super::setup_commands::{config_dir, locked_endpoint_in};
 use super::transport::UreqTransport;
 use crate::domain::FsError;
 
@@ -78,9 +79,15 @@ fn run_ask(
 #[tauri::command]
 pub async fn ai_ask(
     state: State<'_, AiState>,
+    app: AppHandle,
     config: ProviderConfig,
     request: AskRequest,
 ) -> Result<AskOutcome, AskError> {
+    // FER-512 P3-1: the question (and with it the attachment content and the API key) only ever
+    // goes to the SAVED endpoint. A different one is refused before anything is read or sent.
+    let endpoint = locked_endpoint_in(&config_dir(&app), &config.endpoint)
+        .map_err(|k| AskError::provider(k, 0))?;
+    let config = ProviderConfig { endpoint, ..config };
     let token = state
         .register(&request.request_id)
         .map_err(|e| AskError::provider(e.kind, 0))?;

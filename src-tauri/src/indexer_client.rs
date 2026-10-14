@@ -10,8 +10,11 @@
 //!   elevated administrator, so Ferrum runs `ferrum-indexer.exe set-mode
 //!   high_performance` through UAC (binary resolved next to ferrum.exe, and
 //!   in release builds only from Program Files — FER-460 rule).
-//! - Both require `confirmed: true`, set by the frontend only after the
-//!   privacy dialog (`IndexerModeDialog`) was accepted.
+//! - FER-512 P3-2: EVERY mode change asks in a native Windows dialog (hotlist
+//!   pattern) before anything is contacted. The webview's `confirmed` flag is
+//!   no longer authorization — it stays a parameter for compatibility but is
+//!   ignored; the confirmation card in the UI is only the first UX step and
+//!   the native dialog is the real gate.
 
 use serde::Serialize;
 
@@ -150,20 +153,74 @@ impl IndexerError {
     }
 }
 
-/// Validate the frontend's request before anything is contacted.
-pub fn check_set_mode_request(
-    mode: &str,
-    confirmed: bool,
-) -> Result<ferrum_indexer::proto::Mode, IndexerError> {
-    let m = ferrum_indexer::proto::Mode::parse(mode)
-        .ok_or_else(|| IndexerError::new("invalid_mode", format!("unknown mode {mode:?}")))?;
-    if !confirmed {
+/// Validate the mode before anything is contacted. FER-512 P3-2: there is no
+/// `confirmed` parameter any more — the webview flag never authorized a mode
+/// change, the native dialog does (see `set_mode_with_confirm`).
+pub fn check_set_mode_request(mode: &str) -> Result<ferrum_indexer::proto::Mode, IndexerError> {
+    ferrum_indexer::proto::Mode::parse(mode)
+        .ok_or_else(|| IndexerError::new("invalid_mode", format!("unknown mode {mode:?}")))
+}
+
+/// FER-512 P3-2: the text of the native confirmation, built from the PARSED
+/// mode only (never from webview text). It names the target mode and its
+/// privacy direction.
+fn set_mode_confirm_text(m: ferrum_indexer::proto::Mode) -> String {
+    let (target, why) = match m {
+        ferrum_indexer::proto::Mode::HighPerformance => (
+            "HIGH PERFORMANCE",
+            "Indeks memuat SEMUA folder, termasuk profil pengguna lain di PC ini (privasi lebih rendah). Naik ke mode ini butuh izin administrator (UAC).",
+        ),
+        ferrum_indexer::proto::Mode::Shared => (
+            "SHARED (bersama)",
+            "Indeks tidak lagi memuat profil pengguna, dan hasil pencarian difilter hak akses Anda (privasi lebih tinggi).",
+        ),
+    };
+    format!("Ubah mode FerrumIndexer ke {target}?\n\n{why}\n\nLanjutkan?")
+}
+
+/// FER-512 P3-2: the whole change on one thread — the native question first,
+/// only on Yes the actual change. `confirm` is the injectable seam (production
+/// passes a native `MessageBoxW` owned by the Ferrum window, which the webview
+/// can neither draw nor answer); `apply` performs the change. A "no" reaches
+/// `apply` never, so no pipe is contacted and the mode stays as it was.
+pub fn set_mode_with_confirm(
+    m: ferrum_indexer::proto::Mode,
+    confirm: impl FnOnce(&str) -> bool,
+    mut apply: impl FnMut(ferrum_indexer::proto::Mode) -> Result<IndexerSetModeResult, IndexerError>,
+) -> Result<IndexerSetModeResult, IndexerError> {
+    if !confirm(&set_mode_confirm_text(m)) {
         return Err(IndexerError::new(
             "not_confirmed",
-            "the privacy confirmation was not accepted",
+            "the native confirmation was declined",
         ));
     }
-    Ok(m)
+    apply(m)
+}
+
+/// FER-512: native Windows message box owned by the Ferrum window (hotlist
+/// pattern, copied locally). The webview can neither draw it nor answer it.
+/// Cancel is the default button, so a held Enter key cannot change the mode.
+#[cfg(windows)]
+fn native_confirm(owner: isize, text: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW,
+    };
+    let text = crate::shell_open::to_wide(text);
+    let caption = crate::shell_open::to_wide("Konfirmasi mode FerrumIndexer");
+    // SAFETY: both strings are NUL-terminated UTF-16; `owner` is the window handle or 0.
+    unsafe {
+        MessageBoxW(
+            owner as _,
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        ) == IDOK
+    }
+}
+
+#[cfg(not(windows))]
+fn native_confirm(_owner: isize, _text: &str) -> bool {
+    false
 }
 
 #[tauri::command]
@@ -176,17 +233,27 @@ pub async fn indexer_status() -> IndexerStatus {
         })
 }
 
+/// Change the indexer mode. The UI may still send `confirmed` (compatibility);
+/// it is IGNORED as authorization — every change asks in a native dialog here,
+/// and only the dialog's Yes reaches the service or the UAC path.
 #[tauri::command]
 pub async fn indexer_set_mode(
     window: tauri::Window,
     mode: String,
     confirmed: bool,
 ) -> Result<IndexerSetModeResult, IndexerError> {
-    let m = check_set_mode_request(&mode, confirmed)?;
+    let _ = confirmed;
+    let m = check_set_mode_request(&mode)?;
     let hwnd = owner_hwnd(&window);
-    tauri::async_runtime::spawn_blocking(move || imp::set_mode(m, hwnd))
-        .await
-        .map_err(|e| IndexerError::new("failed", e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        set_mode_with_confirm(
+            m,
+            |text| native_confirm(hwnd, text),
+            |m| imp::set_mode(m, hwnd),
+        )
+    })
+    .await
+    .map_err(|e| IndexerError::new("failed", e.to_string()))?
 }
 
 fn owner_hwnd(window: &tauri::Window) -> isize {
@@ -1158,21 +1225,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_mode_needs_a_valid_mode_and_confirmation() {
+    fn set_mode_needs_a_valid_mode_and_ignores_the_webview_flag() {
+        // FER-512 P3-2: there is no `confirmed` input to trust any more — the
+        // parse is mode-only and the native dialog is the gate.
         assert_eq!(
-            check_set_mode_request("shared", false).unwrap_err().code,
-            "not_confirmed"
-        );
-        assert_eq!(
-            check_set_mode_request("fast", true).unwrap_err().code,
+            check_set_mode_request("fast").unwrap_err().code,
             "invalid_mode"
         );
         assert_eq!(
-            check_set_mode_request("Shared", true).unwrap_err().code,
+            check_set_mode_request("Shared").unwrap_err().code,
             "invalid_mode"
         );
-        assert!(check_set_mode_request("high_performance", true).is_ok());
-        assert!(check_set_mode_request("shared", true).is_ok());
+        assert_eq!(check_set_mode_request("").unwrap_err().code, "invalid_mode");
+        assert!(check_set_mode_request("high_performance").is_ok());
+        assert!(check_set_mode_request("shared").is_ok());
+    }
+
+    /// The dialog names the target mode and its privacy direction; the text is
+    /// built from the parsed mode only.
+    #[test]
+    fn the_confirmation_text_names_the_mode_and_its_privacy_direction() {
+        let up = set_mode_confirm_text(ferrum_indexer::proto::Mode::HighPerformance);
+        assert!(up.contains("HIGH PERFORMANCE"), "{up}");
+        assert!(up.contains("privasi lebih rendah"), "{up}");
+        assert!(up.contains("UAC"), "{up}");
+        let down = set_mode_confirm_text(ferrum_indexer::proto::Mode::Shared);
+        assert!(down.contains("SHARED"), "{down}");
+        assert!(down.contains("privasi lebih tinggi"), "{down}");
+    }
+
+    /// `confirmed=true` from the webview changes nothing on its own: a declined
+    /// NATIVE confirmation returns `not_confirmed` and never reaches the change
+    /// (no pipe contact, no UAC), so the mode stays as it was.
+    #[test]
+    fn a_declined_native_confirmation_leaves_the_mode_untouched() {
+        let applied = std::cell::Cell::new(false);
+        let err = set_mode_with_confirm(
+            ferrum_indexer::proto::Mode::Shared,
+            |text| {
+                assert!(text.contains("SHARED"), "{text}");
+                false // the user says no
+            },
+            |_| {
+                applied.set(true);
+                Ok(IndexerSetModeResult {
+                    mode: "shared".into(),
+                    changed: true,
+                    elevated: false,
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "not_confirmed");
+        assert!(!applied.get(), "the change must not run after a no");
+    }
+
+    /// A real Yes applies exactly the parsed mode.
+    #[test]
+    fn a_yes_confirmation_applies_the_parsed_mode() {
+        let seen = std::cell::Cell::new(None);
+        let out = set_mode_with_confirm(
+            ferrum_indexer::proto::Mode::HighPerformance,
+            |_| true,
+            |m| {
+                seen.set(Some(m));
+                Ok(IndexerSetModeResult {
+                    mode: m.as_str().into(),
+                    changed: true,
+                    elevated: true,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            seen.get(),
+            Some(ferrum_indexer::proto::Mode::HighPerformance)
+        );
+        assert_eq!(out.mode, "high_performance");
+        assert!(out.elevated);
     }
 
     #[test]

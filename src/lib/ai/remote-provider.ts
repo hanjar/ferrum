@@ -33,6 +33,8 @@ export type BackendIntentTransport = (
 export const BACKEND_ERROR_KINDS = [
   'invalid_config',
   'unsafe_endpoint',
+  // FER-512: the request endpoint differs from the saved AI setup (or there is none).
+  'endpoint_mismatch',
   'credential',
   'auth',
   'rate_limited',

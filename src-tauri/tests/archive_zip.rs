@@ -501,3 +501,79 @@ fn cancellation_midstream_leaves_no_partial_final_name() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[test]
+fn zip_case_variant_files_conflict_on_list() {
+    let dir = temp("zip-case");
+    let zip_path = dir.join("case.zip");
+    write_zip(
+        &zip_path,
+        &[("test.txt", Some(b"1")), ("TEST.TXT", Some(b"2"))],
+    );
+
+    let provider = ZipProvider::new();
+    let err = provider.list(&list_req(&zip_path, "")).unwrap_err();
+    assert_eq!(err.code, Code::Conflict);
+    assert_eq!(err.member_path.as_deref(), Some("TEST.TXT"));
+}
+
+#[test]
+fn zip_file_and_folder_conflict_on_list() {
+    let dir = temp("zip-file-folder");
+    let zip_path = dir.join("clash.zip");
+    write_zip(&zip_path, &[("items", Some(b"content")), ("items/", None)]);
+
+    let provider = ZipProvider::new();
+    let err = provider.list(&list_req(&zip_path, "")).unwrap_err();
+    assert_eq!(err.code, Code::Conflict);
+    assert_eq!(err.member_path.as_deref(), Some("items"));
+}
+
+#[test]
+fn zip_folder_case_variants_stay_separate_rows() {
+    let dir = temp("zip-folder-case");
+    let zip_path = dir.join("folders.zip");
+    write_zip(
+        &zip_path,
+        &[
+            ("docs/a.txt", Some(b"alpha")),
+            ("Docs/b.txt", Some(b"beta")),
+        ],
+    );
+
+    let provider = ZipProvider::new();
+    let root = provider.list(&list_req(&zip_path, "")).unwrap();
+    let root_names: Vec<(&str, bool)> = root
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_dir))
+        .collect();
+    assert_eq!(root_names, vec![("docs", true), ("Docs", true)]);
+
+    let docs = provider.list(&list_req(&zip_path, "docs")).unwrap();
+    assert_eq!(docs.entries.len(), 1);
+    assert_eq!(docs.entries[0].name, "a.txt");
+
+    let docs_upper = provider.list(&list_req(&zip_path, "Docs")).unwrap();
+    assert_eq!(docs_upper.entries.len(), 1);
+    assert_eq!(docs_upper.entries[0].name, "b.txt");
+}
+
+#[test]
+fn zip_folder_exact_duplicates_merge() {
+    let dir = temp("zip-folder-merge");
+    let zip_path = dir.join("merge.zip");
+    write_zip(
+        &zip_path,
+        &[("docs/", None), ("docs/file.txt", Some(b"hello"))],
+    );
+
+    let provider = ZipProvider::new();
+    let root = provider.list(&list_req(&zip_path, "")).unwrap();
+    let folder_count = root
+        .entries
+        .iter()
+        .filter(|e| e.name == "docs" && e.is_dir)
+        .count();
+    assert_eq!(folder_count, 1);
+}

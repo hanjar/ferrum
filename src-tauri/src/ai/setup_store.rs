@@ -21,6 +21,9 @@ pub enum SetupStoreError {
     InvalidConfig,
     /// Disk tidak bisa ditulis.
     StorageFailure,
+    /// FER-512 P3-1: pengguna menjawab tidak di dialog konfirmasi native; tidak ada yang
+    /// tersimpan.
+    NotConfirmed,
 }
 
 impl SetupStoreError {
@@ -29,6 +32,7 @@ impl SetupStoreError {
             Self::UnsafeEndpoint => "unsafe_endpoint",
             Self::InvalidConfig => "invalid_config",
             Self::StorageFailure => "storage_failure",
+            Self::NotConfirmed => "not_confirmed",
         }
     }
 }

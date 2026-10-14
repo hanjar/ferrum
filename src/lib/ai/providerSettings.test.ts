@@ -199,6 +199,12 @@ describe('provider setup storage in the desktop app (FER-430)', () => {
       ok: false,
       kind: 'invalid_config',
     });
+    // FER-512: the native confirmation for a new host was answered with No.
+    failSave = { kind: 'not_confirmed' };
+    expect(await saveProviderSetup({ ...form, model: 'other' })).toEqual({
+      ok: false,
+      kind: 'not_confirmed',
+    });
     failSave = { kind: 'storage_failure' };
     expect(await saveProviderSetup({ ...form, model: 'other' })).toEqual({
       ok: false,

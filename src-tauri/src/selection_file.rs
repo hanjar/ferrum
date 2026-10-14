@@ -12,6 +12,7 @@
 use crate::domain::{FsError, validate_path};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// See module docs. `version` guards forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,16 @@ const SELECTION_VERSION: u32 = 1;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_NAMES: usize = 1_000_000;
 
+/// FER-512 P3-4: the ONLY place a selection file may live is `dir` (a full
+/// drive/UNC path that passes the same `path_guard::check_str` as content
+/// reads) + a single basename (`name`, validated exactly like `create_entry`).
+/// The webview can no longer name an arbitrary file path.
+fn selection_path(dir: &str, name: &str) -> Result<PathBuf, FsError> {
+    let dir = crate::path_guard::check_str(dir)?;
+    crate::mutations::validate_name(name)?;
+    Ok(Path::new(&dir).join(name))
+}
+
 fn validate_name(name: &str) -> Result<(), FsError> {
     if name.is_empty() {
         return Err(FsError::new(
@@ -46,11 +57,11 @@ fn validate_name(name: &str) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Write a versioned selection file (overwrite is the user's explicit
-/// choice of target path, same as any editor save).
-pub fn save_selection_file(file_path: &str, dir: &str, names: &[String]) -> Result<(), FsError> {
-    validate_path(file_path)?;
-    validate_path(dir)?;
+/// Write a versioned selection file to `check_str(dir)\name` (name = single
+/// basename, see `selection_path`; overwriting an existing selection in that
+/// folder is the user's explicit choice, same as any editor save).
+pub fn save_selection_file(dir: &str, name: &str, names: &[String]) -> Result<(), FsError> {
+    let target = selection_path(dir, name)?;
     if names.len() > MAX_NAMES {
         return Err(FsError::new(
             crate::domain::ErrorCode::InvalidPath,
@@ -70,35 +81,37 @@ pub fn save_selection_file(file_path: &str, dir: &str, names: &[String]) -> Resu
     };
     let json = serde_json::to_string_pretty(&doc)
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?;
-    fs::write(file_path, json).map_err(|e| FsError::from(e).with_path(file_path))?;
+    fs::write(&target, json)
+        .map_err(|e| FsError::from(e).with_path(target.to_string_lossy().into_owned()))?;
     Ok(())
 }
 
-/// Read + strictly validate a selection file.
-pub fn load_selection_file(file_path: &str) -> Result<SelectionFile, FsError> {
-    validate_path(file_path)?;
-    let meta = fs::metadata(file_path).map_err(|e| FsError::from(e).with_path(file_path))?;
+/// Read + strictly validate the selection file at `check_str(dir)\name`.
+pub fn load_selection_file(dir: &str, name: &str) -> Result<SelectionFile, FsError> {
+    let target = selection_path(dir, name)?;
+    let target = target.to_string_lossy().into_owned();
+    let meta = fs::metadata(&target).map_err(|e| FsError::from(e).with_path(&target))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(FsError::new(
             crate::domain::ErrorCode::InvalidPath,
             format!("Selection file too large ({} bytes)", meta.len()),
         )
-        .with_path(file_path));
+        .with_path(&target));
     }
-    let raw = fs::read_to_string(file_path).map_err(|e| FsError::from(e).with_path(file_path))?;
+    let raw = fs::read_to_string(&target).map_err(|e| FsError::from(e).with_path(&target))?;
     let doc: SelectionFile = serde_json::from_str(&raw).map_err(|e| {
         FsError::new(
             crate::domain::ErrorCode::InvalidPath,
             format!("Not a valid selection file: {e}"),
         )
-        .with_path(file_path)
+        .with_path(&target)
     })?;
     if doc.version != SELECTION_VERSION {
         return Err(FsError::new(
             crate::domain::ErrorCode::InvalidPath,
             format!("Unsupported selection file version {}", doc.version),
         )
-        .with_path(file_path));
+        .with_path(&target));
     }
     validate_path(&doc.path)?;
     if doc.names.len() > MAX_NAMES {
@@ -109,10 +122,10 @@ pub fn load_selection_file(file_path: &str) -> Result<SelectionFile, FsError> {
                 doc.names.len()
             ),
         )
-        .with_path(file_path));
+        .with_path(&target));
     }
     for n in &doc.names {
-        validate_name(n).map_err(|e| e.with_path(file_path))?;
+        validate_name(n).map_err(|e| e.with_path(&target))?;
     }
     Ok(doc)
 }
@@ -120,98 +133,156 @@ pub fn load_selection_file(file_path: &str) -> Result<SelectionFile, FsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_path(tag: &str) -> PathBuf {
+    /// Fresh temp folder; the selection file inside it is always
+    /// `<dir>\selection.json`.
+    fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ferrum-f214-{tag}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::SeqCst)
         ));
-        let _ = fs::remove_file(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn dir_str(tag: &str) -> String {
+        temp_dir(tag).to_str().unwrap().to_string()
     }
 
     #[test]
     fn save_then_load_round_trips() {
-        let path = temp_path("roundtrip");
-        let path_str = path.to_str().unwrap();
+        let dir = dir_str("roundtrip");
         save_selection_file(
-            path_str,
-            r"C:\Projects",
+            &dir,
+            "selection.json",
             &["békér.txt".into(), "dossier ünicode".into()],
         )
         .expect("save ok");
-        let doc = load_selection_file(path_str).expect("load ok");
+        let doc = load_selection_file(&dir, "selection.json").expect("load ok");
         assert_eq!(doc.version, 1);
-        assert_eq!(doc.path, r"C:\Projects");
+        assert_eq!(doc.path, dir);
         assert_eq!(doc.names, vec!["békér.txt", "dossier ünicode"]);
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn saved_json_is_versioned_camel_case() {
-        let path = temp_path("shape");
-        save_selection_file(path.to_str().unwrap(), "C:\\d", &["a.txt".into()]).unwrap();
-        let raw = fs::read_to_string(&path).unwrap();
+        let dir = dir_str("shape");
+        save_selection_file(&dir, "selection.json", &["a.txt".into()]).unwrap();
+        let raw = fs::read_to_string(Path::new(&dir).join("selection.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["version"], 1);
-        assert_eq!(v["path"], "C:\\d");
+        assert_eq!(v["path"], dir);
         assert_eq!(v["names"][0], "a.txt");
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn rejects_names_that_are_not_basenames() {
-        let path = temp_path("badnames");
-        let p = path.to_str().unwrap().to_string();
+        let dir = dir_str("badnames");
         for bad in ["..", ".", "a\\b", "a/b", "a\0b", ""] {
-            let err = save_selection_file(&p, "C:\\d", &[bad.to_string()]).unwrap_err();
+            let err = save_selection_file(&dir, bad, &["a.txt".into()]).unwrap_err();
             assert_eq!(err.code, crate::domain::ErrorCode::InvalidPath, "{bad:?}");
-            assert!(!path.exists(), "nothing written on invalid input");
+            assert!(
+                !Path::new(&dir).join("selection.json").exists(),
+                "nothing written on invalid input ({bad:?})"
+            );
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// FER-512 P3-4: traversal and separator names for the FILE are refused, so
+    /// the target is always `dir\<basename>`.
+    #[test]
+    fn rejects_traversal_file_names() {
+        let dir = dir_str("traversal");
+        for bad in [r"..\evil.json", r"sub\evil.json", "..", "."] {
+            let err = save_selection_file(&dir, bad, &["a.txt".into()]).unwrap_err();
+            assert_eq!(err.code, crate::domain::ErrorCode::InvalidPath, "{bad:?}");
+            assert!(load_selection_file(&dir, bad).is_err(), "{bad:?}");
+        }
+        // Nothing was written anywhere in (or above) the folder.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// FER-512 P3-4: the folder itself passes `path_guard::check_str` — device
+    /// namespaces and ADS spellings are refused before anything is touched, a
+    /// plain UNC folder is NOT refused by the guard (a share is a legitimate
+    /// place to work).
+    #[test]
+    fn rejects_unsafe_dirs_but_keeps_unc() {
+        for bad_dir in [r"\\.\C:", r"\\?\C:\x", r"C:\data.txt:ads", "relative", ""] {
+            let err = save_selection_file(bad_dir, "s.json", &["a".into()]).unwrap_err();
+            assert_eq!(
+                err.code,
+                crate::domain::ErrorCode::InvalidPath,
+                "{bad_dir:?}"
+            );
+        }
+        for good in [r"\\server\share\sel.json", r"C:\Users\u\sel.json"] {
+            assert!(
+                crate::path_guard::check_str(good).is_ok(),
+                "the guard must keep {good}"
+            );
+        }
+        // A guarded but missing folder fails on the filesystem, not on the guard.
+        let base = temp_dir("missing");
+        let missing = base
+            .parent()
+            .unwrap()
+            .join("ferrum-f214-not-here-512")
+            .to_string_lossy()
+            .into_owned();
+        let _ = fs::remove_dir_all(&base);
+        let err = save_selection_file(&missing, "s.json", &["a".into()]).unwrap_err();
+        assert_ne!(err.code, crate::domain::ErrorCode::InvalidPath, "{err:?}");
     }
 
     #[test]
     fn rejects_loading_hostile_or_foreign_documents() {
-        let path = temp_path("hostile");
+        let dir = dir_str("hostile");
+        let path = Path::new(&dir).join("selection.json");
         // traversal name
         fs::write(
             &path,
             r#"{"version":1,"path":"C:\\d","names":["..\\evil"]}"#,
         )
         .unwrap();
-        let err = load_selection_file(path.to_str().unwrap()).unwrap_err();
+        let err = load_selection_file(&dir, "selection.json").unwrap_err();
         assert_eq!(err.code, crate::domain::ErrorCode::InvalidPath);
         // wrong version
         fs::write(&path, r#"{"version":99,"path":"C:\\d","names":[]}"#).unwrap();
-        assert!(load_selection_file(path.to_str().unwrap()).is_err());
+        assert!(load_selection_file(&dir, "selection.json").is_err());
         // not JSON
         fs::write(&path, "garbage").unwrap();
-        assert!(load_selection_file(path.to_str().unwrap()).is_err());
+        assert!(load_selection_file(&dir, "selection.json").is_err());
         // absolute path smuggled as a name
         fs::write(
             &path,
             r#"{"version":1,"path":"C:\\d","names":["C:\\Windows\\evil"]}"#,
         )
         .unwrap();
-        assert!(load_selection_file(path.to_str().unwrap()).is_err());
-        let _ = fs::remove_file(&path);
+        assert!(load_selection_file(&dir, "selection.json").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn missing_file_maps_to_not_found() {
-        let err = load_selection_file(r"Z:\definitely\not\here.sel").unwrap_err();
+        let err = load_selection_file(r"Z:\definitely\not", "here.sel").unwrap_err();
         assert_eq!(err.code, crate::domain::ErrorCode::NotFound);
     }
 
     #[test]
     fn structural_garbage_is_rejected() {
-        assert!(save_selection_file("", "C:\\d", &["a".into()]).is_err());
-        assert!(save_selection_file("C:\\t\\s.json", "", &["a".into()]).is_err());
-        assert!(load_selection_file("  ").is_err());
+        assert!(save_selection_file("", "s.json", &["a".into()]).is_err());
+        assert!(save_selection_file("C:\\t", "", &["a".into()]).is_err());
+        assert!(load_selection_file("  ", "s.json").is_err());
+        assert!(load_selection_file("C:\\t", "  ").is_err());
     }
 }

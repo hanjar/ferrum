@@ -186,3 +186,84 @@ describe('FER-505: Pack dialog RAR format conditional display and execution', ()
     });
   });
 });
+
+describe('FER-510: the RAR option waits for the probe, even when opened as rar', () => {
+  it('shows no RAR option but a checking note (and no submit) until the probe succeeds', async () => {
+    let resolveProbe!: (v: unknown) => void;
+    archiveMocks.archiveRarToolProbe.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveProbe = resolve;
+        }),
+    );
+    register(0, DIR, [FILE_A]);
+    dialogs.beginPack('rar');
+
+    const { container } = render(Dialogs);
+    await tick();
+    await vi.waitFor(() => expect(archiveMocks.archiveRarToolProbe).toHaveBeenCalled());
+
+    // Before the probe resolves: no RAR radio, a "memeriksa WinRAR" note, Pack disabled.
+    expect(container.querySelector('input[name="packFormat"][value="rar"]')).toBeNull();
+    expect(container.textContent).toContain('Memeriksa WinRAR');
+    const packBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Pack');
+    expect(packBtn).toBeDefined();
+    expect(packBtn!.disabled).toBe(true);
+
+    // Probe succeeds: the option appears, the note goes away, Pack is enabled.
+    resolveProbe({ ok: true, version: 'RAR 7.00 x64' });
+    await vi.waitFor(() => {
+      expect(container.querySelector('input[name="packFormat"][value="rar"]')).not.toBeNull();
+    });
+    expect(container.textContent).not.toContain('Memeriksa WinRAR');
+    expect(packBtn!.disabled).toBe(false);
+  });
+
+  it('falls back to ZIP with a message when the probe fails while opened as rar', async () => {
+    archiveMocks.archiveRarToolProbe.mockResolvedValue({
+      ok: false,
+      reason: 'belum dikonfirmasi',
+    });
+    register(0, DIR, [FILE_A]);
+    dialogs.beginPack('rar');
+
+    const { container } = render(Dialogs);
+    await tick();
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('WinRAR tidak tersedia');
+    });
+    expect(container.textContent).toContain('belum dikonfirmasi');
+    expect(container.textContent).toContain('ZIP');
+
+    expect(container.querySelector('input[name="packFormat"][value="rar"]')).toBeNull();
+    // The fallback lives in local component state — mutating the store's dialog would
+    // re-run the open effect and wipe the message — so the store keeps what was requested
+    // while the dialog itself now shows and submits ZIP with the .zip target.
+    expect(dialogs.current).toMatchObject({
+      format: 'rar',
+      target: 'C:\\Data\\ArchiveTests.rar',
+    });
+    const zipRadio = container.querySelector<HTMLInputElement>(
+      'input[name="packFormat"][value="zip"]',
+    )!;
+    expect(zipRadio.checked).toBe(true);
+    const mono = container.querySelector('span.mono');
+    expect(mono?.textContent).toBe('C:\\Data\\ArchiveTests.zip');
+    expect(container.textContent).not.toContain('Memeriksa WinRAR');
+  });
+
+  it('keeps the RAR option hidden when the probe throws for a zip-opened dialog', async () => {
+    archiveMocks.archiveRarToolProbe.mockRejectedValue(new Error('invoke failed'));
+    register(0, DIR, [FILE_A]);
+    dialogs.beginPack('zip');
+
+    const { container } = render(Dialogs);
+    await tick();
+    await vi.waitFor(() => {
+      expect(container.textContent).not.toContain('Memeriksa WinRAR');
+    });
+    expect(container.querySelector('input[name="packFormat"][value="rar"]')).toBeNull();
+    // No fallback message: the dialog was never opened as 'rar'.
+    expect(container.textContent).not.toContain('WinRAR tidak tersedia');
+  });
+});
