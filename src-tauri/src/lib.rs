@@ -247,7 +247,9 @@ pub fn run() {
             automation::commands::sync_profile_get,
             automation::commands::sync_profile_validate,
             automation::commands::sync_profile_save,
-            automation::commands::sync_profile_delete
+            automation::commands::sync_profile_delete,
+            automation::commands::sync_lease_acquire,
+            automation::commands::sync_lease_release
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())

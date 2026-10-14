@@ -182,11 +182,18 @@ fn probe_once(prober: &dyn RootProbe, path: &str) -> RootProbeOutcome {
 /// does not exist may not contain `.`/`..`, empty, reserved or trailing-dot/space components.
 /// Control and format (bidi) characters are refused before and after resolution (SE-2, T4).
 pub fn canonical(path: &str) -> Result<String, RootError> {
+    canonical_with(path, &resolve_mapped_drive)
+}
+
+/// [`canonical`] with the mapped-drive resolver injected, so lease overlap tests can simulate a
+/// mapped drive and its UNC form without a share (RQ-2). `mapped` receives the checked path and
+/// returns it rewritten to UNC form, or unchanged.
+pub fn canonical_with(path: &str, mapped: &dyn Fn(&str) -> String) -> Result<String, RootError> {
     let p = crate::path_guard::check_str(path).map_err(|_| RootError::Invalid)?;
     if has_unsafe_char(&p) {
         return Err(RootError::Invalid);
     }
-    let p = resolve_mapped_drive(&p);
+    let p = mapped(&p);
     let out = if is_unc(&p) {
         // Network I/O is bounded; a share that does not answer keeps its normalized spelling.
         let owned = p.clone();
@@ -344,6 +351,12 @@ fn identity_unc_with(
 /// (ordinal-style folding), after canonicalization (SP-1.5, RQ-2).
 pub fn overlap(a: &str, b: &str) -> bool {
     prefix_of(a, b) || prefix_of(b, a)
+}
+
+/// True when `path` equals `root` or lies inside it (component-wise, case-insensitive). Used by
+/// the baseline lease check: a lease on a folder covers everything below it.
+pub fn contains(root: &str, path: &str) -> bool {
+    prefix_of(root, path)
 }
 
 fn prefix_of(a: &str, b: &str) -> bool {

@@ -11,13 +11,17 @@
  */
 import { cancelCompare, type CompareDirsReport } from '../ipc/compare';
 import {
+  acquireSyncLease,
   compareForSync,
+  defaultSyncLeaseApi,
   loadSyncBaseline,
   runSyncPlan,
   settleSyncRun,
   type BaselineStatus,
+  type HeldSyncLease,
   type SettleResult,
   type SyncItemResult,
+  type SyncLeaseApi,
 } from '../syncService';
 import type { OperationProgress } from '../ipc/types';
 import { isInTauri } from '../ipc/tauri';
@@ -127,6 +131,11 @@ export class SyncFlow {
   syncSettle = $state<SettleResult | null>(null);
   /** Settlement of the last run (promise), so callers/tests can await the baseline save. */
   lastSettlement: Promise<SettleResult> | null = null;
+  /** Non-empty when the folders are locked by another sync or an automation (RQ-2): the run was
+   *  not started and nothing was enqueued. Cleared by the next preview, run or close. */
+  syncLeaseBusy = $state('');
+  /** The cross-process lease calls (design §3.4); overridable in tests. */
+  syncLeaseApi: SyncLeaseApi = defaultSyncLeaseApi;
   /** Reads live queue progress for settlement; overridable in tests. */
   syncJobReader: (jobId: string) => OperationProgress | undefined = (id) => ops.ops.get(id);
   /** The baseline store exists only in the desktop shell; overridable in tests. */
@@ -147,6 +156,9 @@ export class SyncFlow {
     chooseSyncScanMode(l, r);
   private syncCancelRequested = false;
   private syncOpId: string | null = null;
+  /** True from the start of `executeSync` until it has handed over or finished (a close during
+   *  that time cancels the run, which releases its lease on the way out). */
+  private syncRunning = false;
 
   private newOpId(): string {
     this.syncOpId = `sync-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -166,6 +178,7 @@ export class SyncFlow {
     const freshOpen = !this.syncOpen || pairKey !== this.syncFastPair;
     this.syncOpen = true;
     this.syncStale = false;
+    this.syncLeaseBusy = '';
     this.syncDone = null;
     this.syncLog = [];
     this.syncConfirm = null;
@@ -322,9 +335,26 @@ export class SyncFlow {
     this.syncConfirm = null;
     this.syncBusy = true;
     this.syncStale = false;
+    this.syncLeaseBusy = '';
     this.syncCancelRequested = false;
     this.errorText = '';
+    this.syncRunning = true;
+    // The cross-process lease (RQ-2, design §3.4): taken BEFORE the re-validation compare, held
+    // through the run and the baseline settle, released on every way out (stale, blocked, error,
+    // cancel, close, or after the settle).
+    let lease: HeldSyncLease | null = null;
+    let handedToSettle = false;
     try {
+      const acquired = await acquireSyncLease(report.leftRoot, report.rightRoot, this.syncLeaseApi);
+      if (acquired.status === 'busy') {
+        this.syncLeaseBusy = acquired.message;
+        return;
+      }
+      if (acquired.status === 'failed') {
+        this.errorText = acquired.message;
+        return;
+      }
+      lease = acquired.lease;
       const result = await runSyncPlan(report, plan, {
         byContent: this.syncByContent,
         allowOverwrite: opts.confirmOverwrite === true,
@@ -365,20 +395,27 @@ export class SyncFlow {
       }
       // Baseline: after the jobs finish, take a fresh compare and record only verified items.
       // Runs in the background (the panel stays responsive); failures/cancels never move it.
+      // The lease is held until the settle ends (the baseline save needs it) and released there,
+      // even when the panel was closed in the meantime.
       this.syncSettle = null;
-      this.lastSettlement = !this.syncBaselineEnabled()
-        ? null
-        : settleSyncRun({
-            report,
-            plan,
-            result,
-            readJob: this.syncJobReader,
-          })
-            .catch((): SettleResult => ({ status: 'skipped', reason: 'verifyFailed' }))
-            .then((settled) => {
-              this.syncSettle = settled;
-              return settled;
-            });
+      if (this.syncBaselineEnabled()) {
+        const held = lease;
+        handedToSettle = true;
+        this.lastSettlement = settleSyncRun({
+          report,
+          plan,
+          result,
+          readJob: this.syncJobReader,
+        })
+          .catch((): SettleResult => ({ status: 'skipped', reason: 'verifyFailed' }))
+          .then(async (settled) => {
+            this.syncSettle = settled;
+            await held.release();
+            return settled;
+          });
+      } else {
+        this.lastSettlement = null;
+      }
       // Deletions ALWAYS require the explicit delete confirmation dialog
       // (trash default, D05; FER-364 carries the permanent flag explicitly).
       if (result.deletes.length > 0) {
@@ -389,12 +426,18 @@ export class SyncFlow {
     } catch (e) {
       this.errorText = e instanceof Error ? e.message : String(e);
     } finally {
+      if (lease && !handedToSettle) await lease.release();
+      this.syncRunning = false;
       this.syncBusy = false;
     }
   }
 
   closeSync(): void {
+    // A run still waiting on its re-validation is cancelled, so it unwinds and releases its
+    // lease. A run that is already queued keeps the lease until its baseline settle ends.
+    if (this.syncRunning) this.cancelSync();
     this.syncOpen = false;
+    this.syncLeaseBusy = '';
     this.syncRoots = null;
     this.syncPlan = null;
     this.syncBasePlan = null;
@@ -416,6 +459,7 @@ export class SyncFlow {
     this.syncBasePlan = null;
     this.syncBusy = false;
     this.syncBlocked = '';
+    this.syncLeaseBusy = '';
     this.syncDecisions = {};
     this.syncBaseline = null;
     this.syncBaselineStatus = 'notUsed';

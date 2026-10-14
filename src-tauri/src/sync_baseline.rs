@@ -25,6 +25,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::automation::commands::AutomationState;
+use crate::automation::lease::{LeaseEnv, require_cover};
+use crate::automation::store::Store as AutomationStore;
 use crate::compare::validate_sync_roots;
 use crate::domain::ErrorCode;
 
@@ -424,6 +427,32 @@ fn write_atomic(dir: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> 
     result
 }
 
+// ── Lease guard (Automation design §3.4, §5.7) ──────────────────────────
+
+/// Save a baseline only while THIS process holds a fresh lease that covers both roots of the
+/// pair (a manual Synchronize Dirs lease or a run lease). Without it nothing is written:
+/// `lease_required`. This is the cross-process guard for baseline writes; the check is made here
+/// in the backend, never trusted from the webview. The folders are canonicalized exactly as
+/// `sync_lease_acquire` did, so aliases (case, mapped drive vs UNC, junctions) match the lease.
+pub fn save_with_lease(
+    baselines: &SyncBaselineStore,
+    automation: &AutomationStore,
+    env: &LeaseEnv,
+    canonical: &dyn Fn(&str) -> Result<String, crate::sync_engine::roots::RootError>,
+    pair: &RootPair,
+    baseline: &BaselineDto,
+) -> Result<(), BaselineError> {
+    const REQUIRED: BaselineError = err(
+        "lease_required",
+        "The baseline can only be saved while this sync holds its folder lease",
+    );
+    let (Ok(left), Ok(right)) = (canonical(&pair.left_root), canonical(&pair.right_root)) else {
+        return Err(REQUIRED);
+    };
+    require_cover(automation, env, &[left, right]).map_err(|_| REQUIRED)?;
+    baselines.save(pair, baseline)
+}
+
 // ── Command Tauri ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -440,13 +469,25 @@ pub async fn sync_baseline_load(
 #[tauri::command]
 pub async fn sync_baseline_save(
     store: tauri::State<'_, SyncBaselineStore>,
+    automation: tauri::State<'_, AutomationState>,
     pair: RootPair,
     baseline: BaselineDto,
 ) -> Result<(), BaselineError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || store.save(&pair, &baseline))
-        .await
-        .map_err(|_| err("io", "Baseline task failed"))?
+    let automation_store = automation.store.clone();
+    let env = automation.leases.env().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        save_with_lease(
+            &store,
+            &automation_store,
+            &env,
+            &|p| crate::sync_engine::roots::canonical(p),
+            &pair,
+            &baseline,
+        )
+    })
+    .await
+    .map_err(|_| err("io", "Baseline task failed"))?
 }
 
 #[tauri::command]
@@ -962,5 +1003,137 @@ mod tests {
             store.load(&p).unwrap(),
             LoadResult::FirstRun { .. }
         ));
+    }
+
+    // ── P0.4: baseline writes need a lease (design §3.4, §5.7) ──
+
+    fn lease_rig(
+        base: &Path,
+    ) -> (
+        Arc<AutomationStore>,
+        crate::automation::lease::LeaseRegistry,
+        LeaseEnv,
+    ) {
+        let store = Arc::new(AutomationStore::open(&base.join("auto"), "0.2.0"));
+        let env = LeaseEnv::system();
+        let registry = crate::automation::lease::LeaseRegistry::new(env.clone());
+        (store, registry, env)
+    }
+
+    fn real_canonical(p: &str) -> Result<String, crate::sync_engine::roots::RootError> {
+        crate::sync_engine::roots::canonical(p)
+    }
+
+    fn lease_on(
+        store: &Arc<AutomationStore>,
+        registry: &crate::automation::lease::LeaseRegistry,
+        l: &Path,
+        r: &Path,
+    ) -> String {
+        let roots = [
+            real_canonical(&s(l)).unwrap(),
+            real_canonical(&s(r)).unwrap(),
+        ];
+        match registry.acquire_manual(store, &roots).unwrap() {
+            crate::automation::lease::ManualAcquire::Acquired { lease_id } => lease_id,
+            _ => panic!("lease acquired"),
+        }
+    }
+
+    /// Design §5.7: without a lease nothing is saved (`lease_required`); with a manual lease on
+    /// the pair it is saved; after the release it is refused again.
+    #[test]
+    fn baseline_save_requires_a_lease() {
+        let (b, l, r, baselines) = setup("lease-save");
+        let (auto, registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        let save = |p: &RootPair, bl: &BaselineDto| {
+            save_with_lease(&baselines, &auto, &env, &real_canonical, p, bl)
+        };
+
+        let refused = save(&p, &bl).unwrap_err();
+        assert_eq!(refused.code, "lease_required");
+        assert!(matches!(
+            baselines.load(&p).unwrap(),
+            LoadResult::FirstRun { .. }
+        ));
+
+        let id = lease_on(&auto, &registry, &l, &r);
+        save(&p, &bl).unwrap();
+        assert!(matches!(baselines.load(&p).unwrap(), LoadResult::Ok { .. }));
+        // Alias spelling (case) of the same folders is covered by the same lease.
+        let upper = pair(
+            Path::new(&s(&l).to_uppercase()),
+            Path::new(&s(&r).to_uppercase()),
+        );
+        let mut bl_upper = bl.clone();
+        bl_upper.left_root = upper.left_root.clone();
+        bl_upper.right_root = upper.right_root.clone();
+        save(&upper, &bl_upper).unwrap();
+
+        assert!(registry.release(&id));
+        assert_eq!(save(&p, &bl).unwrap_err().code, "lease_required");
+    }
+
+    /// A lease on other folders, or only on one of the two roots, does not cover the pair.
+    #[test]
+    fn baseline_save_needs_the_lease_to_cover_both_roots() {
+        let (b, l, r, baselines) = setup("lease-cover");
+        let other = b.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let (auto, registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        let save = || save_with_lease(&baselines, &auto, &env, &real_canonical, &p, &bl);
+
+        lease_on(&auto, &registry, &other, &b.join("elsewhere-missing"));
+        assert_eq!(save().unwrap_err().code, "lease_required");
+        // Only the left root leased (right overlaps nothing leased): still refused.
+        let roots = [real_canonical(&s(&l)).unwrap()];
+        assert!(matches!(
+            registry.acquire_manual(&auto, &roots).unwrap(),
+            crate::automation::lease::ManualAcquire::Acquired { .. }
+        ));
+        assert_eq!(save().unwrap_err().code, "lease_required");
+    }
+
+    /// A lease held by another process (another holder identity) never lets this one save.
+    #[test]
+    fn baseline_save_ignores_a_lease_of_another_process() {
+        let (b, l, r, baselines) = setup("lease-foreign");
+        let (auto, registry, env) = lease_rig(&b);
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        lease_on(&auto, &registry, &l, &r);
+        let stranger = LeaseEnv {
+            holder: crate::automation::store::leases::Holder {
+                pid: env.holder.pid + 1,
+                created: env.holder.created + 1,
+            },
+            ..env.clone()
+        };
+        let err =
+            save_with_lease(&baselines, &auto, &stranger, &real_canonical, &p, &bl).unwrap_err();
+        assert_eq!(err.code, "lease_required");
+    }
+
+    /// An unusable automation store can hold no lease: fail closed.
+    #[test]
+    fn baseline_save_without_a_store_is_refused() {
+        let (_b, l, r, baselines) = setup("lease-nostore");
+        let auto = AutomationStore::unavailable();
+        let p = pair(&l, &r);
+        let bl = baseline_for(&p, &["a"]);
+        let err = save_with_lease(
+            &baselines,
+            &auto,
+            &LeaseEnv::system(),
+            &real_canonical,
+            &p,
+            &bl,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "lease_required");
     }
 }

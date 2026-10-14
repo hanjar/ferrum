@@ -138,6 +138,8 @@ reparse points (`store_untrusted`) and an older binary never writes a newer stor
 | `sync_profile_validate` | `{ draft }`                         | `{ errors: FieldError[], identities, kinds }`                                   | no side effects, no dialog                                                                           |
 | `sync_profile_save`     | `{ id?, expectedRevision?, draft }` | `{ status: 'saved', profile } \| { status: 'canceled' } \| { status: 'stale' }` | native confirm only for `permanent` (new/changed) or guard off; revision bumps only on policy fields |
 | `sync_profile_delete`   | `{ id, expectedRevision }`          | `{ status: 'deleted' }`                                                         | `in_use` once automations reference the profile (P1.1)                                               |
+| `sync_lease_acquire`    | `{ left, right }`                   | `{ leaseId } \| { status: 'busy', holder: { kind, runId? } }`                   | cross-process lock on a folder pair (P0.4); `busy` is a normal answer, not an error                  |
+| `sync_lease_release`    | `{ leaseId }`                       | `{}`                                                                            | idempotent; only the token handed out by `sync_lease_acquire` releases anything                      |
 
 `draft` is `{ name, left, right, mode: 'oneWay'|'mirror'|'twoWay', from?, propagateDeletes?,
 deletePolicy: 'recycleBin'|'versioning'|'permanent', versioningRoot?, compare:
@@ -146,7 +148,7 @@ maxPercent } }`; unknown fields are refused (SE-1: no input may behave like a `c
 
 Errors cross as `{ code, message }` with a closed-set code (`invalid_input`, `not_found`,
 `stale`, `in_use`, `busy`, `store_unavailable`, `store_untrusted`, `store_read_only`,
-`needs_review`); `busy` means another native confirmation dialog is open, so nothing was shown or saved
+`needs_review`, `lease_busy`, `lease_required`); `busy` means another native confirmation dialog is open, so nothing was shown or saved
 and never contain user paths. Ids are lowercase UUID v4 text, validated before any lookup.
 `readiness` is `{ status: 'ready' } | { status: 'checking' } | { status: 'notReady', reason }`
 with reasons `rootMissing | rootOffline | identityUnknown | identityMismatch |
@@ -154,3 +156,30 @@ recycleBinUnavailable | versioningRootInvalid | profileInvalid`. A network (UNC)
 opened is saved with an unverified identity (no `volumeSerial`/`fileId`) and reports `rootOffline`;
 one saved that way stays `identityUnknown` until it is saved again while reachable. The revision changes list shows, per revision, `{ field, from, to }` display
 values (SP-6.3); the newest 50 revisions are kept.
+
+### Root leases and baseline saves (automation P0.4)
+
+A lease is the cross-process lock of design §3.4 (RQ-2): at most one run - an automation, a manual
+profile run, Synchronize Dirs or the AI chat sync - may be active on overlapping folders across all
+Ferrum processes of the user. Both folders are canonicalized by the backend (real path, mapped
+drive resolved to its UNC form, case-insensitive, component-wise: `data` and `data-backup` do not
+overlap) before the overlap test, and the overlap test, reclaiming of dead leases and the insert are
+one `BEGIN IMMEDIATE` transaction.
+
+- `sync_lease_acquire` returns `{ leaseId }` (32 hex characters, random, kept secret by the
+  webview) or `{ status: 'busy', holder }` where `holder.kind` is `manual | app | runner |
+unknown` and `holder.runId` is present for runs. The backend heartbeats the lease every 5 s for as
+  long as it is held (at most 12 h); a lease whose holder process is gone (pid plus creation time)
+  or whose heartbeat is older than 30 s is reclaimed by the next acquirer. `lease_busy` is returned
+  as an error only when this process already holds 8 manual leases. Input errors are `invalid_input`;
+  an unusable or newer-schema store reports `store_unavailable` / `store_untrusted` /
+  `store_read_only`, and the sync does not run.
+- `sync_lease_release` is idempotent. An unknown or foreign token does nothing and answers the same
+  `{}` (no existence oracle); a malformed token is `invalid_input`.
+- `sync_baseline_save` now requires a fresh lease held by the calling process that covers both
+  roots of the pair; otherwise it fails with `{ code: 'lease_required' }` and writes nothing. The
+  check is made in the backend. `sync_baseline_load` and `sync_baseline_clear` are unchanged.
+- Manual Synchronize Dirs (and the chat sync) acquire the lease before the re-validation compare,
+  hold it through the run and the baseline settle, and release it after the settle, on cancel, on
+  error and on close. If the folders are busy nothing is compared or enqueued and the panel shows
+  that they are in use.

@@ -20,11 +20,13 @@ import type { ConflictView, PlanItemRow } from '../chatStore.svelte';
 import type { SyncGuardScope } from '../backendGuard';
 import { FsError, type OperationProgress } from '../../ipc/types';
 import {
+  acquireSyncLease,
   buildSyncDryRun,
   runSyncPlan,
   settleSyncRun,
   type SettleResult,
   type SyncDryRun,
+  type SyncLeaseApi,
 } from '../../syncService';
 import { planFacts, syncPlanBlockers, type SyncPlanItem } from '../../syncPlan';
 import {
@@ -166,6 +168,9 @@ export interface SyncAdapterDeps {
   onQueued?(): void;
   /** Test seam; defaults to the real `settleSyncRun`. */
   settle?: typeof settleSyncRun;
+  /** Test seam for the cross-process folder lease (Automation design §3.4); defaults to the
+   *  real `sync_lease_*` commands. */
+  leaseApi?: SyncLeaseApi;
 }
 
 export interface SyncState {
@@ -331,56 +336,94 @@ export function createSyncAdapter(deps: SyncAdapterDeps): CommandAdapter<SyncSta
           );
         }
       }
-      // Same service as the manual panel: roots validated again, FRESH compare, stale check, queue.
-      // `allowOverwrite`: the approved preview listed every overwrite; deletes are impossible (rejected
-      // in prepare) and conflicts are never executed by `runSyncPlan`.
-      const result = await runSyncPlan(dryRun.report, dryRun.plan, {
-        byContent,
-        allowOverwrite: true,
-      });
-      if (result.status === 'stale') {
+      // The cross-process folder lease (RQ-2, design §3.4) comes first, exactly as in the manual
+      // panel: no lease, no re-validation and nothing enqueued. It is held through the baseline
+      // settle (the backend refuses a baseline save without it) and released on every way out.
+      const leased = await acquireSyncLease(
+        dryRun.report.leftRoot,
+        dryRun.report.rightRoot,
+        deps.leaseApi,
+      );
+      if (leased.status === 'busy') {
         return err(
-          'stale',
-          'Isi folder berubah sejak pratinjau; rencana baru perlu disetujui.',
-          'stale_plan',
+          'execution_failed',
+          'Folder sedang dipakai sinkronisasi atau otomasi lain; tidak ada yang dijalankan. Tunggu sampai selesai lalu setujui lagi.',
+          'lease_busy',
         );
       }
-      if (result.status === 'blocked') {
+      if (leased.status === 'failed') {
         return err(
-          'unsupported_plan',
-          'Sinkronisasi diblokir (perbandingan ulang tidak lengkap atau dibatalkan); tidak ada yang ditulis.',
-          result.reasons[0] ?? 'blocked',
+          'execution_failed',
+          'Folder tidak bisa dikunci untuk sinkronisasi; tidak ada yang dijalankan.',
+          'lease_failed',
         );
       }
-      if (result.jobIds.length === 0) {
-        return err(
-          'resolve_failed',
-          'Penyalinan gagal masuk antrean; tidak ada yang dijalankan.',
-          'enqueue_failed',
-        );
+      const lease = leased.lease;
+      let handedToSettle = false;
+      let queued: Extract<Awaited<ReturnType<typeof runSyncPlan>>, { status: 'queued' }>;
+      try {
+        // Same service as the manual panel: roots validated again, FRESH compare, stale check,
+        // queue. `allowOverwrite`: the approved preview listed every overwrite; deletes are
+        // impossible (rejected in prepare) and conflicts are never executed by `runSyncPlan`.
+        const result = await runSyncPlan(dryRun.report, dryRun.plan, {
+          byContent,
+          allowOverwrite: true,
+        });
+        if (result.status === 'stale') {
+          return err(
+            'stale',
+            'Isi folder berubah sejak pratinjau; rencana baru perlu disetujui.',
+            'stale_plan',
+          );
+        }
+        if (result.status === 'blocked') {
+          return err(
+            'unsupported_plan',
+            'Sinkronisasi diblokir (perbandingan ulang tidak lengkap atau dibatalkan); tidak ada yang ditulis.',
+            result.reasons[0] ?? 'blocked',
+          );
+        }
+        if (result.jobIds.length === 0) {
+          return err(
+            'resolve_failed',
+            'Penyalinan gagal masuk antrean; tidak ada yang dijalankan.',
+            'enqueue_failed',
+          );
+        }
+        queued = result;
+        deps.onQueued?.();
+        // Baseline: only the verified settlement may move it. Background: the chat card tracks
+        // the jobs. The lease goes with the settlement.
+        const settle = deps.settle ?? settleSyncRun;
+        handedToSettle = true;
+        void Promise.resolve()
+          .then(() =>
+            settle({
+              report: dryRun.report,
+              plan: dryRun.plan,
+              result: queued,
+              readJob: deps.readJob,
+            }),
+          )
+          .then((settled) => deps.onSettled?.(settled, prepared.state.previewKey))
+          .catch(() =>
+            deps.onSettled?.(
+              { status: 'skipped', reason: 'verifyFailed' },
+              prepared.state.previewKey,
+            ),
+          )
+          .finally(() => void lease.release());
+      } finally {
+        if (!handedToSettle) await lease.release();
       }
-      deps.onQueued?.();
-      // Baseline: only the verified settlement may move it. Background: the chat card tracks the jobs.
-      const settle = deps.settle ?? settleSyncRun;
-      void Promise.resolve()
-        .then(() =>
-          settle({ report: dryRun.report, plan: dryRun.plan, result, readJob: deps.readJob }),
-        )
-        .then((settled) => deps.onSettled?.(settled, prepared.state.previewKey))
-        .catch(() =>
-          deps.onSettled?.(
-            { status: 'skipped', reason: 'verifyFailed' },
-            prepared.state.previewKey,
-          ),
-        );
       const notes = ['Penyalinan masuk antrean; hasil akhir mengikuti status job.'];
-      if (result.failed > 0) notes.push(`${result.failed} item gagal masuk antrean.`);
+      if (queued.failed > 0) notes.push(`${queued.failed} item gagal masuk antrean.`);
       return ok({
-        jobIds: result.jobIds,
+        jobIds: queued.jobIds,
         state: 'queued',
         completed: 0,
-        conflictsSkipped: result.conflicts,
-        failedToQueue: result.failed,
+        conflictsSkipped: queued.conflicts,
+        failedToQueue: queued.failed,
         notes,
       });
     },

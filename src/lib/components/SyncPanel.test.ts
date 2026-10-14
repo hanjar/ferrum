@@ -224,4 +224,40 @@ describe('SyncPanel FER-111/112 controls', () => {
       expect(compareDirsMock).toHaveBeenLastCalledWith('C:\\L', 'D:\\R', true, expect.anything()),
     );
   });
+  it('shows the busy message when the folders are locked by an automation and runs nothing (P0.4)', async () => {
+    compareDirsMock.mockResolvedValue(report([diff('a.txt', 'leftOnly')]));
+    await compareStore.openSync();
+    compareStore.syncLeaseApi = {
+      acquire: vi.fn(async () => ({
+        status: 'busy' as const,
+        holder: { kind: 'runner' as const, runId: 3 },
+      })),
+      release: vi.fn(async () => {}),
+    };
+    const r = render(SyncPanel);
+    await tick();
+    expect(r.container.querySelector('[data-testid="sync-lease-busy"]')).toBeNull();
+    const run = Array.from(r.container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Run Synchronization'),
+    ) as HTMLButtonElement;
+    fireEvent.click(run);
+    await vi.waitFor(() =>
+      expect(r.container.querySelector('[data-testid="sync-lease-busy"]')).toBeTruthy(),
+    );
+    const msg = r.container.querySelector('[data-testid="sync-lease-busy"]') as HTMLElement;
+    expect(msg.getAttribute('role')).toBe('alert');
+    expect(msg.textContent).toContain('in use by an automation');
+    expect(msg.textContent).toContain('Nothing was changed');
+    // Only the preview compare ran; the plan is still there for a retry.
+    expect(compareDirsMock).toHaveBeenCalledTimes(1);
+    expect(run.disabled).toBe(false);
+    // A fresh preview clears the message.
+    compareStore.syncLeaseApi = {
+      acquire: vi.fn(async () => ({ leaseId: 'x' })),
+      release: vi.fn(async () => {}),
+    };
+    await compareStore.openSync();
+    await tick();
+    expect(r.container.querySelector('[data-testid="sync-lease-busy"]')).toBeNull();
+  });
 });
