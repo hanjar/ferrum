@@ -247,12 +247,25 @@ pub fn run() {
             automation::commands::sync_profile_get,
             automation::commands::sync_profile_validate,
             automation::commands::sync_profile_save,
-            automation::commands::sync_profile_delete
+            automation::commands::sync_profile_delete,
+            automation::commands::sync_lease_acquire,
+            automation::commands::sync_lease_release
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())
         .manage(ai::commands::AiState::default())
         .manage(ai::approval::ApprovalLedger::new())
+        // A reload or crash recovery of the webview loses the JavaScript that holds manual sync
+        // lease tokens; release them so folders do not stay locked (Automation P0.4). Started =
+        // WebView2 ContentLoading: fires for every new document, including F5 / DevTools reload.
+        .on_page_load(|webview, payload| {
+            use tauri::Manager;
+            if payload.event() == tauri::webview::PageLoadEvent::Started
+                && let Some(state) = webview.try_state::<automation::commands::AutomationState>()
+            {
+                automation::commands::release_manual_leases_on_page_load(&state);
+            }
+        })
         .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

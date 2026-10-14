@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::automation::confirm_text::{self, Prompt};
+use crate::automation::lease::{LeaseEnv, LeaseRegistry, ManualAcquire};
 use crate::automation::model::{
     self, Draft, FieldError, PolicyDraft, ProfilePolicy, RootIdentity, WireCompare,
     WireDeletePolicy, WireMode, WireSide,
@@ -21,7 +22,7 @@ use crate::automation::model::{
 use crate::automation::store::{Store, StoreError, profiles};
 use crate::profile;
 use crate::sync_engine::roots::{
-    FsProbe, READINESS_BUDGET, RootProbe, RootProbeOutcome, probe_with,
+    self, FsProbe, READINESS_BUDGET, RootError, RootProbe, RootProbeOutcome, probe_with,
 };
 use std::sync::Arc as ProbeArc;
 
@@ -31,6 +32,8 @@ use std::sync::Arc as ProbeArc;
 /// an unusable store is remembered and every command reports it.
 pub struct AutomationState {
     pub store: Arc<Store>,
+    /// Manual root leases of this process (design §3.4); the webview only holds their tokens.
+    pub leases: Arc<LeaseRegistry>,
 }
 
 impl AutomationState {
@@ -42,6 +45,7 @@ impl AutomationState {
         };
         Self {
             store: Arc::new(store),
+            leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
         }
     }
 }
@@ -227,6 +231,49 @@ pub enum SaveResultDto {
 pub struct DeleteResultDto {
     pub status: String,
 }
+
+/// Who is in the way of a refused lease: the kind of holder only (no paths, no names).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeaseHolderDto {
+    /// `manual`, `app`, `runner` or `unknown`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+}
+
+/// `sync_lease_acquire` result: `{ leaseId }` or `{ status: 'busy', holder }` (design §7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LeaseAcquireDto {
+    Acquired(LeaseAcquired),
+    Busy(LeaseBusy),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeaseAcquired {
+    pub lease_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseBusy {
+    pub status: LeaseBusyStatus,
+    pub holder: LeaseHolderDto,
+}
+
+/// The literal `"busy"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeaseBusyStatus {
+    Busy,
+}
+
+/// `sync_lease_release` result: an empty object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseReleaseDto {}
 
 // ── Readiness (SP-8) ──
 
@@ -734,6 +781,78 @@ pub fn delete_in(
     })
 }
 
+/// Longest folder path accepted by the lease commands (characters).
+const MAX_LEASE_PATH_CHARS: usize = 4096;
+
+/// `sync_lease_acquire` core: canonicalize both roots (real path, mapped drive resolved, design
+/// §5.8) and take a manual lease on them. Refusal because the folders are in use is a normal
+/// result (`busy`), not an error. The canonicalizer is injected for tests.
+pub fn lease_acquire_in(
+    store: &Arc<Store>,
+    registry: &LeaseRegistry,
+    left: &str,
+    right: &str,
+    canonical: &dyn Fn(&str) -> Result<String, RootError>,
+) -> Result<LeaseAcquireDto, CommandError> {
+    let bad_path = || {
+        CommandError::new(
+            "invalid_input",
+            "The folder path is not valid for a sync lease",
+        )
+    };
+    for path in [left, right] {
+        if path.is_empty() || path.chars().count() > MAX_LEASE_PATH_CHARS {
+            return Err(bad_path());
+        }
+    }
+    // Refuse before any lookup when the store cannot be written (read-only newer schema, or
+    // unusable): without a lease no manual sync may run.
+    store.check_writable()?;
+    let roots = [
+        canonical(left).map_err(|_| bad_path())?,
+        canonical(right).map_err(|_| bad_path())?,
+    ];
+    match registry.acquire_manual(store, &roots)? {
+        ManualAcquire::Acquired { lease_id } => {
+            Ok(LeaseAcquireDto::Acquired(LeaseAcquired { lease_id }))
+        }
+        ManualAcquire::Busy(holder) => Ok(LeaseAcquireDto::Busy(LeaseBusy {
+            status: LeaseBusyStatus::Busy,
+            holder: LeaseHolderDto {
+                kind: holder.kind.as_str().to_string(),
+                run_id: holder.run_id,
+            },
+        })),
+        ManualAcquire::TooMany => Err(CommandError::new(
+            "lease_busy",
+            "Too many folder pairs are being synchronized at once",
+        )),
+    }
+}
+
+/// The webview (re)loaded its page: whatever JavaScript held manual lease tokens is gone, so
+/// every manual lease of this process is released. Wired to the page-load-started event in
+/// `lib.rs`. Returns how many leases were released.
+pub fn release_manual_leases_on_page_load(state: &AutomationState) -> usize {
+    state.leases.release_all()
+}
+
+/// `sync_lease_release` core: idempotent. Only a token this process was given releases
+/// anything; any other value does nothing and looks the same (no existence oracle).
+pub fn lease_release_in(
+    registry: &LeaseRegistry,
+    lease_id: &str,
+) -> Result<LeaseReleaseDto, CommandError> {
+    if !crate::automation::store::leases::is_lease_id(lease_id) {
+        return Err(CommandError::new(
+            "invalid_input",
+            "The lease id is not a valid identifier",
+        ));
+    }
+    registry.release(lease_id);
+    Ok(LeaseReleaseDto {})
+}
+
 fn require_profile_id(id: &str) -> Result<(), CommandError> {
     if model::is_profile_id(id) {
         Ok(())
@@ -831,6 +950,35 @@ pub async fn sync_profile_delete(
 ) -> Result<DeleteResultDto, CommandError> {
     let store = state.store.clone();
     tauri::async_runtime::spawn_blocking(move || delete_in(&store, &id, expected_revision))
+        .await
+        .map_err(|_| internal())?
+}
+
+/// Take a manual lease on a folder pair before a Synchronize Dirs run (design §3.4). The
+/// arguments are the two roots as the compare reported them.
+#[tauri::command]
+pub async fn sync_lease_acquire(
+    state: State<'_, AutomationState>,
+    left: String,
+    right: String,
+) -> Result<LeaseAcquireDto, CommandError> {
+    let store = state.store.clone();
+    let registry = state.leases.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        lease_acquire_in(&store, &registry, &left, &right, &|p| roots::canonical(p))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Release a manual lease by its token. Idempotent.
+#[tauri::command]
+pub async fn sync_lease_release(
+    state: State<'_, AutomationState>,
+    lease_id: String,
+) -> Result<LeaseReleaseDto, CommandError> {
+    let registry = state.leases.clone();
+    tauri::async_runtime::spawn_blocking(move || lease_release_in(&registry, &lease_id))
         .await
         .map_err(|_| internal())?
 }
@@ -1961,3 +2109,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "commands_lease_tests.rs"]
+mod lease_tests;

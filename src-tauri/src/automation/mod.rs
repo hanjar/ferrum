@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod confirm_text;
+pub mod lease;
 pub mod model;
 pub mod store;
 

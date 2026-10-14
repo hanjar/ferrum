@@ -7,6 +7,7 @@
 //! Errors never carry paths or SQL text; commands map them to the closed-set codes of design §7.
 
 pub mod hosts;
+pub mod leases;
 pub mod migrate;
 pub mod profiles;
 

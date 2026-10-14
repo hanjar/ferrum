@@ -133,7 +133,9 @@
       </p>
     {/if}
 
-    {#if store.syncBlocked}
+    {#if store.syncLeaseBusy}
+      <p class="error" role="alert" data-testid="sync-lease-busy">{store.syncLeaseBusy}</p>
+    {:else if store.syncBlocked}
       <p class="error" role="alert">{store.syncBlocked}</p>
     {:else if store.syncStale}
       <p class="error" role="alert">

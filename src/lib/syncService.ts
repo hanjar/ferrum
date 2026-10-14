@@ -21,6 +21,13 @@ import {
   SyncBaselineError,
   type FirstRunReason,
 } from './ipc/syncBaseline';
+import {
+  syncLeaseAcquire,
+  syncLeaseRelease,
+  SyncLeaseError,
+  type LeaseAcquire,
+  type LeaseHolder,
+} from './ipc/syncLease';
 import type { OperationProgress } from './ipc/types';
 import {
   isBaselineTrusted,
@@ -39,6 +46,111 @@ import {
   type SyncOptions,
   type SyncPlanItem,
 } from './syncPlan';
+
+// ── Root leases (Automation P0.4, design §3.4) ─────────────────────────
+
+/** The two lease calls, injectable so flows and tests need no backend. */
+export interface SyncLeaseApi {
+  acquire(left: string, right: string): Promise<LeaseAcquire>;
+  release(leaseId: string): Promise<void>;
+}
+
+export const defaultSyncLeaseApi: SyncLeaseApi = {
+  acquire: syncLeaseAcquire,
+  release: syncLeaseRelease,
+};
+
+/** A held folder lease. `release` is idempotent and never throws. A lease that could not be
+ *  released (store hiccup) stays held by the backend until the app reloads its page (which
+ *  releases every manual lease), the backend's 12 h hold limit passes, or Ferrum exits - it does
+ *  NOT expire by itself while the app runs, because the backend keeps beating it. */
+export interface HeldSyncLease {
+  release(): Promise<void>;
+}
+
+export type SyncLeaseOutcome =
+  | { status: 'acquired'; lease: HeldSyncLease }
+  | { status: 'busy'; message: string; holder?: LeaseHolder }
+  | { status: 'failed'; message: string };
+
+/** What the panel shows when the folders are already locked by someone else. */
+export function syncLeaseBusyMessage(holder?: LeaseHolder): string {
+  if (holder?.kind === 'runner' || holder?.kind === 'app') {
+    return 'These folders are in use by an automation — wait for it to finish or stop it. Nothing was changed.';
+  }
+  if (holder?.kind === 'manual') {
+    return 'These folders are in use by another synchronization — wait for it to finish. Nothing was changed.';
+  }
+  return 'These folders are in use by another sync or automation — wait or stop it. Nothing was changed.';
+}
+
+/** A message per failure code; nothing here carries a path. */
+function leaseFailureMessage(e: unknown): string {
+  const code = e instanceof SyncLeaseError ? e.code : '';
+  switch (code) {
+    case 'store_read_only':
+      return 'Ferrum was updated - restart Ferrum. Nothing was changed.';
+    case 'store_unavailable':
+      return 'The automation store is unavailable, so the folders cannot be locked for synchronization. Restart Ferrum; if it persists, check the Ferrum data folder. Nothing was changed.';
+    case 'store_untrusted':
+      return 'The automation store location is not trusted (it is, or sits below, a link), so the folders cannot be locked. Check the Ferrum data folder. Nothing was changed.';
+    case 'invalid_input':
+      return 'These folders cannot be locked for synchronization: a path is not valid. Nothing was changed.';
+    default: {
+      const why = e instanceof Error && e.message ? ` (${e.message})` : '';
+      return `The folders could not be locked for synchronization${why}. Nothing was changed.`;
+    }
+  }
+}
+
+/**
+ * Take the cross-process lease for a folder pair BEFORE anything is re-validated or enqueued
+ * (design §3.4). `busy` and `failed` both mean: run nothing. Failing to lock is never turned
+ * into running unlocked, because without a lease the backend refuses the baseline save and a
+ * concurrent automation could touch the same folders.
+ */
+export async function acquireSyncLease(
+  leftRoot: string,
+  rightRoot: string,
+  api: SyncLeaseApi = defaultSyncLeaseApi,
+): Promise<SyncLeaseOutcome> {
+  let answer: LeaseAcquire;
+  try {
+    answer = await api.acquire(leftRoot, rightRoot);
+  } catch (e) {
+    if (e instanceof SyncLeaseError && e.code === 'lease_busy') {
+      return {
+        status: 'busy',
+        message:
+          'Too many synchronizations are running at once — wait for one to finish. Nothing was changed.',
+      };
+    }
+    return { status: 'failed', message: leaseFailureMessage(e) };
+  }
+  if ('status' in answer) {
+    return {
+      status: 'busy',
+      message: syncLeaseBusyMessage(answer.holder),
+      holder: answer.holder,
+    };
+  }
+  const leaseId = answer.leaseId;
+  let released = false;
+  return {
+    status: 'acquired',
+    lease: {
+      async release() {
+        if (released) return;
+        released = true;
+        try {
+          await api.release(leaseId);
+        } catch {
+          // Expires by itself; nothing the caller can do.
+        }
+      },
+    },
+  };
+}
 
 /** Where the baseline used for a plan came from (FER-414). */
 export type BaselineStatus = 'trusted' | FirstRunReason | 'loadFailed' | 'notUsed';

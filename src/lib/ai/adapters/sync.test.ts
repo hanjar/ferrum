@@ -468,3 +468,163 @@ describe('run (FER-217)', () => {
     if (run.ok) expect(run.value.notes.join(' ')).toContain('1 item gagal masuk antrean');
   });
 });
+
+// Automation P0.4 (RQ-2, design §3.4): the chat sync takes the same cross-process folder lease as
+// the manual panel, before the re-validation, and holds it until its baseline settle ends.
+describe('folder lease', () => {
+  const entries = () => [diff('l.txt', 'leftOnly')];
+
+  function leaseApi() {
+    const log: string[] = [];
+    let held = false;
+    return {
+      log,
+      acquire: vi.fn(async (l: string, r: string) => {
+        log.push(`acquire:${l}|${r}`);
+        if (held) return { status: 'busy' as const, holder: { kind: 'runner' as const } };
+        held = true;
+        return { leaseId: 'lease-1' };
+      }),
+      release: vi.fn(async () => {
+        log.push('release');
+        held = false;
+      }),
+    };
+  }
+
+  it('takes the lease before the re-validation compare and releases it after the settlement', async () => {
+    const lease = leaseApi();
+    let finish!: (r: SettleResult) => void;
+    const settle = vi.fn(
+      () =>
+        new Promise<SettleResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const t = setup({ leaseApi: lease, settle: settle as unknown as SyncAdapterDeps['settle'] });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    ipc.enqueueCopy.mockResolvedValue('op-1');
+    const { approved } = await t.approve();
+    ipc.compareDirs.mockClear();
+    ipc.compareDirs.mockImplementation(async () => {
+      lease.log.push('compare');
+      return report(entries());
+    });
+    const run = await t.facade.execute(approved);
+    expect(run).toMatchObject({ ok: true, value: { state: 'queued' } });
+    expect(lease.log.slice(0, 2)).toEqual([`acquire:${LEFT}|${RIGHT}`, 'compare']);
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledTimes(1));
+    expect(lease.release).not.toHaveBeenCalled(); // the settle still runs
+    finish({ status: 'saved', entries: 1 });
+    await vi.waitFor(() => expect(lease.release).toHaveBeenCalledTimes(1));
+  });
+
+  it('releases the lease even when the settlement throws', async () => {
+    const lease = leaseApi();
+    const settle = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const t = setup({ leaseApi: lease, settle: settle as unknown as SyncAdapterDeps['settle'] });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    ipc.enqueueCopy.mockResolvedValue('op-1');
+    await t.facade.execute((await t.approve()).approved);
+    await vi.waitFor(() => expect(lease.release).toHaveBeenCalledTimes(1));
+  });
+
+  it('a busy lease runs nothing: no compare, no queue, no settlement', async () => {
+    const lease = leaseApi();
+    const t = setup({ leaseApi: lease });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    const { approved } = await t.approve();
+    ipc.compareDirs.mockClear();
+    await lease.acquire(LEFT, RIGHT); // someone else holds it
+    lease.acquire.mockClear();
+    const run = await t.facade.execute(approved);
+    expect(run).toMatchObject({
+      ok: false,
+      error: { code: 'execution_failed', cause: 'lease_busy' },
+    });
+    expect(ipc.compareDirs).not.toHaveBeenCalled();
+    expect(ipc.enqueueCopy).not.toHaveBeenCalled();
+    expect(t.settle).not.toHaveBeenCalled();
+    expect(lease.release).not.toHaveBeenCalled();
+  });
+
+  it('a lease that cannot be taken at all also runs nothing', async () => {
+    const lease = leaseApi();
+    lease.acquire.mockRejectedValueOnce(new Error('store down'));
+    const t = setup({ leaseApi: lease });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    const { approved } = await t.approve();
+    ipc.compareDirs.mockClear();
+    const run = await t.facade.execute(approved);
+    expect(run).toMatchObject({
+      ok: false,
+      error: { code: 'execution_failed', cause: 'lease_failed' },
+    });
+    expect(ipc.enqueueCopy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a stale plan', 'stale'],
+    ['a blocked (incomplete) compare', 'blocked'],
+    ['nothing queued', 'enqueue'],
+  ])('releases the lease on %s', async (_name, kind) => {
+    const lease = leaseApi();
+    const t = setup({ leaseApi: lease });
+    ipc.compareDirs.mockResolvedValueOnce(report(entries()));
+    const { approved } = await t.approve();
+    if (kind === 'stale') {
+      ipc.compareDirs.mockResolvedValueOnce(
+        report([diff('l.txt', 'leftOnly', { leftModifiedMs: 99 })]),
+      );
+    } else if (kind === 'blocked') {
+      ipc.compareDirs.mockResolvedValueOnce(report(entries(), { truncated: true }));
+    } else {
+      ipc.compareDirs.mockResolvedValueOnce(report(entries()));
+      ipc.enqueueCopy.mockRejectedValue(new Error('queue down'));
+    }
+    const run = await t.facade.execute(approved);
+    expect(run.ok).toBe(false);
+    expect(lease.release).toHaveBeenCalledTimes(1);
+    expect(t.settle).not.toHaveBeenCalled();
+  });
+
+  it('releases the lease when the run throws', async () => {
+    const lease = leaseApi();
+    const t = setup({ leaseApi: lease });
+    ipc.compareDirs.mockResolvedValueOnce(report(entries()));
+    const { approved } = await t.approve();
+    ipc.compareDirs.mockRejectedValueOnce(new Error('compare exploded'));
+    await t.facade.execute(approved).catch(() => undefined);
+    expect(lease.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('an onQueued callback that throws neither fails the run nor frees the lease before the settle', async () => {
+    const lease = leaseApi();
+    let finish!: (r: SettleResult) => void;
+    const settle = vi.fn(
+      () =>
+        new Promise<SettleResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onQueued = vi.fn(() => {
+      throw new Error('ui exploded');
+    });
+    const t = setup({
+      leaseApi: lease,
+      onQueued,
+      settle: settle as unknown as SyncAdapterDeps['settle'],
+    });
+    ipc.compareDirs.mockResolvedValue(report(entries()));
+    ipc.enqueueCopy.mockResolvedValue('op-1');
+    const run = await t.facade.execute((await t.approve()).approved);
+    expect(run).toMatchObject({ ok: true, value: { state: 'queued', jobIds: ['op-1'] } });
+    expect(onQueued).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledTimes(1));
+    expect(lease.release).not.toHaveBeenCalled();
+    finish({ status: 'saved', entries: 1 });
+    await vi.waitFor(() => expect(lease.release).toHaveBeenCalledTimes(1));
+  });
+});
