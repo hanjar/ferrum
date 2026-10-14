@@ -72,6 +72,7 @@ async function mountTreemap(
     metric?: 'logical' | 'allocated';
     selectedId?: string | null;
     coverage?: 'complete' | 'partial' | 'stale';
+    scanRootTotal?: number;
   } = {},
 ) {
   const onselect = vi.fn();
@@ -81,6 +82,7 @@ async function mountTreemap(
     metric: props.metric ?? 'logical',
     selectedId: props.selectedId ?? null,
     coverage: props.coverage ?? 'complete',
+    scanRootTotal: props.scanRootTotal,
     onselect,
     onzoom,
   });
@@ -224,6 +226,96 @@ describe('squarify layout', () => {
     expect(a).toEqual(c);
     expect(metricValue(sorted[0], 'logical')).toBe(72 * 1024 * 1024);
   });
+
+  it('handles dominant 99.8% child by laying out its grandchildren inside container', () => {
+    const grandchildren: DiskUsageChildItem[] = [
+      item({ id: 'gc1', name: 'gc1', logicalBytes: 60000 }),
+      item({ id: 'gc2', name: 'gc2', logicalBytes: 30000 }),
+      item({ id: 'gc3', name: 'gc3', logicalBytes: 9800 }),
+    ];
+    const items = [
+      item({
+        id: 'dominant',
+        name: 'dominant',
+        kind: 'dir',
+        logicalBytes: 99800,
+        children: grandchildren,
+      }),
+      item({ id: 'tiny', name: 'tiny', logicalBytes: 200 }),
+    ];
+    const res = squarify(items, 1000, 1000, { metric: 'logical' });
+    const domRect = res.rects.find((r) => r.id === 'dominant');
+    expect(domRect).toBeTruthy();
+    expect(domRect?.isDirContainer).toBe(true);
+    expect(domRect?.depth).toBe(1);
+
+    // Grandchildren rects exist and have depth 2
+    const gc1Rect = res.rects.find((r) => r.id === 'gc1');
+    const gc2Rect = res.rects.find((r) => r.id === 'gc2');
+    const gc3Rect = res.rects.find((r) => r.id === 'gc3');
+    expect(gc1Rect).toBeTruthy();
+    expect(gc2Rect).toBeTruthy();
+    expect(gc3Rect).toBeTruthy();
+    expect(gc1Rect?.depth).toBe(2);
+
+    // Grandchildren are placed inside dominant container's content area
+    expect(domRect?.contentRect).toBeDefined();
+    if (domRect?.contentRect) {
+      expect(gc1Rect!.x).toBeGreaterThanOrEqual(domRect.contentRect.x - 1);
+      expect(gc1Rect!.y).toBeGreaterThanOrEqual(domRect.contentRect.y - 1);
+      expect(gc1Rect!.x + gc1Rect!.w).toBeLessThanOrEqual(
+        domRect.contentRect.x + domRect.contentRect.w + 1,
+      );
+    }
+  });
+
+  it('respects maxDepth cap and stops nesting beyond maxDepth', () => {
+    const greatGrandchildren: DiskUsageChildItem[] = [
+      item({ id: 'ggc1', name: 'ggc1', logicalBytes: 500 }),
+    ];
+    const grandchildren: DiskUsageChildItem[] = [
+      item({
+        id: 'gc1',
+        name: 'gc1',
+        kind: 'dir',
+        logicalBytes: 800,
+        children: greatGrandchildren,
+      }),
+    ];
+    const items = [
+      item({
+        id: 'l1',
+        name: 'l1',
+        kind: 'dir',
+        logicalBytes: 1000,
+        children: grandchildren,
+      }),
+    ];
+    // With maxDepth: 2, depth 3 (ggc1) should NOT be laid out
+    const res = squarify(items, 1000, 1000, { metric: 'logical', maxDepth: 2 });
+    expect(res.rects.some((r) => r.id === 'l1')).toBe(true);
+    expect(res.rects.some((r) => r.id === 'gc1')).toBe(true);
+    expect(res.rects.some((r) => r.id === 'ggc1')).toBe(false);
+  });
+
+  it('groups sub-level items into Other when level has more than 12 items', () => {
+    const subItems = Array.from({ length: 15 }, (_, i) =>
+      item({ id: `sub_${i}`, name: `sub_${i}`, logicalBytes: 100 }),
+    );
+    const items = [
+      item({
+        id: 'dir1',
+        name: 'dir1',
+        kind: 'dir',
+        logicalBytes: 1500,
+        children: subItems,
+      }),
+    ];
+    const res = squarify(items, 1000, 1000, { metric: 'logical' });
+    const subOther = res.rects.find((r) => r.id.includes(OTHER_ID) && r.depth === 2);
+    expect(subOther).toBeTruthy();
+    expect(subOther?.otherGroup?.count).toBe(3);
+  });
 });
 
 /* ── component ───────────────────────────────────────────────────────── */
@@ -352,5 +444,31 @@ describe('Treemap component', () => {
     await mountTreemap(items);
     expect(tileStyles()).toEqual(first);
     expect(first.length).toBe(5);
+  });
+
+  it('regression: 99.8% dominant item displays 99.8% on tile, not 1.0%', async () => {
+    const items = [
+      item({ id: 'dominant', name: 'dominant', logicalBytes: 99800 }),
+      item({ id: 'tiny', name: 'tiny', logicalBytes: 200 }),
+    ];
+    await mountTreemap(items);
+    const domTile = tile('dominant');
+    expect(domTile.textContent).toContain('99.8%');
+    expect(domTile.textContent).not.toContain('1.0%');
+  });
+
+  it('displays both percent of focus and percent of scan root in tooltip when scanRootTotal is provided', async () => {
+    const items = [
+      item({ id: 'f1', name: 'f1.txt', logicalBytes: 5000 }),
+      item({ id: 'f2', name: 'f2.txt', logicalBytes: 5000 }),
+    ];
+    // Focus total = 10000, scanRootTotal = 100000 (f1 is 50.0% of focus, 5.0% of scan root)
+    await mountTreemap(items, { scanRootTotal: 100000 });
+    fireEvent.mouseMove(tile('f1'));
+    await tick();
+    const tip = document.querySelector('.tip');
+    expect(tip).toBeTruthy();
+    expect(tip?.textContent).toContain('50.0% of focus');
+    expect(tip?.textContent).toContain('of scan root: 5.0%');
   });
 });

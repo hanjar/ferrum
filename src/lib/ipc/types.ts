@@ -630,6 +630,8 @@ export interface DiskUsageChildItem {
   subtreeFiles?: number;
   subtreeDirs?: number;
   subtreeErrors?: number;
+  /** Subtree items loaded for multi-level nested treemap views. */
+  children?: DiskUsageChildItem[];
 }
 
 /** Page of disk_usage_query_children (largest-first by default). */

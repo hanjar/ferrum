@@ -52,6 +52,8 @@ import type {
 } from '../ipc/types';
 import { isInTauri } from '../ipc/tauri';
 import { ageLabel } from './cacheAge';
+import { parentOf } from '../format';
+import { metricValue } from './treemapLayout';
 
 export type DiskUsagePhase =
   'idle' | 'scanning' | 'complete' | 'partial' | 'cancelled' | 'stale' | 'empty' | 'error';
@@ -462,6 +464,7 @@ export class DiskUsageStore {
 
   zoomIn(nodeId: string): void {
     if (!this.hasData) return;
+    if (this.zoomNodeId === nodeId) return;
     this.zoomStack = [...this.zoomStack, nodeId];
     this.selectedNodeId = null;
     this.refreshScopedQueries();
@@ -498,6 +501,86 @@ export class DiskUsageStore {
       this.refreshScopedQueries();
     }
     this.selectNode(selectedId);
+  }
+
+  /**
+   * Attempt to focus/navigate to `targetPath` within the current scan snapshot.
+   * Returns true if the path exists in the scan snapshot and was focused, false otherwise.
+   */
+  async focusPathIfScanned(targetPath: string): Promise<boolean> {
+    const scanId = this.scanId;
+    if (!scanId || !this.hasData) return false;
+    const target = targetPath.trim();
+    if (!target) return false;
+
+    const normTarget = normalizePath(target);
+    const normRoot = normalizePath(this.rootId || this.root);
+    if (normTarget === normRoot) {
+      this.zoomTo(0);
+      return true;
+    }
+    if (!isSubpath(normTarget, normRoot)) {
+      return false;
+    }
+
+    try {
+      await diskUsageQueryChildren(scanId, target, 0, 1, 'largestFirst', { metric: this.metric });
+      const stack = this.buildZoomStackTo(target);
+      for (const p of stack) {
+        this.expanded.add(p);
+      }
+      this.zoomStack = stack;
+      this.selectedNodeId = target;
+      this.refreshScopedQueries();
+      return true;
+    } catch {
+      // Check if target might be a file inside a scanned parent
+      const parent = parentOf(target);
+      if (parent && parent !== target) {
+        try {
+          const page = await diskUsageQueryChildren(
+            scanId,
+            parent,
+            0,
+            TREE_PAGE_SIZE,
+            'largestFirst',
+            {
+              metric: this.metric,
+            },
+          );
+          const match = page.items.find(
+            (it) => normalizePath(it.id) === normTarget || normalizePath(it.name) === normTarget,
+          );
+          if (match) {
+            const stack = this.buildZoomStackTo(parent);
+            for (const p of stack) {
+              this.expanded.add(p);
+            }
+            this.zoomStack = stack;
+            this.selectedNodeId = match.id;
+            this.refreshScopedQueries();
+            return true;
+          }
+        } catch {
+          // not found in snapshot
+        }
+      }
+      return false;
+    }
+  }
+
+  buildZoomStackTo(target: string): string[] {
+    const root = this.rootId || this.root;
+    const normRoot = normalizePath(root);
+    const stack: string[] = [];
+    let cur = target;
+    while (cur && normalizePath(cur) !== normRoot) {
+      stack.unshift(cur);
+      const p = parentOf(cur);
+      if (!p || p === cur) break;
+      cur = p;
+    }
+    return stack;
   }
 
   setMetric(metric: DiskUsageSizeMetric): void {
@@ -639,8 +722,86 @@ export class DiskUsageStore {
         metric,
       });
       if (seq !== this.treemapSeq || scanId !== this.scanId || page.scanId !== scanId) return;
+
+      const items: DiskUsageChildItem[] = page.items.map((it) => ({ ...it }));
+
+      // Fetch Level 2 children for significant Level 1 directories (top 15)
+      const l1Dirs = items
+        .filter((it) => it.kind === 'dir' && metricValue(it, metric) > 0)
+        .slice(0, 15);
+
+      if (l1Dirs.length > 0) {
+        const l2Results = await Promise.all(
+          l1Dirs.map(async (dir) => {
+            try {
+              const res = await diskUsageQueryChildren(scanId, dir.id, 0, 50, 'largestFirst', {
+                metric,
+              });
+              if (seq !== this.treemapSeq || scanId !== this.scanId) return null;
+              return { dirId: dir.id, items: res.items.map((it) => ({ ...it })) };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (seq !== this.treemapSeq || scanId !== this.scanId) return;
+
+        const l2Map: Record<string, DiskUsageChildItem[]> = {};
+        const allL2Dirs: DiskUsageChildItem[] = [];
+        for (const res of l2Results) {
+          if (!res) continue;
+          l2Map[res.dirId] = res.items;
+          for (const it of res.items) {
+            if (it.kind === 'dir' && metricValue(it, metric) > 0) {
+              allL2Dirs.push(it);
+            }
+          }
+        }
+
+        for (const dir of l1Dirs) {
+          const ch = l2Map[dir.id];
+          if (ch && ch.length > 0) {
+            dir.children = ch;
+          }
+        }
+
+        // Fetch Level 3 children for significant Level 2 directories (top 20)
+        allL2Dirs.sort((a, b) => metricValue(b, metric) - metricValue(a, metric));
+        const l2DirsToQuery = allL2Dirs.slice(0, 20);
+
+        if (l2DirsToQuery.length > 0) {
+          const l3Results = await Promise.all(
+            l2DirsToQuery.map(async (dir) => {
+              try {
+                const res = await diskUsageQueryChildren(scanId, dir.id, 0, 30, 'largestFirst', {
+                  metric,
+                });
+                if (seq !== this.treemapSeq || scanId !== this.scanId) return null;
+                return { dirId: dir.id, items: res.items.map((it) => ({ ...it })) };
+              } catch {
+                return null;
+              }
+            }),
+          );
+          if (seq !== this.treemapSeq || scanId !== this.scanId) return;
+
+          const l3Map: Record<string, DiskUsageChildItem[]> = {};
+          for (const res of l3Results) {
+            if (!res) continue;
+            l3Map[res.dirId] = res.items;
+          }
+
+          for (const dir of l2DirsToQuery) {
+            const ch = l3Map[dir.id];
+            if (ch && ch.length > 0) {
+              dir.children = ch;
+            }
+          }
+        }
+      }
+
       this.treemap = {
-        items: page.items,
+        items,
         total: page.total,
         loading: false,
         error: null,
@@ -872,4 +1033,14 @@ function scanClock(ms: number): string {
  *  listener and view state — no shared mutable state between instances. */
 export function createDiskUsageStore(): DiskUsageStore {
   return new DiskUsageStore();
+}
+
+export function normalizePath(p: string): string {
+  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+export function isSubpath(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  const prefix = parent.endsWith('\\') ? parent : parent + '\\';
+  return child.startsWith(prefix);
 }

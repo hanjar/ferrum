@@ -123,8 +123,85 @@
   }
 
   const scanning = $derived(store.phase === 'scanning');
-  const canScan = $derived(!scanning && !offering && store.rootInput.trim().length > 0);
   const hasData = $derived(store.hasData);
+
+  let isEditingAddress = $state(false);
+  let addressText = $state('');
+
+  // Keep addressText synced with the focused folder unless user is actively editing
+  const currentFocusPath = $derived(
+    store.hasData ? store.zoomNodeId || store.root : store.rootInput,
+  );
+
+  $effect(() => {
+    const p = currentFocusPath;
+    if (!isEditingAddress) {
+      addressText = p;
+    }
+  });
+
+  function onAddressFocus(): void {
+    isEditingAddress = true;
+    addressText = currentFocusPath;
+  }
+
+  function onAddressBlur(): void {
+    isEditingAddress = false;
+    if (!store.hasData) {
+      store.rootInput = addressText;
+    } else {
+      addressText = currentFocusPath;
+    }
+  }
+
+  function onAddressInput(e: Event): void {
+    const val = (e.target as HTMLInputElement).value;
+    addressText = val;
+    isEditingAddress = true;
+    store.rootInput = val;
+  }
+
+  async function onAddressKeyDown(e: KeyboardEvent): Promise<void> {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = addressText.trim();
+      if (!target) return;
+      if (store.hasData && store.root) {
+        const ok = await store.focusPathIfScanned(target);
+        if (ok) {
+          isEditingAddress = false;
+          (e.target as HTMLElement)?.blur();
+          return;
+        }
+      }
+      // Outside scan results or no data: trigger scan
+      store.rootInput = target;
+      isEditingAddress = false;
+      (e.target as HTMLElement)?.blur();
+      void requestScan();
+    } else if (e.key === 'Escape') {
+      isEditingAddress = false;
+      addressText = currentFocusPath;
+      (e.target as HTMLElement)?.blur();
+    }
+  }
+
+  function handleScanClick(choose = false): void {
+    if (isEditingAddress && addressText.trim()) {
+      store.rootInput = addressText.trim();
+    } else if (store.hasData && store.root) {
+      store.rootInput = store.root;
+    }
+    void requestScan(choose);
+  }
+
+  const canScan = $derived(
+    !scanning &&
+      !offering &&
+      (isEditingAddress
+        ? addressText.trim().length > 0
+        : store.rootInput.trim().length > 0 || store.root.length > 0),
+  );
 
   // FER-464: a result opened from the on-disk cache is always Stale; it also
   // warns when old (Settings) or after an in-app change.
@@ -144,25 +221,50 @@
 >
   <div class="wsbar">
     <span class="wstitle">Disk usage</span>
+    {#if store.root && hasData}
+      <button
+        type="button"
+        class="scanRootChip"
+        title="Root scan: {store.root} — klik untuk kembali ke root scan"
+        onclick={() => store.zoomTo(0)}
+      >
+        <span class="srLab">Scan:</span>
+        {store.root}
+      </button>
+    {/if}
     <label class="root">
-      <span class="rlab">Root</span>
+      <span class="rlab">{hasData ? 'Path' : 'Root'}</span>
       <input
         class="mono"
-        bind:value={store.rootInput}
+        value={addressText}
+        onfocus={onAddressFocus}
+        onblur={onAddressBlur}
+        oninput={onAddressInput}
+        onkeydown={onAddressKeyDown}
         placeholder="C:\folder"
         spellcheck="false"
         aria-label="Path root scan disk usage"
         disabled={scanning}
       />
     </label>
-    <button class="btn" disabled={!canScan} onclick={() => void requestScan()}>
+    <button
+      type="button"
+      class="btn upBtn"
+      disabled={scanning || !hasData || store.zoomStack.length === 0}
+      title="Naik satu level (zoom out)"
+      aria-label="Naik satu level (zoom out)"
+      onclick={() => store.zoomOut()}
+    >
+      ↑
+    </button>
+    <button class="btn" disabled={!canScan} onclick={() => handleScanClick()}>
       {hasData ? 'Rescan' : 'Scan'}
     </button>
     <button
       class="btn"
       disabled={!canScan}
       title="Pilih sendiri: scan biasa, scan cepat (admin), atau Instan (indeks)"
-      onclick={() => void requestScan(true)}
+      onclick={() => handleScanClick(true)}
     >
       Pilihan scan…
     </button>
@@ -374,6 +476,11 @@
               metric={store.metric}
               selectedId={store.selectedNodeId}
               coverage={coverage()}
+              scanRootTotal={store.rootNode
+                ? store.metric === 'allocated'
+                  ? (store.rootNode.subtreeAllocatedBytes ?? undefined)
+                  : store.rootNode.subtreeLogicalBytes
+                : undefined}
               onselect={(id) => store.selectNode(id)}
               onzoom={(id) => store.zoomIn(id)}
             />
@@ -428,6 +535,39 @@
     color: var(--text3);
     font-size: calc(11px + var(--uiStep, 0px));
     font-weight: 600;
+  }
+  .scanRootChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--rl);
+    border: 1px solid var(--line2);
+    background: var(--elev);
+    color: var(--text2);
+    font: inherit;
+    font-size: calc(11px + var(--uiStep, 0px));
+    max-width: 200px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .scanRootChip:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .srLab {
+    font-weight: 700;
+    color: var(--text3);
+    text-transform: uppercase;
+    font-size: calc(9.5px + var(--uiStep, 0px));
+    letter-spacing: 0.05em;
+  }
+  .upBtn {
+    padding: 3px 8px;
+    font-weight: 700;
+    line-height: 1;
   }
   .root input {
     width: 210px;

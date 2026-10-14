@@ -474,6 +474,129 @@ describe('DiskUsageWorkspace — FER-464 cached scan + Instan default', () => {
   });
 });
 
+describe('DiskUsageWorkspace — focus and address synchronization', () => {
+  it('selecting a folder in tree updates toolbar address, breadcrumb, and treemap', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    store.treeNodes['C:\\data'] = {
+      items: [childItem('C:\\data\\sub')],
+      total: 1,
+      loading: false,
+      loadingMore: false,
+      error: null,
+      loadId: 1,
+    };
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    // Initially address is C:\data
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    expect(input.value).toBe('C:\\data');
+
+    // Click row C:\data\sub in tree
+    const row = [...container.querySelectorAll('.row')].find(
+      (r) => r.getAttribute('data-row-id') === 'C:\\data\\sub',
+    ) as HTMLElement;
+    expect(row).toBeTruthy();
+    row.click();
+    await tick();
+    await new Promise((r) => setTimeout(r, 200));
+    await flush();
+
+    // Toolbar address updates to C:\data\sub
+    expect(input.value).toBe('C:\\data\\sub');
+
+    // Scan chip shows Scan: C:\data
+    const chip = container.querySelector('.scanRootChip');
+    expect(chip?.textContent).toContain('Scan:');
+    expect(chip?.textContent).toContain('C:\\data');
+
+    // Breadcrumbs updated
+    const crumbs = [...container.querySelectorAll('button.crumb')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(crumbs).toEqual(['data', 'sub']);
+  });
+
+  it('drilling in treemap updates address and Up button returns to parent', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    const upBtn = container.querySelector('button.upBtn') as HTMLButtonElement;
+    expect(upBtn.disabled).toBe(true);
+
+    // Zoom into C:\data\sub
+    store.zoomIn('C:\\data\\sub');
+    await tick();
+
+    expect(input.value).toBe('C:\\data\\sub');
+    expect(upBtn.disabled).toBe(false);
+
+    // Click Up button
+    upBtn.click();
+    await tick();
+
+    expect(input.value).toBe('C:\\data');
+    expect(store.zoomStack).toEqual([]);
+    expect(upBtn.disabled).toBe(true);
+  });
+
+  it('address bar Enter navigates within scan scope without rescanning', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: 'C:\\data\\nested' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    await flush();
+
+    // Should focus within scan scope, NOT start a new scan
+    expect(duMocks.start).not.toHaveBeenCalled();
+    expect(store.zoomNodeId).toBe('C:\\data\\nested');
+  });
+
+  it('address bar Enter triggers a new scan if path is outside scanned scope', async () => {
+    duMocks.start.mockResolvedValueOnce('s-new');
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: 'D:\\other' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    await flush();
+
+    // Should trigger a new scan for D:\other
+    expect(duMocks.start).toHaveBeenCalledWith('D:\\other', { maxDepth: null });
+  });
+});
+
 // ── helpers ────────────────────────────────────────────────────────────────
 function paneOf(path: string) {
   return {
