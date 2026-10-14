@@ -479,13 +479,15 @@ Profile sync plans must never copy or delete folders wholesale, because doing so
 2. **A parent that is a file fails the item.** If a parent turns out to be a file, that item fails and nothing is overwritten.
 3. **Order.** `CreateDir*` shallow to deep, before any file copy; `RemoveEmptyDir*` deep to shallow, last. A
    `RemoveEmptyDir*` that fails because the folder is not empty is skipped, not an error.
-4. **Entry points.** P0.2 builds plans only with `build_profile_sync_plan` (passing the profile filter) and resolves
+   `RemoveEmptyDir*` is also no-follow: a reparse point or junction is skipped, never removed or followed.
+   `CreateDir*` on a folder that already exists succeeds; `RemoveEmptyDir*` on a folder that is already gone is skipped.
+4. **Entry points.** P0.2 builds plans only with `build_profile_sync_plan` (the profile filter is a mandatory parameter; `&NoFilter` when there is no include list) and resolves
    conflicts only with `apply_decisions(.., PlanMode::Profile)`.
 5. **Transit folders.** A folder that is visible only so the walker can reach deeper include matches (not selected by
    the include list, nor under a selected folder) always plans `Skip`: never `CreateDir*`, never `RemoveEmptyDir*`.
    Selected folders, and all folders when the include list is empty, behave as described above.
 6. **Release-mode guard.** The executor must call `validate_profile_plan(&plan)` before running anything and refuse to
-   run a plan that returns `Err` (a folder item with `CopyTo*`/`Delete*`). This check is always on; the
+   run a plan that returns `Err` (a folder item with `CopyTo*`/`Delete*`). It runs on the FINAL plan, i.e. after `apply_decisions`. This check is always on; the
    `debug_assert!` inside the planner is only an extra.
 
 ### 5.5 Delete policies

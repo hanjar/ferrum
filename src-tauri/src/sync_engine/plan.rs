@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::compare::NoFilter;
 use crate::compare::{CompareDirsReport, DirDiffEntry, DirDiffState, EntryFilter};
 use crate::sync_baseline::{BASELINE_VERSION, BaselineDto, EntryDto, FactsDto};
 
@@ -586,17 +588,17 @@ pub fn assert_profile_plan_invariants(plan: &[SyncPlanItem]) {
 /// Build a profile sync plan enforcing profile non-recursive folder actions.
 ///
 /// `filter` is the profile filter used for the compare. Visible folders that the
-/// filter does not select (transit folders) always get `Skip`. Pass `None` only
-/// when there is no include list.
+/// filter does not select (transit folders) always get `Skip`. The parameter is
+/// mandatory; pass `&NoFilter` for a profile without an include list.
 pub fn build_profile_sync_plan(
     report: &CompareDirsReport,
     opts: &SyncOptions,
     baseline: Option<&BaselineDto>,
-    filter: Option<&dyn EntryFilter>,
+    filter: &dyn EntryFilter,
 ) -> Vec<SyncPlanItem> {
     let mut profile_opts = opts.clone();
     profile_opts.profile = true;
-    build_plan_inner(report, &profile_opts, baseline, filter)
+    build_plan_inner(report, &profile_opts, baseline, Some(filter))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1031,8 +1033,12 @@ mod tests {
             let fix: Fixture = serde_json::from_str(&content)
                 .unwrap_or_else(|e| panic!("parse profile fixture {}: {}", path.display(), e));
 
-            let items =
-                build_profile_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref(), None);
+            let items = build_profile_sync_plan(
+                &fix.report,
+                &fix.options,
+                fix.baseline.as_ref(),
+                &NoFilter,
+            );
             assert_eq!(
                 items,
                 fix.expected.items,
@@ -1825,7 +1831,7 @@ mod tests {
             test_dir("A", DirDiffState::RightOnly),
             test_file("f.txt", DirDiffState::RightOnly, 1, 1000),
         ]);
-        let mut plan = build_profile_sync_plan(&report, &opts_both(false, true), None, None);
+        let mut plan = build_profile_sync_plan(&report, &opts_both(false, true), None, &NoFilter);
         assert!(validate_profile_plan(&plan).is_ok());
         plan[0].action = SyncAction::DeleteRight;
         let err = validate_profile_plan(&plan).unwrap_err();
@@ -1890,7 +1896,7 @@ mod tests {
             propagate_deletes: false,
             profile: true,
         };
-        let plan = build_profile_sync_plan(&report, &opts, None, Some(&filter));
+        let plan = build_profile_sync_plan(&report, &opts, None, &filter);
         assert_profile_plan_invariants(&plan);
         assert!(validate_profile_plan(&plan).is_ok());
         let _ = fs::remove_dir_all(&base);
