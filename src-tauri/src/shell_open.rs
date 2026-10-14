@@ -1318,12 +1318,25 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidPath);
     }
 
+    /// The long, final form of a test path. CI runners keep `%TEMP%` under an 8.3 short
+    /// name (`RUNNER~1`); the launcher and the dialog use the resolved long path.
+    fn long_path(p: &std::path::Path) -> String {
+        let full = std::fs::canonicalize(p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        full.strip_prefix(r"\\?\")
+            .map(str::to_owned)
+            .unwrap_or(full)
+    }
+
     #[test]
     fn test_shell_open_exe_declined_never_calls_launcher() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("program.exe");
         std::fs::write(&exe, b"MZ").unwrap();
         let exe_str = exe.to_string_lossy().into_owned();
+        let exe_long = long_path(&exe);
 
         let asked = std::cell::Cell::new(false);
         let launched = std::cell::Cell::new(false);
@@ -1336,7 +1349,7 @@ mod tests {
                 assert!(text.contains("Jalankan program ini?"));
                 assert!(text.contains("Nama: program.exe"));
                 assert!(text.contains("Jenis: .exe"));
-                assert!(text.contains(&exe_str));
+                assert!(text.contains(&exe_long));
                 Ok(false) // user cancelled
             },
             |_target| {
@@ -1383,7 +1396,7 @@ mod tests {
         assert!(asked.get(), "confirmation must be asked");
         assert_eq!(
             launched_path.borrow().as_deref(),
-            Some(exe_str.as_str()),
+            Some(long_path(std::path::Path::new(&exe_str)).as_str()),
             "launcher must be called with the target path"
         );
     }
@@ -1412,7 +1425,7 @@ mod tests {
         assert!(res.unwrap());
         assert_eq!(
             launched_path.borrow().as_deref(),
-            Some(pdf_str.as_str()),
+            Some(long_path(std::path::Path::new(&pdf_str)).as_str()),
             "launcher must be called directly for safe targets"
         );
     }
