@@ -8,10 +8,13 @@ pub mod plan;
 pub mod settle;
 
 pub use filters::{FilterError, Filters, ProfileFilter, is_builtin_exclude};
+#[cfg(test)]
+pub use plan::assert_profile_plan_invariants;
 pub use plan::{
     Classification, MTIME_TOLERANCE_MS, PROFILE_CAP_BLOCKER_TEXT, PROFILE_ENTRY_CAP, PlanSummary,
     SideChange, SyncAction, SyncConflictReason, SyncDecision, SyncDirection, SyncOptions,
-    SyncPlanItem, build_sync_plan, classify_detailed, describe_blockers, describe_profile_blockers,
+    SyncPlanItem, apply_decisions, apply_profile_decisions, build_profile_sync_plan,
+    build_sync_plan, classify_detailed, describe_blockers, describe_profile_blockers,
     is_baseline_trusted, is_plan_stale, is_resolvable, plan_facts, plan_summary,
     sync_plan_blockers,
 };

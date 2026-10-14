@@ -97,15 +97,20 @@ impl Pattern {
     pub fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         let (pattern_no_dir, dir_only) = if trimmed.ends_with('\\') || trimmed.ends_with('/') {
-            (&trimmed[..trimmed.len() - 1], true)
+            (trimmed.trim_end_matches(['\\', '/']), true)
         } else {
             (trimmed, false)
         };
 
-        // P3-1: Pattern containing `\` or `/` is anchored to root; pattern without separator matches basename at any depth.
-        let anchored = trimmed.contains('\\') || trimmed.contains('/');
+        // P1-B (Rework 2): Trailing slash only indicates directories and does not anchor the pattern.
+        // Anchoring is determined from pattern without trailing slash.
+        // A pattern with internal slash (e.g. `build\out\`) or leading slash (e.g. `/node_modules`) is anchored.
+        // A pattern without slash (e.g. `node_modules\`) is unanchored and matches at any depth.
+        let anchored = pattern_no_dir.contains(['\\', '/'])
+            || trimmed.starts_with('\\')
+            || trimmed.starts_with('/');
         let cleaned = if pattern_no_dir.starts_with('\\') || pattern_no_dir.starts_with('/') {
-            &pattern_no_dir[1..]
+            pattern_no_dir.trim_start_matches(['\\', '/'])
         } else {
             pattern_no_dir
         };
@@ -159,13 +164,23 @@ impl Pattern {
 
     /// For include checking: could a directory lead to entries matching this pattern?
     pub fn could_contain(&self, dir_segments: &[&str]) -> bool {
-        if !self.anchored {
-            // An unanchored pattern (e.g. *.txt) can match at any depth in any directory
-            return true;
+        if self.dir_only {
+            // For a dir_only pattern (e.g. `docs\` or `build\out\`), the directory itself
+            // matches directly or via ancestor match. A non-matching directory (like `photos`)
+            // does not match `docs\` and must not be made visible.
+            if self.anchored {
+                let seg_refs: Vec<&str> = self.segments.iter().map(|s| s.as_str()).collect();
+                prefix_could_lead(&seg_refs, dir_segments)
+            } else {
+                false
+            }
+        } else if !self.anchored {
+            // An unanchored file pattern (e.g. *.txt) can match at any depth in any directory
+            true
+        } else {
+            let seg_refs: Vec<&str> = self.segments.iter().map(|s| s.as_str()).collect();
+            prefix_could_lead(&seg_refs, dir_segments)
         }
-
-        let seg_refs: Vec<&str> = self.segments.iter().map(|s| s.as_str()).collect();
-        prefix_could_lead(&seg_refs, dir_segments)
     }
 }
 
@@ -326,10 +341,24 @@ impl EntryFilter for ProfileFilter {
             return false;
         }
 
-        // Exclude list (SP-4.3)
+        let segments: Vec<String> = rel
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty())
+            .map(fold_str)
+            .collect();
+
+        // Exclude list (SP-4.3): direct match or ancestor directory match
         for p in &self.exclude {
             if p.matches(rel, is_dir) {
                 return false;
+            }
+        }
+        for prefix_len in 1..segments.len() {
+            let ancestor_rel = segments[..prefix_len].join("/");
+            for p in &self.exclude {
+                if p.matches(&ancestor_rel, true) {
+                    return false;
+                }
             }
         }
 
@@ -342,12 +371,6 @@ impl EntryFilter for ProfileFilter {
         if self.include.iter().any(|p| p.matches(rel, is_dir)) {
             return true;
         }
-
-        let segments: Vec<String> = rel
-            .split(['\\', '/'])
-            .filter(|s| !s.is_empty())
-            .map(fold_str)
-            .collect();
 
         // P2-6: include matching a folder recursively includes all its contents.
         // Check if any ancestor directory matches an include pattern (as a directory).
@@ -412,16 +435,23 @@ mod tests {
 
     #[test]
     fn test_trailing_slash_folders_only() {
-        // SP-4.2: Trailing slash matches folders only
+        // SP-4.2 & P1-B: Trailing slash matches folders only and does NOT anchor
         let p_dir = Pattern::parse(r"node_modules\");
         assert!(p_dir.matches("node_modules", true));
+        assert!(p_dir.matches(r"project\node_modules", true)); // P1-B: unanchored matches at any depth
         assert!(!p_dir.matches("node_modules", false)); // not a dir
+        assert!(!p_dir.matches(r"project\node_modules", false));
 
         // P3-1: Trailing slash with ** matches folder at any depth
         let p_glob_dir = Pattern::parse(r"**\node_modules\");
         assert!(p_glob_dir.matches("node_modules", true));
         assert!(p_glob_dir.matches(r"project\node_modules", true));
         assert!(!p_glob_dir.matches(r"project\node_modules", false));
+
+        // P1-B: Pattern with internal slash is anchored
+        let p_anchored_dir = Pattern::parse(r"build\out\");
+        assert!(p_anchored_dir.matches(r"build\out", true));
+        assert!(!p_anchored_dir.matches(r"sub\build\out", true));
     }
 
     #[test]

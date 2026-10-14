@@ -1025,6 +1025,10 @@ pub(crate) fn side_info(path: &Path) -> std::io::Result<SideInfo> {
 pub trait EntryFilter: Send + Sync {
     /// True if the entry should be visible in the comparison.
     fn visible(&self, rel: &str, is_dir: bool) -> bool;
+    /// True if this filter actively filters entries.
+    fn is_active(&self) -> bool {
+        true
+    }
 }
 
 /// No-op filter that keeps all entries visible.
@@ -1034,6 +1038,9 @@ pub struct NoFilter;
 impl EntryFilter for NoFilter {
     fn visible(&self, _rel: &str, _is_dir: bool) -> bool {
         true
+    }
+    fn is_active(&self) -> bool {
+        false
     }
 }
 
@@ -1153,29 +1160,24 @@ struct Walker<'a> {
 impl Walker<'_> {
     fn push_item_errors(&mut self, rel: &str, side: &str, listing: &DirListing) {
         for (name, msg) in &listing.item_errors {
-            if name == "?" {
-                self.errors.push(CompareIssue {
-                    name: rel.to_string(),
-                    message: format!("{side}: {msg}"),
-                });
-                continue;
-            }
             let full = rel_name(rel, name);
-            // P3-4: Listing errors for excluded items are not recorded.
-            // Check filter before recording the error.
-            if let Some(info) = listing.infos.get(name) {
-                if !self.filter.visible(&full, info.is_dir) {
-                    continue;
-                }
-            } else {
-                let root = if side == "left" {
-                    self.left_root
+            if self.descend_one_sided && self.filter.is_active() && name != "?" {
+                // P3-4: Listing errors for excluded items are not recorded in profile runs.
+                // Check filter before recording the error.
+                if let Some(info) = listing.infos.get(name) {
+                    if !self.filter.visible(&full, info.is_dir) {
+                        continue;
+                    }
                 } else {
-                    self.right_root
-                };
-                let is_dir = root.join(&full).is_dir();
-                if !self.filter.visible(&full, is_dir) {
-                    continue;
+                    let root = if side == "left" {
+                        self.left_root
+                    } else {
+                        self.right_root
+                    };
+                    let is_dir = root.join(&full).is_dir();
+                    if !self.filter.visible(&full, is_dir) {
+                        continue;
+                    }
                 }
             }
             self.errors.push(CompareIssue {
@@ -1282,17 +1284,33 @@ impl Walker<'_> {
                 let r_info = right.infos.get(*name);
                 let l_dir = l_info.is_some_and(|i| i.is_dir);
                 let r_dir = r_info.is_some_and(|i| i.is_dir);
+
+                let l_vis = l_info
+                    .map(|i| self.filter.visible(&full, i.is_dir))
+                    .unwrap_or(false);
+                let r_vis = r_info
+                    .map(|i| self.filter.visible(&full, i.is_dir))
+                    .unwrap_or(false);
+
+                // If both sides are present:
+                // - P2-2: differing filter visibility hides on both sides -> do not descend
+                // - Type mismatch (one side dir, other side file) -> do not descend
+                if l_info.is_some() && r_info.is_some() && (l_vis != r_vis || l_dir != r_dir) {
+                    continue;
+                }
+
                 if self.descend_one_sided {
-                    if l_dir && self.filter.visible(&full, true) && !left.broken.contains(*name) {
+                    if l_dir && l_vis && !left.broken.contains(*name) {
                         self.pf.request_side(TreeSide::Left, &full);
                     }
-                    if r_dir && self.filter.visible(&full, true) && !right.broken.contains(*name) {
+                    if r_dir && r_vis && !right.broken.contains(*name) {
                         self.pf.request_side(TreeSide::Right, &full);
                     }
                 } else {
                     let both_dirs = l_dir && r_dir;
                     if both_dirs
-                        && self.filter.visible(&full, true)
+                        && l_vis
+                        && r_vis
                         && !left.broken.contains(*name)
                         && !right.broken.contains(*name)
                     {
@@ -3214,10 +3232,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sp_4_1_sp_4_3_mirror_mode_excluded_target_file_never_deleted_p1_1_p2_4() {
-        // SP-4.1 & SP-4.3: Mirror L->R with exclude *.log and node_modules\.
+    fn test_sp_4_3_mirror_mode_excluded_target_file_never_deleted() {
+        // SP-4.3 & P1-1: Mirror L->R with exclude *.log and node_modules\.
         // Target has target-only `build\a.log`. Result: 0 actions touching a.log,
-        // folder `build` is marked `delete_if_empty: true` (non-recursive remove_dir).
+        // folder `build` is marked RemoveEmptyDirRight (non-recursive remove_dir).
         // Assert executor cannot recursively delete build.
         let mut left_src = MockTreeSource::new();
         left_src.add_dir("", "src");
@@ -3265,6 +3283,7 @@ mod tests {
             direction: crate::sync_engine::plan::SyncDirection::LeftToRight,
             delete_extras: true,
             propagate_deletes: false,
+            profile: true,
         };
         let plan = crate::sync_engine::plan::build_sync_plan(&rep, &mirror_opts, None);
 
@@ -3274,27 +3293,24 @@ mod tests {
             "excluded file must never be targeted by any plan action"
         );
 
-        // build is DeleteRight with delete_if_empty = true
+        // build is RemoveEmptyDirRight in profile mode
         let build_item = plan
             .iter()
             .find(|item| item.name == "build")
             .expect("build folder should be in plan");
         assert_eq!(
             build_item.action,
-            crate::sync_engine::plan::SyncAction::DeleteRight
+            crate::sync_engine::plan::SyncAction::RemoveEmptyDirRight
         );
-        assert!(
-            build_item.delete_if_empty,
-            "target folder delete must be marked delete_if_empty: true"
-        );
+        crate::sync_engine::plan::assert_profile_plan_invariants(&plan);
 
         let _ = fs::remove_dir_all(&tmp_l);
         let _ = fs::remove_dir_all(&tmp_r);
     }
 
     #[test]
-    fn test_sp_4_1_sp_4_3_include_txt_does_not_delete_unrelated_target_photos_p1_1() {
-        // SP-4.1 & SP-4.3: Include *.txt. Target has photos\x.jpg.
+    fn test_sp_4_3_include_txt_does_not_delete_unrelated_target_photos() {
+        // SP-4.3: Include *.txt. Target has photos\x.jpg.
         // Result: 0 actions touching photos\x.jpg.
         let mut left_src = MockTreeSource::new();
         left_src.add_file("", "readme.txt", 100, 1000);
@@ -3330,27 +3346,28 @@ mod tests {
             direction: crate::sync_engine::plan::SyncDirection::LeftToRight,
             delete_extras: true,
             propagate_deletes: false,
+            profile: true,
         };
         let plan = crate::sync_engine::plan::build_sync_plan(&rep, &mirror_opts, None);
 
         // x.jpg has ZERO actions
         assert!(plan.iter().all(|item| !item.name.ends_with(".jpg")));
 
-        // photos folder is marked delete_if_empty
+        // photos folder is marked RemoveEmptyDirRight in profile mode
         if let Some(photos_item) = plan.iter().find(|item| item.name == "photos") {
             assert_eq!(
                 photos_item.action,
-                crate::sync_engine::plan::SyncAction::DeleteRight
+                crate::sync_engine::plan::SyncAction::RemoveEmptyDirRight
             );
-            assert!(photos_item.delete_if_empty);
         }
+        crate::sync_engine::plan::assert_profile_plan_invariants(&plan);
 
         let _ = fs::remove_dir_all(&tmp_l);
         let _ = fs::remove_dir_all(&tmp_r);
     }
 
     #[test]
-    fn test_sp_4_1_sp_4_4_builtin_excludes_invisible_in_walker() {
+    fn test_sp_4_4_builtin_excludes_invisible_in_walker() {
         // SP-4.1 & SP-4.4: Built-in excludes (.x.ferrum-stage-1-0, $RECYCLE.BIN,
         // System Volume Information) never appear in walker entries.
         let left_src = MockTreeSource::new();
@@ -3436,6 +3453,7 @@ mod tests {
             direction: crate::sync_engine::plan::SyncDirection::LeftToRight,
             delete_extras: true,
             propagate_deletes: false,
+            profile: true,
         };
         let plan = crate::sync_engine::plan::build_sync_plan(&rep, &mirror_opts, None);
         assert!(
@@ -3448,8 +3466,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sp_4_1_include_folder_recursively_includes_all_contents_p2_6() {
-        // SP-4.1 & P2-6: Including `docs\` includes the folder and all its contents recursively.
+    fn test_sp_4_2_include_folder_recursively_includes_all_contents() {
+        // SP-4.2 & P2-6: Including `docs\` includes the folder and all its contents recursively.
         let mut left_src = MockTreeSource::new();
         left_src.add_dir("", "docs");
         left_src.add_file("docs", "guide.md", 20, 1000);
@@ -3600,6 +3618,7 @@ mod tests {
             direction: crate::sync_engine::plan::SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
+            profile: true,
         };
 
         let plan = crate::sync_engine::plan::build_sync_plan(&rep, &opts, Some(&baseline));
@@ -3616,10 +3635,151 @@ mod tests {
             Some(crate::sync_engine::plan::SyncConflictReason::ModifyDelete)
         );
 
-        // A is not deleted recursively; neither item deletes A/x.txt
+        // Folder A is marked RemoveEmptyDirRight (P1-A, P2-1): never deleted recursively,
+        // never recreated on left, and never DeleteRight in profile mode.
+        let item_a = plan
+            .iter()
+            .find(|i| i.name == "A")
+            .expect("A must be in plan");
+        assert_eq!(
+            item_a.action,
+            crate::sync_engine::plan::SyncAction::RemoveEmptyDirRight
+        );
+        assert_ne!(
+            item_a.action,
+            crate::sync_engine::plan::SyncAction::CopyToLeft
+        );
+        assert_ne!(
+            item_a.action,
+            crate::sync_engine::plan::SyncAction::DeleteRight
+        );
+        crate::sync_engine::plan::assert_profile_plan_invariants(&plan);
+
+        let _ = fs::remove_dir_all(&tmp_l);
+        let _ = fs::remove_dir_all(&tmp_r);
+    }
+
+    #[test]
+    fn test_sp_4_3_mirror_mode_nested_node_modules_excluded_p1_b() {
+        // S1 / P1-B: Mirror L->R, exclude `node_modules\`.
+        // Target has `proj/node_modules/pkg.json`.
+        // `node_modules\` is unanchored and must exclude `proj/node_modules` at any depth.
+        // Result: 0 actions touching `proj/node_modules` or its contents (neither DeleteRight nor RemoveEmptyDirRight).
+        let mut left_src = MockTreeSource::new();
+        left_src.add_dir("", "proj");
+        left_src.add_file("proj", "index.js", 100, 1000);
+
+        let mut right_src = MockTreeSource::new();
+        right_src.add_dir("", "proj");
+        right_src.add_file("proj", "index.js", 100, 1000);
+        right_src.add_dir("proj", "node_modules");
+        right_src.add_file("proj/node_modules", "pkg.json", 200, 1000);
+
+        let tmp_l = temp_root("filt-s1-l");
+        let tmp_r = temp_root("filt-s1-r");
+
+        let filter =
+            crate::sync_engine::filters::ProfileFilter::new(&[], &[r"node_modules\".into()])
+                .unwrap();
+
+        let rep = compare_dirs_filtered_with_sources(
+            s(&tmp_l),
+            s(&tmp_r),
+            rec(false),
+            &filter,
+            &Ctl::none(),
+            0,
+            &left_src,
+            &right_src,
+        )
+        .unwrap();
+
+        // Target's proj/node_modules is excluded by `node_modules\` -> not in entries
+        assert!(rep.entries.iter().all(|e| !e.name.contains("node_modules")));
+
+        let mirror_opts = crate::sync_engine::plan::SyncOptions {
+            direction: crate::sync_engine::plan::SyncDirection::LeftToRight,
+            delete_extras: true,
+            propagate_deletes: false,
+            profile: true,
+        };
+        let plan = crate::sync_engine::plan::build_sync_plan(&rep, &mirror_opts, None);
+
+        // 0 actions touching node_modules or its contents!
+        assert!(plan.iter().all(|item| !item.name.contains("node_modules")));
+        crate::sync_engine::plan::assert_profile_plan_invariants(&plan);
+
+        let _ = fs::remove_dir_all(&tmp_l);
+        let _ = fs::remove_dir_all(&tmp_r);
+    }
+
+    #[test]
+    fn test_compare_dirs_error_listing_name_compatibility_p2_3() {
+        // P2-3: Verify old compare_dirs_with_sources and compare_dirs_filtered_with_sources
+        // produce identical errors and entries for a tree with listing errors.
+        // Specifically locks that error name `?` at root is "?" and in subfolder is "sub/?",
+        // with zero extra I/O on the un-filtered path.
+        let mut left_src = MockTreeSource::new();
+        left_src.add_dir("", "sub");
+        left_src.add_file("sub", "ok.txt", 10, 1000);
+        left_src.add_item_error("", "?", "root listing failure");
+
+        let mut right_src = MockTreeSource::new();
+        right_src.add_dir("", "sub");
+        right_src.add_file("sub", "ok.txt", 10, 1000);
+        right_src.add_item_error("sub", "?", "subfolder listing failure");
+        right_src.add_item_error("sub", "locked.txt", "locked file");
+
+        let tmp_l = temp_root("filt-p23-l");
+        let tmp_r = temp_root("filt-p23-r");
+
+        let old_rep = compare_dirs_with_sources(
+            s(&tmp_l),
+            s(&tmp_r),
+            rec(false),
+            &Ctl::none(),
+            &left_src,
+            &right_src,
+        )
+        .unwrap();
+
+        let new_rep = compare_dirs_filtered_with_sources(
+            s(&tmp_l),
+            s(&tmp_r),
+            rec(false),
+            &NoFilter,
+            &Ctl::none(),
+            0,
+            &left_src,
+            &right_src,
+        )
+        .unwrap();
+
+        // Identical entries and errors between old and new (NoFilter) paths
+        assert_eq!(old_rep.entries, new_rep.entries);
+        assert_eq!(old_rep.errors, new_rep.errors);
+
+        // Lock error names specifically:
+        // 1. Root listing error name is "?"
         assert!(
-            plan.iter()
-                .all(|i| i.action != crate::sync_engine::plan::SyncAction::DeleteRight)
+            old_rep
+                .errors
+                .iter()
+                .any(|e| e.name == "?" && e.message.contains("root listing failure")),
+            "Root listing error must have name '?'"
+        );
+        // 2. Subfolder listing error name is "sub/?"
+        assert!(
+            old_rep
+                .errors
+                .iter()
+                .any(|e| e.name == "sub/?" && e.message.contains("subfolder listing failure")),
+            "Subfolder listing error must have name 'sub/?'"
+        );
+        // 3. Regular item error in subfolder is "sub/locked.txt"
+        assert!(
+            old_rep.errors.iter().any(|e| e.name == "sub/locked.txt"),
+            "Item error in subfolder must have name 'sub/locked.txt'"
         );
 
         let _ = fs::remove_dir_all(&tmp_l);

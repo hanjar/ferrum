@@ -39,6 +39,20 @@ pub enum SyncAction {
     DeleteLeft,
     Conflict,
     Skip,
+    /// Non-recursive directory creation on right side (`mkdir`).
+    /// Contents are copied by individual file actions. For P0.2 executor.
+    CreateDirRight,
+    /// Non-recursive directory creation on left side (`mkdir`).
+    /// Contents are copied by individual file actions. For P0.2 executor.
+    CreateDirLeft,
+    /// Non-recursive directory removal on right side (`remove_dir`).
+    /// For P0.2 executor: if the directory is not empty (e.g. contains excluded
+    /// or untracked files), this step is safely skipped, not an error.
+    RemoveEmptyDirRight,
+    /// Non-recursive directory removal on left side (`remove_dir`).
+    /// For P0.2 executor: if the directory is not empty (e.g. contains excluded
+    /// or untracked files), this step is safely skipped, not an error.
+    RemoveEmptyDirLeft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,11 +91,6 @@ pub struct SyncPlanItem {
     pub left_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_path: Option<String>,
-    /// For directory delete actions: indicates the directory should only be removed
-    /// if it is empty after all child operations have completed (`delete_if_empty: true`).
-    /// The executor (P0.2) MUST only call non-recursive `remove_dir` on this folder.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub delete_if_empty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -92,6 +101,8 @@ pub struct SyncOptions {
     pub delete_extras: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub propagate_deletes: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub profile: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,46 +192,54 @@ pub fn classify_detailed(
             if opts.direction == SyncDirection::RightToLeft {
                 return Classification {
                     action: if opts.delete_extras {
-                        SyncAction::DeleteLeft
+                        if opts.profile && entry.is_dir {
+                            SyncAction::RemoveEmptyDirLeft
+                        } else {
+                            SyncAction::DeleteLeft
+                        }
                     } else {
                         SyncAction::Skip
                     },
                     reason: None,
                 };
             }
-            // P1-1 + P1-2: SP-2.3 deletion propagation applies only to files (!is_dir).
-            // Folders are never deleted based on baseline facts, only removed if empty after children.
-            if !entry.is_dir {
-                if let Some(base) = base {
-                    let left_change = side_change(&base.left, Some(&left));
-                    if left_change == SideChange::Changed {
-                        return Classification {
-                            action: SyncAction::Conflict,
-                            reason: Some(SyncConflictReason::ModifyDelete),
-                        };
-                    } else if opts.propagate_deletes {
-                        // SP-2.3: right deleted, left unchanged -> delete left
-                        return Classification {
-                            action: SyncAction::DeleteLeft,
-                            reason: None,
-                        };
-                    } else {
-                        return Classification {
-                            action: SyncAction::Conflict,
-                            reason: Some(SyncConflictReason::DeletedRight),
-                        };
-                    }
-                } else if both && opts.propagate_deletes && trusted.is_none() {
-                    // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
-                    // If baseline is trusted and entry is new, it proceeds to CopyToRight below.
+            if let Some(base) = base {
+                let left_change = side_change(&base.left, Some(&left));
+                if left_change == SideChange::Changed {
                     return Classification {
                         action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::NoBaseline),
+                        reason: Some(SyncConflictReason::ModifyDelete),
+                    };
+                } else if opts.propagate_deletes {
+                    // SP-2.3: right deleted, left unchanged -> delete left
+                    return Classification {
+                        action: if opts.profile && entry.is_dir {
+                            SyncAction::RemoveEmptyDirLeft
+                        } else {
+                            SyncAction::DeleteLeft
+                        },
+                        reason: None,
+                    };
+                } else {
+                    return Classification {
+                        action: SyncAction::Conflict,
+                        reason: Some(SyncConflictReason::DeletedRight),
                     };
                 }
+            } else if both && opts.propagate_deletes && trusted.is_none() {
+                // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
+                // If baseline is trusted and entry is new, it proceeds to CopyToRight / CreateDirRight below.
+                return Classification {
+                    action: SyncAction::Conflict,
+                    reason: Some(SyncConflictReason::NoBaseline),
+                };
             }
             Classification {
-                action: SyncAction::CopyToRight,
+                action: if opts.profile && entry.is_dir {
+                    SyncAction::CreateDirRight
+                } else {
+                    SyncAction::CopyToRight
+                },
                 reason: None,
             }
         }
@@ -228,45 +247,54 @@ pub fn classify_detailed(
             if opts.direction == SyncDirection::LeftToRight {
                 return Classification {
                     action: if opts.delete_extras {
-                        SyncAction::DeleteRight
+                        if opts.profile && entry.is_dir {
+                            SyncAction::RemoveEmptyDirRight
+                        } else {
+                            SyncAction::DeleteRight
+                        }
                     } else {
                         SyncAction::Skip
                     },
                     reason: None,
                 };
             }
-            // P1-1 + P1-2: SP-2.3 deletion propagation applies only to files (!is_dir).
-            if !entry.is_dir {
-                if let Some(base) = base {
-                    let right_change = side_change(&base.right, Some(&right));
-                    if right_change == SideChange::Changed {
-                        return Classification {
-                            action: SyncAction::Conflict,
-                            reason: Some(SyncConflictReason::ModifyDelete),
-                        };
-                    } else if opts.propagate_deletes {
-                        // SP-2.3: left deleted, right unchanged -> delete right
-                        return Classification {
-                            action: SyncAction::DeleteRight,
-                            reason: None,
-                        };
-                    } else {
-                        return Classification {
-                            action: SyncAction::Conflict,
-                            reason: Some(SyncConflictReason::DeletedLeft),
-                        };
-                    }
-                } else if both && opts.propagate_deletes && trusted.is_none() {
-                    // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
-                    // If baseline is trusted and entry is new, it proceeds to CopyToLeft below.
+            if let Some(base) = base {
+                let right_change = side_change(&base.right, Some(&right));
+                if right_change == SideChange::Changed {
                     return Classification {
                         action: SyncAction::Conflict,
-                        reason: Some(SyncConflictReason::NoBaseline),
+                        reason: Some(SyncConflictReason::ModifyDelete),
+                    };
+                } else if opts.propagate_deletes {
+                    // SP-2.3: left deleted, right unchanged -> delete right
+                    return Classification {
+                        action: if opts.profile && entry.is_dir {
+                            SyncAction::RemoveEmptyDirRight
+                        } else {
+                            SyncAction::DeleteRight
+                        },
+                        reason: None,
+                    };
+                } else {
+                    return Classification {
+                        action: SyncAction::Conflict,
+                        reason: Some(SyncConflictReason::DeletedLeft),
                     };
                 }
+            } else if both && opts.propagate_deletes && trusted.is_none() {
+                // P2-1: two-way with propagate_deletes requires trusted baseline for deletions.
+                // If baseline is trusted and entry is new, it proceeds to CopyToLeft / CreateDirLeft below.
+                return Classification {
+                    action: SyncAction::Conflict,
+                    reason: Some(SyncConflictReason::NoBaseline),
+                };
             }
             Classification {
-                action: SyncAction::CopyToLeft,
+                action: if opts.profile && entry.is_dir {
+                    SyncAction::CreateDirLeft
+                } else {
+                    SyncAction::CopyToLeft
+                },
                 reason: None,
             }
         }
@@ -376,7 +404,7 @@ pub fn build_sync_plan(
         *by_fold.entry(key).or_insert(0) += 1;
     }
 
-    report
+    let items: Vec<SyncPlanItem> = report
         .entries
         .iter()
         .map(|entry| {
@@ -396,11 +424,6 @@ pub fn build_sync_plan(
                 class.action = SyncAction::Conflict;
                 class.reason = Some(SyncConflictReason::CaseCollision);
             }
-            let delete_if_empty = entry.is_dir
-                && matches!(
-                    class.action,
-                    SyncAction::DeleteRight | SyncAction::DeleteLeft
-                );
 
             SyncPlanItem {
                 name: entry.name.clone(),
@@ -411,10 +434,42 @@ pub fn build_sync_plan(
                 decision: None,
                 left_path: Some(format!("{}{sep}{rel}", report.left_root)),
                 right_path: Some(format!("{}{sep}{rel}", report.right_root)),
-                delete_if_empty,
             }
         })
-        .collect()
+        .collect();
+
+    // P2-1 / P2-2: In profile mode, folder items never receive recursive copy or delete actions.
+    if opts.profile {
+        for item in &items {
+            if item.is_dir {
+                debug_assert!(
+                    !matches!(
+                        item.action,
+                        SyncAction::DeleteLeft
+                            | SyncAction::DeleteRight
+                            | SyncAction::CopyToLeft
+                            | SyncAction::CopyToRight
+                    ),
+                    "Profile plan folder item '{}' must never have recursive action, got {:?}",
+                    item.name,
+                    item.action
+                );
+            }
+        }
+    }
+
+    items
+}
+
+/// Build a profile sync plan enforcing profile non-recursive folder actions.
+pub fn build_profile_sync_plan(
+    report: &CompareDirsReport,
+    opts: &SyncOptions,
+    baseline: Option<&BaselineDto>,
+) -> Vec<SyncPlanItem> {
+    let mut profile_opts = opts.clone();
+    profile_opts.profile = true;
+    build_sync_plan(report, &profile_opts, baseline)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -439,11 +494,21 @@ pub fn plan_summary(items: &[SyncPlanItem]) -> PlanSummary {
         if item.action == SyncAction::UpdateRight || item.action == SyncAction::UpdateLeft {
             s.overwrites += 1;
         }
-        if item.action == SyncAction::CopyToRight || item.action == SyncAction::UpdateRight {
+        if item.action == SyncAction::CopyToRight
+            || item.action == SyncAction::UpdateRight
+            || item.action == SyncAction::CreateDirRight
+        {
             s.to_right += 1;
-        } else if item.action == SyncAction::CopyToLeft || item.action == SyncAction::UpdateLeft {
+        } else if item.action == SyncAction::CopyToLeft
+            || item.action == SyncAction::UpdateLeft
+            || item.action == SyncAction::CreateDirLeft
+        {
             s.to_left += 1;
-        } else if item.action == SyncAction::DeleteRight || item.action == SyncAction::DeleteLeft {
+        } else if item.action == SyncAction::DeleteRight
+            || item.action == SyncAction::DeleteLeft
+            || item.action == SyncAction::RemoveEmptyDirRight
+            || item.action == SyncAction::RemoveEmptyDirLeft
+        {
             s.deletes += 1;
         } else if item.action == SyncAction::Conflict {
             s.conflicts += 1;
@@ -544,11 +609,36 @@ pub fn is_resolvable(item: &SyncPlanItem) -> bool {
         )
 }
 
+pub fn apply_profile_decisions(
+    plan: &[SyncPlanItem],
+    decisions: &HashMap<String, SyncDecision>,
+) -> Vec<SyncPlanItem> {
+    apply_decisions_mode(plan, decisions, true)
+}
+
 pub fn apply_decisions(
     plan: &[SyncPlanItem],
     decisions: &HashMap<String, SyncDecision>,
 ) -> Vec<SyncPlanItem> {
-    plan.iter()
+    let is_profile = plan.iter().any(|i| {
+        matches!(
+            i.action,
+            SyncAction::CreateDirLeft
+                | SyncAction::CreateDirRight
+                | SyncAction::RemoveEmptyDirLeft
+                | SyncAction::RemoveEmptyDirRight
+        )
+    });
+    apply_decisions_mode(plan, decisions, is_profile)
+}
+
+fn apply_decisions_mode(
+    plan: &[SyncPlanItem],
+    decisions: &HashMap<String, SyncDecision>,
+    profile: bool,
+) -> Vec<SyncPlanItem> {
+    let result: Vec<SyncPlanItem> = plan
+        .iter()
         .map(|item| {
             let Some(decision) = decisions.get(&item.name).copied() else {
                 return item.clone();
@@ -567,14 +657,38 @@ pub fn apply_decisions(
             }
             let action = if decision == SyncDecision::KeepLeft {
                 match item.state {
-                    DirDiffState::RightOnly => SyncAction::DeleteRight,
-                    DirDiffState::LeftOnly => SyncAction::CopyToRight,
+                    DirDiffState::RightOnly => {
+                        if profile && item.is_dir {
+                            SyncAction::RemoveEmptyDirRight
+                        } else {
+                            SyncAction::DeleteRight
+                        }
+                    }
+                    DirDiffState::LeftOnly => {
+                        if profile && item.is_dir {
+                            SyncAction::CreateDirRight
+                        } else {
+                            SyncAction::CopyToRight
+                        }
+                    }
                     _ => SyncAction::UpdateRight,
                 }
             } else {
                 match item.state {
-                    DirDiffState::LeftOnly => SyncAction::DeleteLeft,
-                    DirDiffState::RightOnly => SyncAction::CopyToLeft,
+                    DirDiffState::LeftOnly => {
+                        if profile && item.is_dir {
+                            SyncAction::RemoveEmptyDirLeft
+                        } else {
+                            SyncAction::DeleteLeft
+                        }
+                    }
+                    DirDiffState::RightOnly => {
+                        if profile && item.is_dir {
+                            SyncAction::CreateDirLeft
+                        } else {
+                            SyncAction::CopyToLeft
+                        }
+                    }
                     _ => SyncAction::UpdateLeft,
                 }
             };
@@ -583,7 +697,28 @@ pub fn apply_decisions(
             updated.decision = Some(decision);
             updated
         })
-        .collect()
+        .collect();
+
+    if profile {
+        for item in &result {
+            if item.is_dir {
+                debug_assert!(
+                    !matches!(
+                        item.action,
+                        SyncAction::DeleteLeft
+                            | SyncAction::DeleteRight
+                            | SyncAction::CopyToLeft
+                            | SyncAction::CopyToRight
+                    ),
+                    "Profile folder item '{}' must never receive recursive action after apply_decisions, got {:?}",
+                    item.name,
+                    item.action
+                );
+            }
+        }
+    }
+
+    result
 }
 
 fn state_str(state: DirDiffState) -> &'static str {
@@ -638,6 +773,27 @@ pub fn is_plan_stale(
     a.iter().zip(b.iter()).any(|(x, y)| x != y)
 }
 
+/// Helper to assert that no directory in a profile plan has a recursive action.
+#[cfg(test)]
+pub fn assert_profile_plan_invariants(plan: &[SyncPlanItem]) {
+    for item in plan {
+        if item.is_dir {
+            assert!(
+                !matches!(
+                    item.action,
+                    SyncAction::DeleteLeft
+                        | SyncAction::DeleteRight
+                        | SyncAction::CopyToLeft
+                        | SyncAction::CopyToRight
+                ),
+                "Profile plan folder item '{}' must never have recursive action, got {:?}",
+                item.name,
+                item.action
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,64 +845,12 @@ mod tests {
 
             let items = build_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref());
             assert_eq!(
-                items.len(),
-                fix.expected.items.len(),
-                "fixture items count mismatch: {} ({})",
+                items,
+                fix.expected.items,
+                "fixture items mismatch: {} ({})",
                 path.display(),
                 fix.name
             );
-
-            for (actual, expected) in items.iter().zip(&fix.expected.items) {
-                assert_eq!(
-                    actual.name,
-                    expected.name,
-                    "name mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.state,
-                    expected.state,
-                    "state mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.action,
-                    expected.action,
-                    "action mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.reason,
-                    expected.reason,
-                    "reason mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.is_dir,
-                    expected.is_dir,
-                    "is_dir mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.left_path,
-                    expected.left_path,
-                    "left_path mismatch in {}",
-                    path.display()
-                );
-                assert_eq!(
-                    actual.right_path,
-                    expected.right_path,
-                    "right_path mismatch in {}",
-                    path.display()
-                );
-                if expected.delete_if_empty {
-                    assert!(
-                        actual.delete_if_empty,
-                        "delete_if_empty mismatch in {}",
-                        path.display()
-                    );
-                }
-            }
 
             assert_eq!(
                 plan_summary(&items),
@@ -800,17 +904,74 @@ mod tests {
                     .as_ref()
                     .expect("resolved_items");
                 assert_eq!(
-                    resolved.len(),
-                    expected_resolved.len(),
-                    "resolved items count mismatch in {}",
-                    path.display()
+                    &resolved,
+                    expected_resolved,
+                    "resolved items mismatch in {} ({})",
+                    path.display(),
+                    fix.name
                 );
-                for (actual, expected) in resolved.iter().zip(expected_resolved) {
-                    assert_eq!(actual.name, expected.name);
-                    assert_eq!(actual.action, expected.action);
-                    assert_eq!(actual.reason, expected.reason);
-                    assert_eq!(actual.decision, expected.decision);
-                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_profile_sync_plan_fixtures() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixtures_dir = manifest_dir.join("../contract-fixtures/sync-plan-profile");
+        if !fixtures_dir.exists() {
+            return;
+        }
+        let mut entries: Vec<_> = fs::read_dir(&fixtures_dir)
+            .expect("read profile fixtures dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        entries.sort();
+
+        if entries.is_empty() {
+            return;
+        }
+
+        for path in entries {
+            let content = fs::read_to_string(&path).expect("read profile fixture file");
+            let fix: Fixture = serde_json::from_str(&content)
+                .unwrap_or_else(|e| panic!("parse profile fixture {}: {}", path.display(), e));
+
+            let items = build_profile_sync_plan(&fix.report, &fix.options, fix.baseline.as_ref());
+            assert_eq!(
+                items,
+                fix.expected.items,
+                "profile fixture items mismatch: {} ({})",
+                path.display(),
+                fix.name
+            );
+
+            assert_profile_plan_invariants(&items);
+
+            assert_eq!(
+                plan_summary(&items),
+                fix.expected.summary,
+                "profile fixture summary mismatch: {} ({})",
+                path.display(),
+                fix.name
+            );
+
+            if let Some(ref decisions) = fix.decisions {
+                let resolved = apply_profile_decisions(&items, decisions);
+                let expected_resolved = fix
+                    .expected
+                    .resolved_items
+                    .as_ref()
+                    .expect("resolved_items");
+                assert_eq!(
+                    &resolved,
+                    expected_resolved,
+                    "resolved profile items mismatch in {} ({})",
+                    path.display(),
+                    fix.name
+                );
+                assert_profile_plan_invariants(&resolved);
             }
         }
     }
@@ -868,6 +1029,7 @@ mod tests {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
+            profile: false,
         };
         let plan_prop = build_sync_plan(&report_del_left, &opts_prop, Some(&baseline));
         assert_eq!(plan_prop[0].action, SyncAction::DeleteRight);
@@ -931,6 +1093,7 @@ mod tests {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: false,
+            profile: false,
         };
         let plan_no_prop = build_sync_plan(&report_del_left, &opts_no_prop, Some(&baseline));
         assert_eq!(plan_no_prop[0].action, SyncAction::Conflict);
@@ -1015,22 +1178,163 @@ mod tests {
             incremental: None,
         };
 
-        let opts = SyncOptions {
+        // Profile mode: Folder A is RemoveEmptyDirRight (non-recursive), file A/x.txt is ModifyDelete
+        let profile_opts = SyncOptions {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
+            profile: true,
         };
-        let plan = build_sync_plan(&report, &opts, Some(&baseline));
+        let plan = build_sync_plan(&report, &profile_opts, Some(&baseline));
 
         // A/x.txt has modifyDelete conflict
         let file_item = plan.iter().find(|i| i.name == "A/x.txt").unwrap();
         assert_eq!(file_item.action, SyncAction::Conflict);
         assert_eq!(file_item.reason, Some(SyncConflictReason::ModifyDelete));
 
-        // Folder A is NOT planned for DeleteRight (no recursive deletion of A)
+        // Folder A is RemoveEmptyDirRight (P1-A, P2-1): never recreated on left!
         let folder_item = plan.iter().find(|i| i.name == "A").unwrap();
+        assert_eq!(folder_item.action, SyncAction::RemoveEmptyDirRight);
+        assert_ne!(folder_item.action, SyncAction::CopyToLeft);
         assert_ne!(folder_item.action, SyncAction::DeleteRight);
-        assert_eq!(folder_item.action, SyncAction::CopyToLeft);
+        assert_profile_plan_invariants(&plan);
+
+        // Non-profile (TS) mode: Folder A is DeleteRight (TS parity), file A/x.txt is ModifyDelete
+        let ts_opts = SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: true,
+            profile: false,
+        };
+        let plan_ts = build_sync_plan(&report, &ts_opts, Some(&baseline));
+        let folder_ts = plan_ts.iter().find(|i| i.name == "A").unwrap();
+        assert_eq!(folder_ts.action, SyncAction::DeleteRight);
+        assert_ne!(folder_ts.action, SyncAction::CopyToLeft);
+
+        // Two-way without propagate (default): Folder A is conflict DeletedLeft (SP-2.2 parity)
+        let ts_opts_no_prop = SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: false,
+            profile: true,
+        };
+        let plan_no_prop = build_sync_plan(&report, &ts_opts_no_prop, Some(&baseline));
+        let folder_no_prop = plan_no_prop.iter().find(|i| i.name == "A").unwrap();
+        assert_eq!(folder_no_prop.action, SyncAction::Conflict);
+        assert_eq!(folder_no_prop.reason, Some(SyncConflictReason::DeletedLeft));
+    }
+
+    #[test]
+    fn test_apply_decisions_folder_profile() {
+        // P2-1 & P2-2: apply_decisions in profile mode maps folder decisions to
+        // RemoveEmptyDir* / CreateDir* and never recursive delete or copy.
+        let report = CompareDirsReport {
+            left_root: "C:\\Left".to_string(),
+            right_root: "D:\\Right".to_string(),
+            entries: vec![
+                DirDiffEntry {
+                    name: "folder-del-left".to_string(),
+                    is_dir: true,
+                    state: DirDiffState::RightOnly,
+                    left_size: 0,
+                    left_modified_ms: 0,
+                    right_size: 0,
+                    right_modified_ms: 1000,
+                },
+                DirDiffEntry {
+                    name: "folder-del-right".to_string(),
+                    is_dir: true,
+                    state: DirDiffState::LeftOnly,
+                    left_size: 0,
+                    left_modified_ms: 1000,
+                    right_size: 0,
+                    right_modified_ms: 0,
+                },
+            ],
+            truncated: false,
+            recursive: true,
+            cancelled: false,
+            errors: Vec::new(),
+            fast_scan: None,
+            journal: None,
+            incremental: None,
+        };
+
+        let mut baseline_entries = std::collections::BTreeMap::new();
+        baseline_entries.insert(
+            "folder-del-left".to_string(),
+            EntryDto {
+                left: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+                right: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+            },
+        );
+        baseline_entries.insert(
+            "folder-del-right".to_string(),
+            EntryDto {
+                left: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+                right: FactsDto {
+                    size: 0,
+                    modified_ms: 1000,
+                },
+            },
+        );
+        let baseline = BaselineDto {
+            version: 1,
+            left_root: "C:\\Left".to_string(),
+            right_root: "D:\\Right".to_string(),
+            entries: baseline_entries,
+            journal: None,
+        };
+
+        // Two-way without propagate produces conflicts on both folders
+        let opts = SyncOptions {
+            direction: SyncDirection::Both,
+            delete_extras: false,
+            propagate_deletes: false,
+            profile: true,
+        };
+        let plan = build_sync_plan(&report, &opts, Some(&baseline));
+        assert_eq!(plan[0].action, SyncAction::Conflict);
+        assert_eq!(plan[1].action, SyncAction::Conflict);
+
+        // Case 1: KeepLeft
+        let mut decisions_left = HashMap::new();
+        decisions_left.insert("folder-del-left".to_string(), SyncDecision::KeepLeft);
+        decisions_left.insert("folder-del-right".to_string(), SyncDecision::KeepLeft);
+
+        let resolved_left = apply_profile_decisions(&plan, &decisions_left);
+        // folder-del-left (RightOnly) + KeepLeft -> RemoveEmptyDirRight (remove extra folder on right)
+        assert_eq!(resolved_left[0].action, SyncAction::RemoveEmptyDirRight);
+        // folder-del-right (LeftOnly) + KeepLeft -> CreateDirRight (create missing folder on right)
+        assert_eq!(resolved_left[1].action, SyncAction::CreateDirRight);
+        assert_profile_plan_invariants(&resolved_left);
+
+        // Case 2: KeepRight
+        let mut decisions_right = HashMap::new();
+        decisions_right.insert("folder-del-left".to_string(), SyncDecision::KeepRight);
+        decisions_right.insert("folder-del-right".to_string(), SyncDecision::KeepRight);
+
+        let resolved_right = apply_profile_decisions(&plan, &decisions_right);
+        // folder-del-left (RightOnly) + KeepRight -> CreateDirLeft (create missing folder on left)
+        assert_eq!(resolved_right[0].action, SyncAction::CreateDirLeft);
+        // folder-del-right (LeftOnly) + KeepRight -> RemoveEmptyDirLeft (remove extra folder on left)
+        assert_eq!(resolved_right[1].action, SyncAction::RemoveEmptyDirLeft);
+        assert_profile_plan_invariants(&resolved_right);
+
+        // Case 3: Skip
+        let mut decisions_skip = HashMap::new();
+        decisions_skip.insert("folder-del-left".to_string(), SyncDecision::Skip);
+        let resolved_skip = apply_profile_decisions(&plan, &decisions_skip);
+        assert_eq!(resolved_skip[0].action, SyncAction::Skip);
     }
 
     #[test]
@@ -1098,6 +1402,7 @@ mod tests {
             direction: SyncDirection::Both,
             delete_extras: false,
             propagate_deletes: true,
+            profile: false,
         };
         let plan = build_sync_plan(&report, &opts, Some(&baseline));
 
