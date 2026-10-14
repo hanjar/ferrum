@@ -38,6 +38,7 @@ import {
 import { FsError } from '../ipc/types';
 import type {
   DiskUsageChildItem,
+  DiskUsageChildrenPage,
   DiskUsageCoverage,
   DiskUsageFileCategory,
   DiskUsageFilter,
@@ -52,6 +53,7 @@ import type {
 } from '../ipc/types';
 import { isInTauri } from '../ipc/tauri';
 import { ageLabel } from './cacheAge';
+import { metricValue } from './treemapLayout';
 
 export type DiskUsagePhase =
   'idle' | 'scanning' | 'complete' | 'partial' | 'cancelled' | 'stale' | 'empty' | 'error';
@@ -210,7 +212,7 @@ export class DiskUsageStore {
   scanPreview: DiskUsageChildItem[] = $state([]);
   /** Raw topChildren nodes of the latest event, by id (row counts/badges). */
   previewNodes: Record<string, DiskUsageNode> = $state({});
-  expanded = new SvelteSet<string>();
+  expanded = $state(new SvelteSet<string>());
 
   // ── guards/plumbing (not reactive) ──────────────────────────────────────
   private treemapSeq = 0;
@@ -460,11 +462,85 @@ export class DiskUsageStore {
     if (this.hasData) void this.loadFiles();
   }
 
-  zoomIn(nodeId: string): void {
+  async zoomIn(nodeId: string): Promise<void> {
     if (!this.hasData) return;
-    this.zoomStack = [...this.zoomStack, nodeId];
-    this.selectedNodeId = null;
+    if (this.zoomNodeId === nodeId) {
+      this.selectedNodeId = nodeId;
+      return;
+    }
+    const root = this.rootId || this.root;
+    const normRoot = normalizePath(root);
+    const normTarget = normalizePath(nodeId);
+    if (normTarget === normRoot) {
+      this.zoomTo(0);
+      return;
+    }
+    const stack = isSubpath(normTarget, normRoot)
+      ? this.buildZoomStackTo(nodeId)
+      : [...this.zoomStack, nodeId];
+    const nextExpanded = new SvelteSet(this.expanded);
+    for (const p of stack) {
+      nextExpanded.add(p);
+    }
+    this.expanded = nextExpanded;
+    this.zoomStack = stack;
+    this.selectedNodeId = nodeId;
     this.refreshScopedQueries();
+
+    // Ensure all ancestors' children are loaded in the tree
+    const rootId = this.rootId || this.root;
+    if (rootId && !this.treeNodes[rootId]) {
+      await this.loadChildren(rootId);
+    }
+    for (const p of stack) {
+      if (!this.treeNodes[p]) {
+        await this.loadChildren(p);
+      }
+    }
+  }
+
+  async selectFile(fileId: string): Promise<void> {
+    if (!this.hasData) return;
+    let parent = cleanParent(fileId);
+    const root = this.rootId || this.root;
+    if (root.endsWith('\\') || root.endsWith('/')) {
+      if (!parent.endsWith('\\')) parent += '\\';
+    }
+    const normRoot = normalizePath(root);
+    const normParent = parent ? normalizePath(parent) : normRoot;
+
+    let stack: string[] = [];
+    if (normParent !== normRoot && parent && isSubpath(normParent, normRoot)) {
+      stack = this.buildZoomStackTo(parent);
+    }
+    const nextExpanded = new SvelteSet(this.expanded);
+    for (const p of stack) {
+      nextExpanded.add(p);
+    }
+    this.expanded = nextExpanded;
+    const zoomChanged =
+      stack.length !== this.zoomStack.length || stack.some((s, i) => s !== this.zoomStack[i]);
+    if (zoomChanged) {
+      this.zoomStack = stack;
+    }
+    this.selectedNodeId = fileId;
+    this.filesSeq++;
+    if (zoomChanged) {
+      this.refreshScopedQueries();
+    } else {
+      void this.loadFiles();
+    }
+
+    // Ensure all ancestors and the parent have children loaded in tree
+    const rootId = this.rootId || this.root;
+    if (rootId && !this.treeNodes[rootId]) {
+      await this.loadChildren(rootId);
+    }
+    for (const p of stack) {
+      if (!this.treeNodes[p]) {
+        await this.loadChildren(p);
+      }
+    }
   }
 
   zoomOut(): void {
@@ -498,6 +574,139 @@ export class DiskUsageStore {
       this.refreshScopedQueries();
     }
     this.selectNode(selectedId);
+  }
+
+  /**
+   * Attempt to focus/navigate to `targetPath` within the current scan snapshot.
+   * Returns true if the path exists in the scan snapshot and was focused, false otherwise.
+   */
+  async focusPathIfScanned(targetPath: string): Promise<boolean> {
+    const scanId = this.scanId;
+    if (!scanId || !this.hasData) return false;
+    const target = targetPath.trim();
+    if (!target) return false;
+
+    const normTarget = normalizePath(target);
+    const normRoot = normalizePath(this.rootId || this.root);
+    if (normTarget === normRoot) {
+      this.zoomTo(0);
+      return true;
+    }
+    if (!isSubpath(normTarget, normRoot)) {
+      return false;
+    }
+
+    let dirTarget: string | null = null;
+    try {
+      await diskUsageQueryChildren(scanId, target, 0, 1, 'largestFirst', { metric: this.metric });
+      dirTarget = target;
+    } catch {
+      if (!target.endsWith('\\') && !target.endsWith('/')) {
+        try {
+          await diskUsageQueryChildren(scanId, target + '\\', 0, 1, 'largestFirst', {
+            metric: this.metric,
+          });
+          dirTarget = target + '\\';
+        } catch {
+          // not a dir
+        }
+      }
+    }
+
+    if (dirTarget) {
+      const stack = this.buildZoomStackTo(dirTarget);
+      const nextExpanded = new SvelteSet(this.expanded);
+      for (const p of stack) {
+        nextExpanded.add(p);
+      }
+      this.expanded = nextExpanded;
+      this.zoomStack = stack;
+      this.selectedNodeId = dirTarget;
+      this.refreshScopedQueries();
+      const rootId = this.rootId || this.root;
+      if (rootId && !this.treeNodes[rootId]) {
+        await this.loadChildren(rootId);
+      }
+      for (const p of stack) {
+        if (!this.treeNodes[p]) {
+          await this.loadChildren(p);
+        }
+      }
+      return true;
+    }
+
+    // Check if target might be a file inside a scanned parent
+    let parent = cleanParent(target);
+    if (parent && parent !== target) {
+      let page: DiskUsageChildrenPage | null = null;
+      try {
+        page = await diskUsageQueryChildren(scanId, parent, 0, TREE_PAGE_SIZE, 'largestFirst', {
+          metric: this.metric,
+        });
+      } catch {
+        if (!parent.endsWith('\\') && !parent.endsWith('/')) {
+          try {
+            page = await diskUsageQueryChildren(
+              scanId,
+              parent + '\\',
+              0,
+              TREE_PAGE_SIZE,
+              'largestFirst',
+              {
+                metric: this.metric,
+              },
+            );
+            parent = parent + '\\';
+          } catch {
+            // not found
+          }
+        }
+      }
+      if (page) {
+        const match = page.items.find(
+          (it) => normalizePath(it.id) === normTarget || normalizePath(it.name) === normTarget,
+        );
+        if (match) {
+          const stack = this.buildZoomStackTo(parent);
+          const nextExpanded = new SvelteSet(this.expanded);
+          for (const p of stack) {
+            nextExpanded.add(p);
+          }
+          this.expanded = nextExpanded;
+          this.zoomStack = stack;
+          this.selectedNodeId = match.id;
+          this.refreshScopedQueries();
+          const rootId = this.rootId || this.root;
+          if (rootId && !this.treeNodes[rootId]) {
+            await this.loadChildren(rootId);
+          }
+          for (const p of stack) {
+            if (!this.treeNodes[p]) {
+              await this.loadChildren(p);
+            }
+          }
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  buildZoomStackTo(target: string): string[] {
+    const root = this.rootId || this.root;
+    const normRoot = normalizePath(root);
+    const hasTrailing = target.endsWith('\\') || target.endsWith('/');
+    const stack: string[] = [];
+    let cur = target.replace(/[\\/]+$/, '');
+    if (/^[A-Za-z]:[\\/\\]$/.test(target)) cur = target;
+    while (cur && normalizePath(cur) !== normRoot) {
+      const entry = hasTrailing ? `${cur}\\` : cur;
+      stack.unshift(entry);
+      const p = cleanParent(cur);
+      if (!p || p === cur) break;
+      cur = p;
+    }
+    return stack;
   }
 
   setMetric(metric: DiskUsageSizeMetric): void {
@@ -594,6 +803,7 @@ export class DiskUsageStore {
       cur.items = more ? [...cur.items, ...page.items] : page.items;
       cur.loading = false;
       cur.loadingMore = false;
+      this.treeNodes = { ...this.treeNodes, [nodeId]: { ...cur } };
     } catch (e) {
       const cur = this.treeNodes[nodeId];
       if (!cur || cur.loadId !== myLoad || gen !== this.treeGen || scanId !== this.scanId) return;
@@ -639,8 +849,86 @@ export class DiskUsageStore {
         metric,
       });
       if (seq !== this.treemapSeq || scanId !== this.scanId || page.scanId !== scanId) return;
+
+      const items: DiskUsageChildItem[] = page.items.map((it) => ({ ...it }));
+
+      // Fetch Level 2 children for significant Level 1 directories (top 15)
+      const l1Dirs = items
+        .filter((it) => it.kind === 'dir' && metricValue(it, metric) > 0)
+        .slice(0, 15);
+
+      if (l1Dirs.length > 0) {
+        const l2Results = await Promise.all(
+          l1Dirs.map(async (dir) => {
+            try {
+              const res = await diskUsageQueryChildren(scanId, dir.id, 0, 50, 'largestFirst', {
+                metric,
+              });
+              if (seq !== this.treemapSeq || scanId !== this.scanId) return null;
+              return { dirId: dir.id, items: res.items.map((it) => ({ ...it })) };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (seq !== this.treemapSeq || scanId !== this.scanId) return;
+
+        const l2Map: Record<string, DiskUsageChildItem[]> = {};
+        const allL2Dirs: DiskUsageChildItem[] = [];
+        for (const res of l2Results) {
+          if (!res) continue;
+          l2Map[res.dirId] = res.items;
+          for (const it of res.items) {
+            if (it.kind === 'dir' && metricValue(it, metric) > 0) {
+              allL2Dirs.push(it);
+            }
+          }
+        }
+
+        for (const dir of l1Dirs) {
+          const ch = l2Map[dir.id];
+          if (ch && ch.length > 0) {
+            dir.children = ch;
+          }
+        }
+
+        // Fetch Level 3 children for significant Level 2 directories (top 20)
+        allL2Dirs.sort((a, b) => metricValue(b, metric) - metricValue(a, metric));
+        const l2DirsToQuery = allL2Dirs.slice(0, 20);
+
+        if (l2DirsToQuery.length > 0) {
+          const l3Results = await Promise.all(
+            l2DirsToQuery.map(async (dir) => {
+              try {
+                const res = await diskUsageQueryChildren(scanId, dir.id, 0, 30, 'largestFirst', {
+                  metric,
+                });
+                if (seq !== this.treemapSeq || scanId !== this.scanId) return null;
+                return { dirId: dir.id, items: res.items.map((it) => ({ ...it })) };
+              } catch {
+                return null;
+              }
+            }),
+          );
+          if (seq !== this.treemapSeq || scanId !== this.scanId) return;
+
+          const l3Map: Record<string, DiskUsageChildItem[]> = {};
+          for (const res of l3Results) {
+            if (!res) continue;
+            l3Map[res.dirId] = res.items;
+          }
+
+          for (const dir of l2DirsToQuery) {
+            const ch = l3Map[dir.id];
+            if (ch && ch.length > 0) {
+              dir.children = ch;
+            }
+          }
+        }
+      }
+
       this.treemap = {
-        items: page.items,
+        items,
         total: page.total,
         loading: false,
         error: null,
@@ -872,4 +1160,23 @@ function scanClock(ms: number): string {
  *  listener and view state — no shared mutable state between instances. */
 export function createDiskUsageStore(): DiskUsageStore {
   return new DiskUsageStore();
+}
+
+export function normalizePath(p: string): string {
+  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+export function isSubpath(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  const prefix = parent.endsWith('\\') ? parent : parent + '\\';
+  return child.startsWith(prefix);
+}
+
+export function cleanParent(path: string): string {
+  const norm = path.replace(/[\\/]+$/, '');
+  const i = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'));
+  if (i === -1) return '';
+  const par = norm.slice(0, i + 1);
+  if (/^[A-Za-z]:[\\/\\]$/.test(par)) return par.replace('/', '\\').toUpperCase();
+  return par.replace(/[\\/]+$/, '');
 }

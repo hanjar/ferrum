@@ -8,8 +8,8 @@
     coverage   'complete' | 'partial' | 'stale' — partial shows the
                denied/partial badge, never a silent gap (§3.5).
     onselect(id | null)  — tile click selects; click on empty plot deselects.
-    onzoom(id)           — double-click on a FOLDER only. Files and symlinks
-                           do nothing at all (never open/execute).
+    onzoom(id)           — click on a FOLDER zooms/focuses.
+    onreveal(id)         — double-click on a folder or file triggers Reveal in pane.
   Breadcrumb/up navigation is DSK-04's job, not this component's.
 
   Rendering notes:
@@ -36,15 +36,19 @@
     metric,
     selectedId,
     coverage = 'complete',
+    scanRootTotal,
     onselect,
     onzoom,
+    onreveal,
   }: {
     items: DiskUsageChildItem[];
     metric: DiskUsageSizeMetric;
     selectedId: string | null;
     coverage?: DiskUsageCoverage;
+    scanRootTotal?: number;
     onselect?: (id: string | null) => void;
     onzoom?: (id: string) => void;
+    onreveal?: (id: string) => void;
   } = $props();
 
   // Plot size: 0 until measured (onMount + ResizeObserver callback). No
@@ -85,7 +89,8 @@
       ? squarify(items, width, height, { metric })
       : { rects: [], totalValue: 0, otherCount: 0 },
   );
-  const tiles = $derived(layout.rects.filter((r) => r.w >= 1 && r.h >= 1));
+  const containers = $derived(layout.rects.filter((r) => r.isDirContainer && r.w >= 1 && r.h >= 1));
+  const leaves = $derived(layout.rects.filter((r) => !r.isDirContainer && r.w >= 1 && r.h >= 1));
   const isEmpty = $derived(
     width > 0 && height > 0 && (items.length === 0 || layout.totalValue <= 0),
   );
@@ -95,9 +100,11 @@
 
   const legend = $derived.by(() => {
     const entries: { color: string; label: string }[] = [];
-    if (items.some((i) => i.kind === 'dir'))
+    if (layout.rects.some((r) => r.item?.kind === 'dir'))
       entries.push({ color: 'var(--folder)', label: 'Folder' });
-    const cats = new Set(items.filter((i) => i.kind !== 'dir').map((i) => i.category));
+    const cats = new Set(
+      layout.rects.filter((r) => r.item && r.item.kind !== 'dir').map((r) => r.item!.category),
+    );
     for (const c of CATEGORY_ORDER) {
       if (cats.has(c)) entries.push({ color: CATEGORY_COLOR[c], label: CATEGORY_LABEL[c] });
     }
@@ -129,12 +136,16 @@
   function tileClick(r: TreemapRect): void {
     // Other has no tree node to sync with — a click there selects nothing
     // (prototype behaviour), it only informs via its tooltip.
-    if (r.item) onselect?.(r.id);
+    if (!r.item) return;
+    if (r.item.kind === 'dir') {
+      onzoom?.(r.id);
+    } else {
+      onselect?.(r.id);
+    }
   }
 
   function tileDblClick(r: TreemapRect): void {
-    // ONLY folders zoom. Files/symlinks never open or execute anything.
-    if (r.item && r.item.kind === 'dir') onzoom?.(r.id);
+    if (r.item) onreveal?.(r.id);
   }
 
   function plotBackgroundClick(e: MouseEvent): void {
@@ -178,6 +189,20 @@
     return p === null ? '—' : `${p.toFixed(1)}%`;
   }
 
+  /**
+   * Percentage basis conventions (FER-550):
+   * - Tile label: percent of the currently focused folder (`focusPct`), computed as
+   *   `(r.value / layout.totalValue) * 100`, consistent across all depths.
+   * - Tooltip breakdown:
+   *   1) `% of focus`: portion of the currently focused folder's total value
+   *   2) `of parent`: portion of its immediate parent folder (`it.percentOfParent`)
+   *   3) `of scan root`: portion of the entire scan root (`rootPct` / `it.percentOfScanRoot`)
+   */
+  function focusPct(r: TreemapRect): number | null {
+    if (layout.totalValue <= 0) return null;
+    return (r.value / layout.totalValue) * 100;
+  }
+
   const metricLabel = $derived(metric === 'allocated' ? 'allocated' : 'logical');
 
   function tileAria(r: TreemapRect): string {
@@ -194,11 +219,7 @@
     const lines: string[] = [];
     if (r.otherGroup) {
       const g = r.otherGroup;
-      lines.push(
-        `${formatSize(g.value)} ${metricLabel} · ${pct(
-          layout.totalValue > 0 ? (g.value / layout.totalValue) * 100 : null,
-        )} of zoom`,
-      );
+      lines.push(`${formatSize(g.value)} ${metricLabel} · ${pct(focusPct(r))} of focus`);
       lines.push(
         metric === 'allocated' && g.allocatedBytes === null
           ? 'allocated partial — sebagian anggota unavailable (tidak diganti logical)'
@@ -210,16 +231,14 @@
       lines.push('double-click group: tidak ada aksi');
     } else if (r.item) {
       const it = r.item;
-      lines.push(
-        `${formatSize(r.value)} ${metricLabel} · ${pct(
-          layout.totalValue > 0 ? (r.value / layout.totalValue) * 100 : null,
-        )} of zoom`,
-      );
-      if (it.percentOfParent !== null || it.percentOfScanRoot !== null) {
-        lines.push(
-          `of parent: ${pct(it.percentOfParent)} · of scan root: ${pct(it.percentOfScanRoot)}`,
-        );
-      }
+      lines.push(`${formatSize(r.value)} ${metricLabel} · ${pct(focusPct(r))} of focus`);
+      const rootPct =
+        it.percentOfScanRoot !== null
+          ? it.percentOfScanRoot
+          : scanRootTotal && scanRootTotal > 0
+            ? (r.value / scanRootTotal) * 100
+            : null;
+      lines.push(`of parent: ${pct(it.percentOfParent)} · of scan root: ${pct(rootPct)}`);
       if (it.allocatedBytes === null) {
         // §2.2 — unknown allocated is "unavailable" in every metric view,
         // never silently 0 and never logical bytes in disguise.
@@ -231,8 +250,8 @@
       }
       lines.push(
         it.kind === 'dir'
-          ? 'klik: pilih · double-click: zoom'
-          : 'klik: pilih · double-click file: tidak ada aksi',
+          ? 'klik: fokus/drill · double-click: Reveal di pane'
+          : 'klik: pilih · double-click: Reveal di pane',
       );
     }
     return lines;
@@ -259,7 +278,46 @@
     {:else if coverage === 'stale'}
       <div class="badge" role="status">Data usang — hasil scan sebelumnya</div>
     {/if}
-    {#each tiles as r (r.id)}
+
+    {#each containers as c (c.id + ':frame')}
+      <div
+        class="dirFrame"
+        class:sel={c.id === selectedId}
+        style="left:{c.x}px;top:{c.y}px;width:{c.w}px;height:{c.h}px;"
+      >
+        {#if c.headerHeight && c.headerHeight > 0}
+          <button
+            type="button"
+            class="tile dir dirHeader"
+            class:sel={c.id === selectedId}
+            style="left:0px;top:0px;width:{c.w}px;height:{c.headerHeight}px;"
+            data-id={c.id}
+            aria-pressed={c.id === selectedId}
+            aria-label={tileAria(c)}
+            onclick={(e) => {
+              e.stopPropagation();
+              tileClick(c);
+            }}
+            ondblclick={(e) => {
+              e.stopPropagation();
+              tileDblClick(c);
+            }}
+            onmouseenter={(e) => showTip(c, e)}
+            onmousemove={(e) => showTip(c, e)}
+            onmouseleave={hideTip}
+            onfocus={(e) => showTipAtTile(c, e.currentTarget)}
+            onblur={hideTip}
+          >
+            <span class="tin headerTin">
+              <span class="tn">{c.label}</span>
+              <span class="tv mono">{formatSize(c.value)} · {pct(focusPct(c))}</span>
+            </span>
+          </button>
+        {/if}
+      </div>
+    {/each}
+
+    {#each leaves as r (r.id)}
       <button
         type="button"
         class="tile"
@@ -267,6 +325,7 @@
         class:dir={r.item?.kind === 'dir'}
         class:group={!r.item}
         class:small={r.w < 64 || r.h < 30}
+        class:tiny={r.w < 36 || r.h < 20}
         style={tileStyle(r)}
         aria-pressed={r.id === selectedId}
         aria-label={tileAria(r)}
@@ -281,11 +340,7 @@
       >
         <span class="tin">
           <span class="tn">{r.label}</span>
-          <span class="tv mono"
-            >{formatSize(r.value)} · {pct(
-              layout.totalValue > 0 ? r.value / layout.totalValue : null,
-            )}</span
-          >
+          <span class="tv mono">{formatSize(r.value)} · {pct(focusPct(r))}</span>
         </span>
       </button>
     {/each}
@@ -324,6 +379,35 @@
     border-radius: var(--rl);
     background: var(--pane);
   }
+  .dirFrame {
+    position: absolute;
+    border: 1px solid color-mix(in oklch, var(--folder) 40%, var(--line2));
+    border-radius: var(--r);
+    background: color-mix(in oklch, var(--folder) 6%, var(--pane));
+    box-sizing: border-box;
+    overflow: hidden;
+    z-index: 0;
+  }
+  .dirFrame.sel {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+  }
+  .dirHeader {
+    border-radius: 0;
+    border-bottom: 1px solid color-mix(in oklch, var(--folder) 30%, var(--line2));
+    background: color-mix(in oklch, var(--folder) 25%, var(--elev)) !important;
+    padding: 1px 4px;
+    z-index: 1;
+  }
+  .headerTin {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: calc(11px + var(--uiStep, 0px));
+  }
+  .headerTin .tn {
+    font-weight: 600;
+  }
   .tile {
     position: absolute;
     display: block;
@@ -335,6 +419,8 @@
     font: inherit;
     text-align: left;
     cursor: default;
+    box-sizing: border-box;
+    z-index: 1;
   }
   .tile:focus-visible {
     outline: 2px solid var(--text);
@@ -343,7 +429,7 @@
   .tile.sel {
     outline: 2px solid var(--text);
     outline-offset: -2px;
-    z-index: 1;
+    z-index: 3;
   }
   .tile.group {
     border-style: dashed;
@@ -375,6 +461,9 @@
   .tile.small .tv {
     display: none;
   }
+  .tile.tiny .tin {
+    display: none;
+  }
   .empty {
     position: absolute;
     inset: 0;
@@ -386,7 +475,7 @@
     position: absolute;
     top: 6px;
     left: 6px;
-    z-index: 2;
+    z-index: 4;
     max-width: calc(100% - 12px);
     overflow: hidden;
     padding: 2px 8px;

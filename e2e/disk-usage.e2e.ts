@@ -986,6 +986,25 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
     await expect(activeRow).toContainText('Archive');
   });
 
+  // Selecting a folder in the tree focuses treemap and updates address
+  test('focus: selecting a folder in tree updates toolbar address and focuses treemap', async () => {
+    await scanToComplete();
+    const projectsRow = rowByName('Projects');
+    await projectsRow.click();
+
+    // Address in workspace toolbar updates to D:\Projects
+    const addr = rootInput();
+    await expect(addr).toHaveValue(/^D:\\Projects\\?$/);
+
+    // Breadcrumb updates to include Projects
+    const crumbs = workspace().locator('.crumbs');
+    await expect(crumbs).toContainText('Projects');
+
+    // Treemap renders contents of Projects (helix-engine)
+    const tm = tabpanel();
+    await expect(tm.locator('.tile').filter({ hasText: 'helix-engine' })).toBeVisible();
+  });
+
   // Visual evidence for the FER-499 review: set DU_SHOT_DIR to a folder to capture.
   test('FER-499 screenshots (env DU_SHOT_DIR) dark + light', async ({ browser }) => {
     const dir = process.env.DU_SHOT_DIR;

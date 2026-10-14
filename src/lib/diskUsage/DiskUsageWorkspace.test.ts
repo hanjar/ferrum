@@ -44,6 +44,23 @@ import { dialogs } from '../stores/dialogStore.svelte';
 import { registerPane } from '../stores/panesRegistry.svelte';
 import type { DiskUsageChildItem, DiskUsageSnapshot } from '../ipc/types';
 
+class MockResizeObserver {
+  static instances: MockResizeObserver[] = [];
+  private cb: (entries: ResizeObserverEntry[]) => void;
+  constructor(cb: (entries: ResizeObserverEntry[]) => void) {
+    this.cb = cb;
+    MockResizeObserver.instances.push(this);
+  }
+  observe(): void {
+    this.cb([{ contentRect: { width: 800, height: 500 } } as unknown as ResizeObserverEntry]);
+  }
+  unobserve(): void {}
+  disconnect(): void {}
+  emit(w: number, h: number): void {
+    this.cb([{ contentRect: { width: w, height: h } } as unknown as ResizeObserverEntry]);
+  }
+}
+
 /** Drain the microtask queue (store methods are 1–2 awaits deep). */
 async function flush(): Promise<void> {
   for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -129,6 +146,8 @@ function childItem(id: string, over: Partial<DiskUsageChildItem> = {}): DiskUsag
 }
 
 beforeEach(() => {
+  MockResizeObserver.instances = [];
+  vi.stubGlobal('ResizeObserver', MockResizeObserver);
   vi.clearAllMocks();
   duWorkspace.exit();
   duWorkspace.entryPane = 0;
@@ -169,6 +188,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
+  MockResizeObserver.instances = [];
   duWorkspace.exit();
   duWorkspace.store.reset();
 });
@@ -474,6 +495,376 @@ describe('DiskUsageWorkspace — FER-464 cached scan + Instan default', () => {
   });
 });
 
+describe('DiskUsageWorkspace — focus and address synchronization', () => {
+  it('selecting a folder in tree updates toolbar address, breadcrumb, and treemap', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    store.treeNodes['C:\\data'] = {
+      items: [childItem('C:\\data\\sub')],
+      total: 1,
+      loading: false,
+      loadingMore: false,
+      error: null,
+      loadId: 1,
+    };
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    // Initially address is C:\data
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    expect(input.value).toBe('C:\\data');
+
+    // Click row C:\data\sub in tree
+    const row = [...container.querySelectorAll('.row')].find(
+      (r) => r.getAttribute('data-row-id') === 'C:\\data\\sub',
+    ) as HTMLElement;
+    expect(row).toBeTruthy();
+    row.click();
+    await tick();
+    await new Promise((r) => setTimeout(r, 200));
+    await flush();
+
+    // Toolbar address updates to C:\data\sub
+    expect(input.value).toBe('C:\\data\\sub');
+
+    // Scan chip shows Scan: C:\data
+    const chip = container.querySelector('.scanRootChip');
+    expect(chip?.textContent).toContain('Scan:');
+    expect(chip?.textContent).toContain('C:\\data');
+
+    // Breadcrumbs updated
+    const crumbs = [...container.querySelectorAll('button.crumb')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(crumbs).toEqual(['data', 'sub']);
+  });
+
+  it('drilling in treemap updates address and Up button returns to parent', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    const upBtn = container.querySelector('button.upBtn') as HTMLButtonElement;
+    expect(upBtn.disabled).toBe(true);
+
+    // Zoom into C:\data\sub
+    store.zoomIn('C:\\data\\sub');
+    await tick();
+
+    expect(input.value).toBe('C:\\data\\sub');
+    expect(upBtn.disabled).toBe(false);
+
+    // Click Up button
+    upBtn.click();
+    await tick();
+
+    expect(input.value).toBe('C:\\data');
+    expect(store.zoomStack).toEqual([]);
+    expect(upBtn.disabled).toBe(true);
+  });
+
+  it('address bar Enter navigates within scan scope without rescanning', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: 'C:\\data\\nested' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    await flush();
+
+    // Should focus within scan scope, NOT start a new scan
+    expect(duMocks.start).not.toHaveBeenCalled();
+    expect(store.zoomNodeId).toBe('C:\\data\\nested');
+  });
+
+  it('address bar Enter triggers a new scan if path is outside scanned scope', async () => {
+    duMocks.start.mockResolvedValueOnce('s-new');
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: 'D:\\other' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    await flush();
+
+    // Should trigger a new scan for D:\other
+    expect(duMocks.start).toHaveBeenCalledWith('D:\\other', { maxDepth: null });
+  });
+
+  it('address bar Enter for non-existent path within root scan displays notice without rescanning', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    duMocks.queryChildren.mockRejectedValue(new Error('not found'));
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    const input = container.querySelector(
+      'input[aria-label="Path root scan disk usage"]',
+    ) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: 'C:\\data\\does_not_exist' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    await flush();
+
+    // Must NOT start a new scan
+    expect(duMocks.start).not.toHaveBeenCalled();
+    // Must display "tidak ditemukan di hasil scan"
+    expect(store.notice).toContain('tidak ditemukan di hasil scan');
+    const notice = container.querySelector('.notice');
+    expect(notice?.textContent).toContain('tidak ditemukan di hasil scan');
+  });
+
+  it('treemap double click triggers reveal in entry pane for folders and files', async () => {
+    const pane = paneOf('C:\\data');
+    registerPane(0, pane);
+    duWorkspace.entryPane = 0;
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+    store.treemap = {
+      items: [
+        childItem('C:\\data\\docs', { kind: 'dir', logicalBytes: 100 }),
+        childItem('C:\\data\\photo.jpg', { kind: 'file', logicalBytes: 80 }),
+      ],
+      total: 2,
+      loading: false,
+      error: null,
+      seq: 1,
+    };
+    duWorkspace.open = true;
+
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+
+    // Double click folder tile -> reveals folder in pane
+    const folderTile = [...container.querySelectorAll('button.tile')].find(
+      (t) => t.getAttribute('data-id') === 'C:\\data\\docs',
+    ) as HTMLElement;
+    expect(folderTile).toBeTruthy();
+    folderTile.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    await tick();
+
+    expect(duWorkspace.open).toBe(false);
+    expect(pane.openPath).toHaveBeenCalledWith('C:\\data\\');
+    expect(pane.selectPaths).toHaveBeenCalledWith(['C:\\data\\docs'], 'C:\\data\\docs');
+
+    // Re-enter workspace and test file reveal
+    duWorkspace.open = true;
+    render(DiskUsageWorkspace);
+    await tick();
+
+    const fileTile = [...container.querySelectorAll('button.tile')].find(
+      (t) => t.getAttribute('data-id') === 'C:\\data\\photo.jpg',
+    ) as HTMLElement;
+    expect(fileTile).toBeTruthy();
+    fileTile.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    await tick();
+
+    expect(duWorkspace.open).toBe(false);
+    expect(pane.openPath).toHaveBeenCalledWith('C:\\data\\');
+    expect(pane.selectPaths).toHaveBeenCalledWith(['C:\\data\\photo.jpg'], 'C:\\data\\photo.jpg');
+  });
+
+  it('clicking a depth 3 block builds complete breadcrumb, Up rises exactly one level, and tree row is selected', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+
+    duMocks.queryChildren.mockImplementation(async (_scanId, nodeId) => {
+      if (nodeId === 'C:\\data') {
+        return {
+          scanId: 's-sync',
+          nodeId,
+          version: 1,
+          scannedAtMs: 1,
+          metric: 'logical',
+          coverage: 'complete',
+          offset: 0,
+          total: 1,
+          items: [childItem('C:\\data\\l1', { kind: 'dir', logicalBytes: 500 })],
+        };
+      }
+      if (nodeId === 'C:\\data\\l1') {
+        return {
+          scanId: 's-sync',
+          nodeId,
+          version: 1,
+          scannedAtMs: 1,
+          metric: 'logical',
+          coverage: 'complete',
+          offset: 0,
+          total: 1,
+          items: [childItem('C:\\data\\l1\\l2', { kind: 'dir', logicalBytes: 300 })],
+        };
+      }
+      if (nodeId === 'C:\\data\\l1\\l2') {
+        return {
+          scanId: 's-sync',
+          nodeId,
+          version: 1,
+          scannedAtMs: 1,
+          metric: 'logical',
+          coverage: 'complete',
+          offset: 0,
+          total: 1,
+          items: [childItem('C:\\data\\l1\\l2\\l3', { kind: 'dir', logicalBytes: 200 })],
+        };
+      }
+      return {
+        scanId: 's-sync',
+        nodeId,
+        version: 1,
+        scannedAtMs: 1,
+        metric: 'logical',
+        coverage: 'complete',
+        offset: 0,
+        total: 0,
+        items: [],
+      };
+    });
+
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+    await flush();
+
+    // Trigger zoom to depth 3 block
+    await store.zoomIn('C:\\data\\l1\\l2\\l3');
+    await tick();
+    await flush();
+
+    // Breadcrumb has all intermediate folders
+    const crumbs = [...container.querySelectorAll('button.crumb')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(crumbs).toEqual(['data', 'l1', 'l2', 'l3']);
+    expect(store.zoomStack).toEqual(['C:\\data\\l1', 'C:\\data\\l1\\l2', 'C:\\data\\l1\\l2\\l3']);
+
+    // Up button returns precisely one level (to l2)
+    const upBtn = container.querySelector('button.upBtn') as HTMLButtonElement;
+    upBtn.click();
+    await tick();
+    await flush();
+
+    expect(store.zoomNodeId).toBe('C:\\data\\l1\\l2');
+    expect(store.zoomStack).toEqual(['C:\\data\\l1', 'C:\\data\\l1\\l2']);
+
+    // Re-zoom to l3 and verify tree row is selected
+    await store.zoomIn('C:\\data\\l1\\l2\\l3');
+    await tick();
+    await flush();
+
+    const selectedRow = [...container.querySelectorAll('.row')].find(
+      (r) => r.getAttribute('data-row-id') === 'C:\\data\\l1\\l2\\l3',
+    ) as HTMLElement;
+    expect(selectedRow).toBeTruthy();
+    expect(selectedRow.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('clicking a depth 2 file zooms its parent folder into focus and selects the file in tree', async () => {
+    registerPane(0, paneOf('C:\\data'));
+    const store = duWorkspace.store;
+    store.testData('s-sync', 'complete', 'C:\\data');
+    store.snapshot = snapshotFixture('s-sync', 'C:\\data');
+
+    duMocks.queryChildren.mockImplementation(async (_scanId, nodeId) => {
+      if (nodeId === 'C:\\data') {
+        return {
+          scanId: 's-sync',
+          nodeId,
+          version: 1,
+          scannedAtMs: 1,
+          metric: 'logical',
+          coverage: 'complete',
+          offset: 0,
+          total: 1,
+          items: [childItem('C:\\data\\sub', { kind: 'dir', logicalBytes: 500 })],
+        };
+      }
+      if (nodeId === 'C:\\data\\sub') {
+        return {
+          scanId: 's-sync',
+          nodeId,
+          version: 1,
+          scannedAtMs: 1,
+          metric: 'logical',
+          coverage: 'complete',
+          offset: 0,
+          total: 1,
+          items: [childItem('C:\\data\\sub\\pic.png', { kind: 'file', logicalBytes: 250 })],
+        };
+      }
+      return {
+        scanId: 's-sync',
+        nodeId,
+        version: 1,
+        scannedAtMs: 1,
+        metric: 'logical',
+        coverage: 'complete',
+        offset: 0,
+        total: 0,
+        items: [],
+      };
+    });
+
+    const { container } = render(DiskUsageWorkspace);
+    await tick();
+    await flush();
+
+    // Select depth 2 file
+    await store.selectFile('C:\\data\\sub\\pic.png');
+    await tick();
+    await flush();
+
+    // Parent folder is the zoom focus
+    expect(store.zoomNodeId).toBe('C:\\data\\sub');
+    expect(store.zoomStack).toEqual(['C:\\data\\sub']);
+    expect(store.selectedNodeId).toBe('C:\\data\\sub\\pic.png');
+
+    // Breadcrumbs show data › sub
+    const crumbs = [...container.querySelectorAll('button.crumb')].map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(crumbs).toEqual(['data', 'sub']);
+
+    // Tree row for pic.png is selected
+    const fileRow = [...container.querySelectorAll('.row')].find(
+      (r) => r.getAttribute('data-row-id') === 'C:\\data\\sub\\pic.png',
+    ) as HTMLElement;
+    expect(fileRow).toBeTruthy();
+    expect(fileRow.getAttribute('aria-selected')).toBe('true');
+  });
+});
+
 // ── helpers ────────────────────────────────────────────────────────────────
 function paneOf(path: string) {
   return {
@@ -485,5 +876,7 @@ function paneOf(path: string) {
     closeCurrentTab: () => {},
     goUp: () => {},
     openCursorEntry: () => {},
+    openPath: vi.fn(),
+    selectPaths: vi.fn(),
   };
 }

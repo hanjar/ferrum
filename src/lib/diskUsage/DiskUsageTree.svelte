@@ -275,6 +275,8 @@
   }
 
   // Treemap/Files → tree: a zoom or selection made elsewhere moves the cursor.
+  let pendingTarget = $state<string | null>(null);
+
   $effect(() => {
     const z = store.zoomNodeId;
     const s = store.selectedNodeId;
@@ -290,14 +292,32 @@
       syncedZoom = z;
       syncedSel = s;
       if (!zChanged && !sChanged) return;
-      const target = zChanged ? z : s;
+      const target = s ?? z;
       if (!target) return;
       const r = rows.find((x) => x.id === target && !x.more);
-      if (r && r.domKey !== activeKey) {
-        clearTimeout(zoomTimer);
-        setActive(r);
+      if (r) {
+        pendingTarget = null;
+        if (r.domKey !== activeKey) {
+          clearTimeout(zoomTimer);
+          setActive(r);
+        }
+      } else {
+        pendingTarget = target;
       }
     });
+  });
+
+  $effect(() => {
+    if (pendingTarget) {
+      const r = rows.find((x) => x.id === pendingTarget && !x.more);
+      if (r) {
+        pendingTarget = null;
+        if (r.domKey !== activeKey) {
+          clearTimeout(zoomTimer);
+          setActive(r);
+        }
+      }
+    }
   });
 
   // ── folder helpers ───────────────────────────────────────────────────────
@@ -496,7 +516,7 @@
 
   function rowDblClick(row: TreeRow): void {
     // ONLY folders zoom; files/symlinks do nothing at all (never open).
-    if (row.expandable) store.zoomIn(row.id);
+    if (row.expandable) void store.zoomIn(row.id);
   }
 
   // ── DSK-06.1 row context actions (existing surfaces, revalidated) ────────

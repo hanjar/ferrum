@@ -35,11 +35,15 @@ export interface TreemapOptions {
   maxTiles?: number;
   /** Items below this fraction of the total area are grouped (default 0.015). */
   smallFraction?: number;
+  /** Maximum nesting depth for nested folders (default 3). */
+  maxDepth?: number;
+  /** Maximum total rectangles to render across all levels (default 2000). */
+  maxRects?: number;
 }
 
 /** Aggregated small tiles — members stay addressable for tooltip/detail. */
 export interface OtherGroup {
-  id: typeof OTHER_ID;
+  id: string;
   /** "Other · N item" */
   label: string;
   count: number;
@@ -66,8 +70,16 @@ export interface TreemapRect {
   value: number;
   /** The original item — absent for the Other group tile. */
   item?: DiskUsageChildItem;
-  /** Set exactly when id === OTHER_ID. */
+  /** Set exactly when id === OTHER_ID or nested other group. */
   otherGroup?: OtherGroup;
+  /** Hierarchy depth in the treemap: 1 for direct focus children, 2 for grandchildren, 3 for great-grandchildren. */
+  depth: number;
+  /** True when this rect represents a folder container that nests its children inside. */
+  isDirContainer?: boolean;
+  /** Header height in pixels for the folder label if drawn (0 for compact/no header). */
+  headerHeight?: number;
+  /** Inner content area allocated for children inside this container. */
+  contentRect?: { x: number; y: number; w: number; h: number };
 }
 
 export interface SquarifyResult {
@@ -105,6 +117,7 @@ function byValueDesc(
 function groupOther(
   items: DiskUsageChildItem[],
   opts: TreemapOptions,
+  otherId = OTHER_ID,
 ): { tiles: DiskUsageChildItem[]; other: OtherGroup | null; totalValue: number } {
   const maxTiles = Math.max(1, opts.maxTiles ?? 12);
   const smallFraction = opts.smallFraction ?? 0.015;
@@ -139,7 +152,7 @@ function groupOther(
       value += metricValue(m, opts.metric);
     }
     other = {
-      id: OTHER_ID,
+      id: otherId,
       label: `Other · ${members.length} item`,
       count: members.length,
       logicalBytes,
@@ -151,24 +164,22 @@ function groupOther(
   return { tiles, other, totalValue };
 }
 
-/**
- * Squarified layout (Bruls et al.), the prototype algorithm from
- * design/disk-usage/index.html. Input order does not matter — items are
- * sorted internally, so the same dataset always produces the same rects.
- *
- * Returns no rects when: input empty, canvas degenerate (≤ 0), or totalValue
- * is 0 (caller shows an empty state; drawing zero-precision rects would
- * pretend knowledge the scan does not have).
- */
-export function squarify(
+function squarifySingleLevel(
   items: DiskUsageChildItem[],
+  x: number,
+  y: number,
   width: number,
   height: number,
   opts: TreemapOptions,
-): SquarifyResult {
-  const { tiles, other, totalValue } = groupOther(items, opts);
+  depth: number,
+  maxDepth: number,
+  maxRects: number,
+  outRects: TreemapRect[],
+  idPrefix: string,
+): { totalValue: number; otherCount: number } {
+  const otherId = idPrefix ? `${idPrefix}${OTHER_ID}` : OTHER_ID;
+  const { tiles, other, totalValue } = groupOther(items, opts, otherId);
   const otherCount = other ? other.count : 0;
-  const empty: SquarifyResult = { rects: [], totalValue, otherCount };
 
   if (
     items.length === 0 ||
@@ -176,9 +187,10 @@ export function squarify(
     !Number.isFinite(width) ||
     !Number.isFinite(height) ||
     width <= 0 ||
-    height <= 0
+    height <= 0 ||
+    outRects.length >= maxRects
   ) {
-    return empty;
+    return { totalValue, otherCount };
   }
 
   type Entry = {
@@ -203,34 +215,52 @@ export function squarify(
     });
   }
 
-  const rects: TreemapRect[] = [];
+  const levelRects: TreemapRect[] = [];
 
-  // Integer rounding with ≤ 1px overflow: edges round outward at most 0.5px
-  // and are clamped to the canvas, so a rect never exceeds the bounds by
-  // more than 1px (contract brief: overflow rounding ≤ 1px).
-  function rect(e: Entry, x: number, y: number, w: number, h: number): TreemapRect {
-    const rx = Math.max(0, Math.round(x));
-    const ry = Math.max(0, Math.round(y));
-    const rw = Math.max(0, Math.min(Math.round(x + w) - rx, Math.round(width) - rx));
-    const rh = Math.max(0, Math.min(Math.round(y + h) - ry, Math.round(height) - ry));
+  function makeRect(e: Entry, rx: number, ry: number, rw: number, rh: number): TreemapRect {
+    const roundX = Math.max(0, Math.round(rx));
+    const roundY = Math.max(0, Math.round(ry));
+    const roundW = Math.max(
+      0,
+      Math.min(Math.round(rx + rw) - roundX, Math.round(x + width) - roundX),
+    );
+    const roundH = Math.max(
+      0,
+      Math.min(Math.round(ry + rh) - roundY, Math.round(y + height) - roundY),
+    );
     if (e.other) {
       return {
         id: e.other.id,
-        x: rx,
-        y: ry,
-        w: rw,
-        h: rh,
+        x: roundX,
+        y: roundY,
+        w: roundW,
+        h: roundH,
         label: e.other.label,
         value: e.other.value,
         otherGroup: e.other,
+        depth,
+        isDirContainer: false,
+        headerHeight: 0,
       };
     }
     const item = e.item as DiskUsageChildItem;
-    return { id: item.id, x: rx, y: ry, w: rw, h: rh, label: item.name, value: e.value, item };
+    return {
+      id: item.id,
+      x: roundX,
+      y: roundY,
+      w: roundW,
+      h: roundH,
+      label: item.name,
+      value: e.value,
+      item,
+      depth,
+      isDirContainer: false,
+      headerHeight: 0,
+    };
   }
 
-  let cx = 0;
-  let cy = 0;
+  let cx = x;
+  let cy = y;
   let cw = width;
   let ch = height;
   let row: Entry[] = [];
@@ -249,23 +279,21 @@ export function squarify(
     const s = r.reduce((a, q) => a + q.area, 0);
     if (s <= 0 || cw <= 0 || ch <= 0) return;
     if (cw >= ch) {
-      // vertical strip on the left
       const stripW = s / ch;
       let yy = cy;
       for (const q of r) {
         const qh = q.area / stripW;
-        rects.push(rect(q, cx, yy, stripW, qh));
+        levelRects.push(makeRect(q, cx, yy, stripW, qh));
         yy += qh;
       }
       cx += stripW;
       cw -= stripW;
     } else {
-      // horizontal strip on top
       const stripH = s / cw;
       let xx = cx;
       for (const q of r) {
         const qw = q.area / stripH;
-        rects.push(rect(q, xx, cy, qw, stripH));
+        levelRects.push(makeRect(q, xx, cy, qw, stripH));
         xx += qw;
       }
       cy += stripH;
@@ -275,7 +303,7 @@ export function squarify(
 
   for (const e of entries) {
     if (e.area <= 0) {
-      rects.push(rect(e, 0, 0, 0, 0)); // zero-area group stays in the output
+      levelRects.push(makeRect(e, x, y, 0, 0));
       continue;
     }
     if (row.length === 0 || worst([...row, e], Math.min(cw, ch)) <= worst(row, Math.min(cw, ch))) {
@@ -287,5 +315,100 @@ export function squarify(
   }
   if (row.length > 0) layRow(row);
 
-  return { rects, totalValue, otherCount };
+  for (const rect of levelRects) {
+    if (outRects.length >= maxRects) break;
+    const it = rect.item;
+    const canRecurse =
+      depth < maxDepth &&
+      it !== undefined &&
+      it.kind === 'dir' &&
+      Array.isArray(it.children) &&
+      it.children.length > 0;
+
+    const pad = 2;
+    const minW = 28;
+    const minH = 24;
+
+    if (canRecurse && rect.w >= minW && rect.h >= minH) {
+      const headerH = rect.w >= 48 && rect.h >= 36 ? 18 : rect.w >= 36 && rect.h >= 24 ? 14 : 0;
+      const innerX = rect.x + pad;
+      const innerY = rect.y + headerH + pad;
+      const innerW = rect.w - 2 * pad;
+      const innerH = rect.h - headerH - 2 * pad;
+
+      rect.isDirContainer = true;
+      rect.headerHeight = headerH;
+      rect.contentRect = { x: innerX, y: innerY, w: innerW, h: innerH };
+      outRects.push(rect);
+
+      if (innerW >= 4 && innerH >= 4 && outRects.length < maxRects) {
+        squarifySingleLevel(
+          it.children!,
+          innerX,
+          innerY,
+          innerW,
+          innerH,
+          opts,
+          depth + 1,
+          maxDepth,
+          maxRects,
+          outRects,
+          rect.id + '/',
+        );
+      }
+    } else {
+      rect.isDirContainer = false;
+      rect.headerHeight = 0;
+      outRects.push(rect);
+    }
+  }
+
+  return { totalValue, otherCount };
+}
+
+/**
+ * Squarified layout (Bruls et al.), extended for nested multi-level display.
+ * Displays focus folder children and nested children up to 3 levels deep with folder
+ * headers and padding.
+ *
+ * Percentage basis conventions (FER-550):
+ * - Tile label: percent of the currently focused folder (r.value / totalValue * 100),
+ *   consistent across all nesting depths (depth 1, 2, 3).
+ * - Tooltip: comprehensive breakdown:
+ *   1) % of focus: portion against the current focused folder root
+ *   2) of parent: portion against the node's immediate parent folder (percentOfParent)
+ *   3) of scan root: portion against the global scan root (percentOfScanRoot / scanRootTotal)
+ *
+ * Input order does not matter — items are sorted internally, so the same dataset always
+ * produces the same rects deterministically.
+ */
+export function squarify(
+  items: DiskUsageChildItem[],
+  width: number,
+  height: number,
+  opts: TreemapOptions,
+): SquarifyResult {
+  const maxDepth = opts.maxDepth ?? 3;
+  const maxRects = opts.maxRects ?? 2000;
+  const allRects: TreemapRect[] = [];
+
+  const topLevel = squarifySingleLevel(
+    items,
+    0,
+    0,
+    width,
+    height,
+    opts,
+    1,
+    maxDepth,
+    maxRects,
+    allRects,
+    '',
+  );
+
+  return {
+    rects: allRects,
+    totalValue: topLevel.totalValue,
+    otherCount: topLevel.otherCount,
+  };
 }
