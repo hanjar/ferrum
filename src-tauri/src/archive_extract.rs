@@ -745,13 +745,17 @@ where
         // Rollback directories this run created, innermost first; POSIX
         // disposition only removes empty directories.
         for rel in created_dirs.iter().rev() {
+            // Our own open handle on the directory (no delete sharing) must be closed before
+            // the directory can be opened for DELETE again; its children are already gone.
+            drop(dirs.remove(rel));
             if let Some(parent_rel) = rel.parent().map(|p| p.to_path_buf())
                 && let (Some(parent), Some(name)) = (
                     dirs.get(&parent_rel),
                     rel.file_name().map(|n| n.to_os_string()),
                 )
+                && let Err(e) = publish::unlink_entry(parent, &name, true)
             {
-                publish::unlink_entry(parent, &name, true);
+                log::warn!("extraction rollback left {rel:?} in place: {e:?}");
             }
         }
         return Err(err);
@@ -837,4 +841,76 @@ fn publish_err(e: PublishError, rel: &Path) -> ArchiveError {
     let mut err = error(code, "Publication refused");
     err.member_path = Some(rel.to_string_lossy().into_owned());
     err
+}
+
+#[cfg(all(test, windows))]
+mod rollback_tests {
+    use super::*;
+
+    fn plan_for(names: &[(&str, EntryKind)]) -> Plan {
+        let entries: Vec<Entry> = names
+            .iter()
+            .map(|(n, kind)| Entry {
+                raw_name: n,
+                kind: *kind,
+                expanded_size: None,
+                compressed_size: None,
+                modified_ms: None,
+            })
+            .collect();
+        let limits = ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        };
+        preflight(&entries, &limits).unwrap()
+    }
+
+    fn failing_extract(plan: &Plan, dest: &Path) -> Result<ExtractReport, ArchiveError> {
+        let limits = ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        };
+        extract(
+            plan,
+            dest,
+            &limits,
+            ArchiveConflictPolicy::Skip,
+            |_, _| Err(error(ArchiveErrorCode::Io, "boom")),
+            || false,
+        )
+    }
+
+    #[test]
+    fn failed_extraction_removes_the_directories_and_staging_it_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&[
+            ("a/", EntryKind::Directory),
+            ("a/b/", EntryKind::Directory),
+            ("a/b/f.txt", EntryKind::File),
+        ]);
+        assert!(failing_extract(&plan, tmp.path()).is_err());
+        let left: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "rollback left behind: {left:?}");
+    }
+
+    #[test]
+    fn failed_extraction_keeps_preexisting_directories_and_their_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("a")).unwrap();
+        std::fs::write(tmp.path().join("a").join("old.txt"), b"old").unwrap();
+        let plan = plan_for(&[("a/b/f.txt", EntryKind::File)]);
+        assert!(failing_extract(&plan, tmp.path()).is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("a").join("old.txt")).unwrap(),
+            b"old"
+        );
+        assert!(!tmp.path().join("a").join("b").exists());
+    }
 }
