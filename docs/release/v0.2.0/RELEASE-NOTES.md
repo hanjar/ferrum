@@ -7,7 +7,7 @@ Ferrum is a keyboard-centric dual-pane file manager for Windows, built with Taur
 ## Highlights
 
 - **Dual-pane workflow**: tabs, breadcrumbs, history, Directory Hotlist (`Ctrl+D`) with nested menus and drag-and-drop editing, Branch View, command palette (`Ctrl+K`), Total Commander style menus and shortcuts.
-- **Safe file operations**: copy and move queue with progress and cancel, Recycle Bin by default, Multi-Rename with preview, checksums, split and combine, resizable columns.
+- **Safe file operations**: copy and move queue with progress and cancel, Recycle Bin by default, Multi-Rename with preview, checksums, split and combine, resizable columns. A move or copy onto the same file through another spelling of its path (letter case, 8.3 name, hard link) is refused instead of risking the only copy.
 - **Archives**: browse ZIP, 7z and RAR as read-only folders; pack to ZIP and 7z; extract through a fail-closed pipeline (zip-slip, reserved names, junctions, size and entry quotas). RAR is read with UnRAR; creating RAR works only with your own WinRAR (`Rar.exe`), which Ferrum does not ship.
 - **Search, compare and sync**: progressive search, compare by content, compare directories, Synchronize Dirs with a required dry-run and a lock so two sync runs cannot touch the same folders.
 - **Quick View** (`Ctrl+Q`): text, JSON, Markdown, images (large ones are downscaled), audio and video metadata, EXIF, and PDF (sandboxed pdf.js, Beta).
