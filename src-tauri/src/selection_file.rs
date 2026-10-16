@@ -33,12 +33,39 @@ const MAX_NAMES: usize = 1_000_000;
 
 /// FER-512 P3-4: the ONLY place a selection file may live is `dir` (a full
 /// drive/UNC path that passes the same `path_guard::check_str` as content
-/// reads) + a single basename (`name`, validated exactly like `create_entry`).
+/// reads) + a single basename (`name`, see `validate_file_name`: portable name + .json/.ferrum-selection).
 /// The webview can no longer name an arbitrary file path.
 fn selection_path(dir: &str, name: &str) -> Result<PathBuf, FsError> {
     let dir = crate::path_guard::check_str(dir)?;
-    crate::mutations::validate_name(name)?;
+    validate_file_name(name)?;
     Ok(Path::new(&dir).join(name))
+}
+
+/// FER-515 P3-1: extensions a selection FILE may carry. `.json` is what the UI uses by default
+/// (`selection.json`); `.ferrum-selection` is the dedicated one. Anything else (`x.bat`,
+/// `x.lnk`, `x.ps1`) is refused, so a compromised webview cannot drop an executable or an
+/// autorun script (Startup folder) through this command, whatever `dir` it names.
+const SELECTION_EXTENSIONS: [&str; 2] = ["json", "ferrum-selection"];
+
+/// Name of the selection FILE itself (not of an entry inside it): a portable basename (no `:`
+/// so no ADS, no reserved device names, no trailing dot/space) with an allowed extension.
+fn validate_file_name(name: &str) -> Result<(), FsError> {
+    crate::mutations::validate_portable_name(name)?;
+    let ext_ok = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            SELECTION_EXTENSIONS
+                .iter()
+                .any(|a| e.eq_ignore_ascii_case(a))
+        });
+    if !ext_ok {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Selection file name must end in .json or .ferrum-selection",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), FsError> {
@@ -182,6 +209,40 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// FER-515 P3-1: ADS, reserved names and executable/autorun extensions are refused for the
+    /// selection FILE name (the attack: `save_selection(dir=Startup, name="x.bat", ...)`).
+    #[test]
+    fn rejects_dangerous_selection_file_names() {
+        let dir = dir_str("danger");
+        for bad in [
+            "x.bat",
+            "x.cmd",
+            "x.lnk",
+            "x.ps1",
+            "x.exe",
+            "noext",
+            "selection",
+            "selection.json:ads",
+            "a:b.json",
+            "CON.json",
+            "nul.json",
+            "COM1.json",
+            "x.json.",
+            "x.json ",
+            "x.json.bat",
+            "monday.sel",
+        ] {
+            let err = save_selection_file(&dir, bad, &["a.txt".into()]).unwrap_err();
+            assert_eq!(err.code, crate::domain::ErrorCode::InvalidPath, "{bad:?}");
+            assert!(load_selection_file(&dir, bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
+        for good in ["selection.json", "Monday.JSON", "a b.ferrum-selection"] {
+            save_selection_file(&dir, good, &["a.txt".into()]).expect(good);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rejects_names_that_are_not_basenames() {
         let dir = dir_str("badnames");
@@ -274,7 +335,7 @@ mod tests {
 
     #[test]
     fn missing_file_maps_to_not_found() {
-        let err = load_selection_file(r"Z:\definitely\not", "here.sel").unwrap_err();
+        let err = load_selection_file(r"Z:\definitely\not", "here.json").unwrap_err();
         assert_eq!(err.code, crate::domain::ErrorCode::NotFound);
     }
 
