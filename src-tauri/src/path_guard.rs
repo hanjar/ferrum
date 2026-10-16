@@ -86,6 +86,44 @@ pub fn check_str(path: &str) -> Result<String, FsError> {
     Ok(p)
 }
 
+/// FER-515 P3-2: true when any file-system component of a path already accepted by `check_str`
+/// is a Windows reserved device name: `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9` (also the
+/// superscript digits), `CONIN$`, `CONOUT$` - with or without an extension, any case, ignoring the
+/// trailing dots/spaces Windows strips. The drive (`X:`) and the UNC host/share are skipped.
+pub fn has_reserved_device_component(normalised: &str) -> bool {
+    let rest = match normalised.strip_prefix(r"\\") {
+        Some(unc) => unc.splitn(3, '\\').nth(2).unwrap_or(""),
+        None => normalised.get(2..).unwrap_or(""),
+    };
+    rest.split('\\')
+        .filter(|c| !c.is_empty())
+        .any(is_reserved_device_name)
+}
+
+pub fn is_reserved_device_name(comp: &str) -> bool {
+    let trimmed = comp.trim_end_matches(['.', ' ']);
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches(' ')
+        .to_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(
+            chars.next(),
+            Some('1'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}')
+        )
+        && chars.next().is_none()
+}
+
 /// A checked disk file. `meta` describes the checked handle (the symlink TARGET for a link).
 pub struct GuardedFile {
     pub path: String,

@@ -46,15 +46,77 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// (`path_guard::check_str`): device namespaces (`\\.\`, `\\?\`), alternate data streams
 /// (`C:\x.txt:ads`), control characters and relative paths are refused uniformly. Plain UNC
 /// (`\\server\share\...`) and well-formed drive paths stay allowed — Ferrum browses shares.
+///
+/// FER-515 P3-2: on top of that, no component may be a Windows reserved device name
+/// (`C:\x\CON`, `NUL.txt`, `C:\COM1\a`): such a path addresses a device, not a file. This lives
+/// here (mutations) and not in `check_str`, so the read paths keep their behaviour.
 fn check_mutation_path(path: &str) -> Result<(), FsError> {
-    crate::path_guard::check_str(path).map(|_| ())
-}
-
-fn check_mutation_paths<'a>(paths: impl IntoIterator<Item = &'a String>) -> Result<(), FsError> {
-    for p in paths {
-        check_mutation_path(p)?;
+    let normalised = crate::path_guard::check_str(path)?;
+    if crate::path_guard::has_reserved_device_component(&normalised) {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Path contains a reserved Windows device name",
+        ));
     }
     Ok(())
+}
+
+/// FER-514 P3-7: a mutation path that is a DESTINATION or a newly created entry: the string gate
+/// plus "not inside the app's own state folders" (`protected_dirs`).
+fn check_write_target(path: &str) -> Result<(), FsError> {
+    check_mutation_path(path)?;
+    crate::protected_dirs::check_write_target(path)
+}
+
+/// FER-514 P3-7: a mutation path that is renamed, moved, deleted or changed in place: the string
+/// gate plus "neither inside nor containing the app's own state folders".
+fn check_write_source(path: &str) -> Result<(), FsError> {
+    check_mutation_path(path)?;
+    crate::protected_dirs::check_write_source(path)
+}
+
+fn check_write_sources<'a>(paths: impl IntoIterator<Item = &'a String>) -> Result<(), FsError> {
+    for p in paths {
+        check_write_source(p)?;
+    }
+    Ok(())
+}
+
+fn check_write_targets<'a>(paths: impl IntoIterator<Item = &'a String>) -> Result<(), FsError> {
+    for p in paths {
+        check_write_target(p)?;
+    }
+    Ok(())
+}
+
+/// FER-515 P3-3: name of a NEW entry (create / rename target). `mutations::validate_name`
+/// stays permissive; this adds what is never a legal Windows name: `:` (alternate data stream,
+/// `x.txt:ads`) and reserved device names.
+fn check_new_name(name: &str) -> Result<(), FsError> {
+    crate::mutations::validate_name(name)?;
+    if name.contains(':') {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Name must not contain ':'",
+        ));
+    }
+    if crate::path_guard::is_reserved_device_name(name) {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Name is a reserved Windows device name",
+        ));
+    }
+    Ok(())
+}
+
+/// Protected-folder gate only, for commands that never had the string gate (copy / move / archive
+/// create+extract): adding `check_str` there is a behaviour change that is reported separately.
+fn check_protected_target(path: &str) -> Result<(), FsError> {
+    crate::protected_dirs::check_write_target(path)
+}
+
+fn check_protected_source(path: &str) -> Result<(), FsError> {
+    crate::protected_dirs::check_write_source(path)
 }
 
 #[tauri::command]
@@ -210,7 +272,8 @@ pub fn create_entry(
     parent: String,
     name: String,
 ) -> Result<crate::domain::FileEntry, FsError> {
-    validate_path(&parent)?;
+    check_write_target(&parent)?;
+    check_new_name(&name)?;
     match kind.as_str() {
         "file" => crate::mutations::create_file(&parent, &name),
         "dir" => crate::mutations::create_dir(&parent, &name),
@@ -227,7 +290,8 @@ pub fn rename_entry(
     new_name: String,
     app: AppHandle,
 ) -> Result<crate::domain::FileEntry, FsError> {
-    validate_path(&path)?;
+    check_write_source(&path)?;
+    check_new_name(&new_name)?;
     let entry = crate::mutations::rename_entry(&path, &new_name)?;
     note_activity_changes(
         &app,
@@ -255,7 +319,7 @@ pub fn delete_entries(
     permanent: bool,
     app: AppHandle,
 ) -> Result<crate::mutations::DeleteReport, FsError> {
-    check_mutation_paths(&paths)?;
+    check_write_sources(&paths)?;
     let report = if permanent {
         crate::mutations::delete_permanent(&paths)
     } else {
@@ -304,6 +368,7 @@ pub fn enqueue_copy(
     app: AppHandle,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
+    check_protected_target(&target_dir)?;
     let policy = parse_policy(&policy)?;
     let activity_app = app.clone();
     let prefs = load_prefs(app);
@@ -403,6 +468,10 @@ pub fn enqueue_move(
     app: AppHandle,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
+    check_protected_target(&target_dir)?;
+    for source in &sources {
+        check_protected_source(source)?;
+    }
     let policy = parse_policy(&policy)?;
     remember_copy_defaults(&load_prefs(app.clone()));
     let make_body = move || {
@@ -646,6 +715,7 @@ pub async fn archive_extract(
     app: tauri::AppHandle,
 ) -> Result<(), FsError> {
     let archive_path = request.archive_path.clone();
+    check_protected_target(&request.destination_path)?;
     let provider = archive_provider(&archive_path)?;
     spawn_blocking(move || {
         crate::archive_jobs::run_extract(
@@ -750,6 +820,7 @@ pub async fn archive_create(
     app: tauri::AppHandle,
 ) -> Result<String, FsError> {
     let dest = request.destination_path.clone();
+    check_protected_target(&dest)?;
     spawn_blocking(move || {
         crate::archive_jobs::run_create(&request, request_id.as_deref(), &mut |ev| {
             let _ = app.emit(crate::archive_jobs::PROGRESS_EVENT, ev);
@@ -925,6 +996,7 @@ fn rar_owner_hwnd(_window: &tauri::Window) -> isize {
 /// arbitrary path to write the selection JSON to.
 #[tauri::command]
 pub fn save_selection(dir: String, name: String, names: Vec<String>) -> Result<(), FsError> {
+    check_protected_target(&dir)?;
     crate::selection_file::save_selection_file(&dir, &name, &names)
 }
 
@@ -2268,7 +2340,7 @@ fn compare_sink(app: tauri::AppHandle) -> crate::compare::ProgressSink {
 pub fn rename_batch(
     pairs: Vec<crate::rename_batch::RenamePair>,
 ) -> Result<crate::rename_batch::RenameBatchReport, FsError> {
-    check_mutation_paths(pairs.iter().map(|p| &p.from))?;
+    check_write_sources(pairs.iter().map(|p| &p.from))?;
     Ok(crate::rename_batch::rename_batch(&pairs))
 }
 
@@ -2350,7 +2422,7 @@ pub fn set_attributes(
     read_only: Option<bool>,
     hidden: Option<bool>,
 ) -> Result<(), FsError> {
-    check_mutation_path(&path)?;
+    check_write_source(&path)?;
     crate::properties::set_attributes(&path, read_only, hidden)
 }
 
@@ -2667,9 +2739,7 @@ fn enqueue_checksum_create_on(
     algorithm: &str,
     policy: Option<String>,
 ) -> Result<OperationId, FsError> {
-    for p in &paths {
-        validate_path(p)?;
-    }
+    check_write_targets(&paths)?;
     let algorithm = crate::file_tools::Algorithm::parse(algorithm)?;
     let policy = parse_output_policy(policy)?;
     let make_body =
@@ -2702,7 +2772,7 @@ fn enqueue_split_file_on(
     policy: Option<String>,
 ) -> Result<OperationId, FsError> {
     validate_path(&path)?;
-    validate_path(&out_dir)?;
+    check_write_target(&out_dir)?;
     let policy = parse_output_policy(policy)?;
     let make_body =
         move || crate::file_tools::split_job(path.clone(), part_bytes, out_dir.clone(), policy);
@@ -2732,7 +2802,7 @@ fn enqueue_combine_parts_on(
     policy: Option<String>,
 ) -> Result<OperationId, FsError> {
     validate_path(&first_part)?;
-    validate_path(&out_file)?;
+    check_write_target(&out_file)?;
     let policy = parse_output_policy(policy)?;
     let make_body =
         move || crate::file_tools::combine_job(first_part.clone(), out_file.clone(), policy);
@@ -2887,9 +2957,7 @@ pub fn enqueue_encode_files(
     paths: Vec<String>,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
-    for p in &paths {
-        validate_path(p)?;
-    }
+    check_write_targets(&paths)?;
     Ok(queue.enqueue(
         crate::domain::OperationKind::Create,
         Box::new(move |cancel, report| {
@@ -2918,9 +2986,7 @@ pub fn enqueue_decode_files(
     paths: Vec<String>,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
-    for p in &paths {
-        validate_path(p)?;
-    }
+    check_write_targets(&paths)?;
     Ok(queue.enqueue(
         crate::domain::OperationKind::Create,
         Box::new(move |cancel, report| {
@@ -2969,7 +3035,7 @@ fn report_failures(outcome: &crate::codecs::CodecReport) -> Result<(), FsError> 
 /// atomic; an empty map removes the sidecar file.
 #[tauri::command]
 pub async fn comment_set(path: String, comment: Option<String>) -> Result<(), FsError> {
-    check_mutation_path(&path)?;
+    check_write_target(&path)?;
     spawn_blocking(move || crate::comments::set_comment(&path, comment.as_deref()))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
@@ -3242,7 +3308,7 @@ mod preflight_request_debug_tests {
 /// FER-512 P3-3 / Info-1: the mutation guard and the queue-harness cap.
 #[cfg(test)]
 mod fer512_ipc_gate_tests {
-    use super::{check_mutation_path, check_mutation_paths, dummy_ticks};
+    use super::{check_mutation_path, check_write_sources, dummy_ticks};
     use crate::domain::ErrorCode;
 
     /// The exact audit cases: an ADS spelling and a device namespace are
@@ -3260,8 +3326,8 @@ mod fer512_ipc_gate_tests {
             let err = check_mutation_path(bad).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidPath, "{bad:?}");
         }
-        assert!(check_mutation_paths(&[r"C:\ok.txt".into()]).is_ok());
-        let err = check_mutation_paths(&[r"C:\ok.txt".into(), r"C:\x.txt:ads".into()]).unwrap_err();
+        assert!(check_write_sources(&[r"C:\ok.txt".into()]).is_ok());
+        let err = check_write_sources(&[r"C:\ok.txt".into(), r"C:\x.txt:ads".into()]).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidPath);
     }
 
@@ -3278,6 +3344,83 @@ mod fer512_ipc_gate_tests {
         ] {
             assert!(check_mutation_path(good).is_ok(), "{good}");
         }
+    }
+
+    /// FER-515 P3-2: reserved device names are refused anywhere in a mutation path (any case,
+    /// with extension, trailing dot/space), while look-alikes stay allowed.
+    #[test]
+    fn mutation_paths_refuse_reserved_device_names() {
+        for bad in [
+            r"C:\x\CON",
+            r"C:\x\NUL.txt",
+            r"C:\x\nul.tar.gz",
+            r"C:\AUX\a.txt",
+            r"C:\x\com1",
+            r"C:\x\LPT9.log",
+            r"C:\x\PRN.",
+            r"C:\x\CON .txt",
+            r"C:\x\CONIN$",
+            r"\\server\share\dir\CON",
+            r"c:/x/Aux",
+        ] {
+            let err = check_mutation_path(bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidPath, "{bad:?}");
+        }
+        for good in [
+            r"C:\x\console.txt",
+            r"C:\x\com10",
+            r"C:\x\COM0",
+            r"C:\x\nulled",
+            r"C:\x\auxiliary\a.txt",
+            r"\\CON\share\file.txt",
+            r"C:\x\lpt",
+        ] {
+            assert!(check_mutation_path(good).is_ok(), "{good}");
+        }
+    }
+
+    /// FER-515 P3-3: names of new entries cannot carry an ADS or be a device name.
+    #[test]
+    fn new_entry_names_refuse_streams_and_devices() {
+        for bad in ["a.txt:ads", "x:y", "CON", "nul.txt", "a/b", "..", ""] {
+            assert!(super::check_new_name(bad).is_err(), "{bad:?}");
+        }
+        for good in ["a.txt", "new folder", "console", ".gitignore"] {
+            assert!(super::check_new_name(good).is_ok(), "{good}");
+        }
+    }
+
+    /// FER-514 P3-7: the write gates refuse the app's own folders (target: inside; source:
+    /// inside or containing) and keep everything else.
+    #[test]
+    fn write_gates_protect_the_app_state_folder() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("ferrum-ipc-pd-{}", std::process::id()));
+        let cfg = base.join("config");
+        let other = base.join("other");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        crate::protected_dirs::register([cfg.clone()]);
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let in_cfg = s(&cfg.join("config.json"));
+        // New entry / destination.
+        assert!(super::check_write_target(&in_cfg).is_err());
+        assert!(super::check_write_target(&s(&cfg)).is_err());
+        assert!(super::check_write_target(&s(&other)).is_ok());
+        assert!(super::check_protected_target(&s(&cfg)).is_err());
+        // Rename / delete / move source.
+        assert!(super::check_write_source(&in_cfg).is_err());
+        assert!(super::check_write_source(&s(&base)).is_err(), "ancestor");
+        assert!(super::check_write_source(&s(&other.join("a.txt"))).is_ok());
+        assert!(super::check_protected_source(&s(&base)).is_err());
+        assert!(super::check_write_sources(&[s(&other), in_cfg.clone()]).is_err());
+        assert!(super::check_write_targets(&[s(&other), s(&base)]).is_ok());
+        // The string gate still applies first.
+        assert!(super::check_write_target(r"C:\x.txt:ads").is_err());
+        crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Info-1: the harness job can never sleep longer than 10 s.

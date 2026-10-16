@@ -48,6 +48,7 @@ pub mod preview_archive;
 pub mod preview_image;
 pub mod profile;
 pub mod properties;
+pub mod protected_dirs;
 pub mod rename_batch;
 pub mod search;
 pub mod selection_file;
@@ -297,6 +298,17 @@ pub fn run() {
                 let _ = handle.emit("operations://progress", p);
             }));
             app.handle().manage(queue);
+            // FER-514 P3-7: the app's own state folders are off limits to the generic file ops.
+            protected_dirs::register(
+                [
+                    profile::config_dir(app.handle()),
+                    profile::data_dir(app.handle()),
+                    profile::activity_dir(app.handle()),
+                    profile::local_data_dir(app.handle()),
+                ]
+                .into_iter()
+                .flatten(),
+            );
             // FER-471: live copy-thread state for the progress dialog.
             let control_handle = app.handle().clone();
             copy_pool::set_state_sink(Box::new(move |state| {
