@@ -10,6 +10,7 @@
     highlightPrefix,
     refineFromCache,
     splitInput,
+    stripVerbatimPrefix,
     stepIndex,
     uncPathsOf,
     type SuggestCache,
@@ -202,7 +203,7 @@
   }
 
   async function submit(target?: string) {
-    const typed = (target ?? text).trim();
+    const typed = stripVerbatimPrefix((target ?? text).trim());
     if (!typed || busy) return;
     busy = true;
     const id = ++reqId;
@@ -211,7 +212,7 @@
       if (id !== reqId || !editing) return;
       if (res.kind === 'dir' || res.kind === 'archive') {
         close();
-        onnavigate?.(res.path);
+        onnavigate?.(stripVerbatimPrefix(res.path));
       } else if (res.kind === 'file') {
         message = `Not a folder: ${typed}`;
       } else {
