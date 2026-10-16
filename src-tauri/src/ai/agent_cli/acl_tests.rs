@@ -257,3 +257,88 @@ fn callback_aware_judges_conditional_aces_by_their_rights() {
         );
     }
 }
+
+/// FER-559 (P3-D): in the callback-aware variant an inherit-only ACE that files inherit
+/// (OBJECT_INHERIT) and that grants a foreign account a write right makes the exe's folder
+/// untrusted; container-only inheritance, read-only grants, trusted accounts, CREATOR OWNER
+/// and ancestors are unaffected, and the strict FER-490 rule is unchanged.
+#[test]
+fn callback_aware_rejects_inherit_only_object_inherit_write_for_foreign_accounts() {
+    use super::acl::evaluate_with;
+    const OI: u8 = 0x01;
+    const CI: u8 = 0x02;
+    const IO: u8 = 0x08;
+    let ace = |sid: &str, mask: u32, flags: u8, kind: u8| Ace {
+        kind,
+        flags,
+        mask,
+        sid: Some(sid.to_owned()),
+    };
+    let with = |extra: Ace| {
+        let mut aces = standard();
+        aces.push(extra);
+        sec(ME, aces)
+    };
+    // (OI)(IO) Users:Modify -> untrusted for the Target role.
+    for kind in [0u8, 9] {
+        assert_eq!(
+            evaluate_with(
+                &with(ace(USERS, FULL, OI | IO, kind)),
+                ME,
+                Role::Target,
+                true
+            ),
+            Some(USERS.to_owned()),
+            "kind {kind}"
+        );
+        assert_eq!(
+            evaluate_with(
+                &with(ace(OTHER, ADD_FILE, OI | CI | IO, kind)),
+                ME,
+                Role::Target,
+                true
+            ),
+            Some(OTHER.to_owned()),
+            "kind {kind} OI|CI"
+        );
+    }
+    // Non-plain allow types fail closed when files inherit them.
+    assert!(
+        evaluate_with(
+            &with(ace(USERS, READ_EXEC, OI | IO, 5)),
+            ME,
+            Role::Target,
+            true
+        )
+        .is_some()
+    );
+    // Not affected.
+    for (label, extra) in [
+        ("CI only", ace(USERS, FULL, CI | IO, 0)),
+        ("read only", ace(USERS, READ_EXEC, OI | IO, 0)),
+        ("trusted account", ace(ADMINS, FULL, OI | IO, 0)),
+        ("creator owner", ace("S-1-3-0", FULL, OI | CI | IO, 0)),
+        ("deny", ace(USERS, FULL, OI | IO, 1)),
+    ] {
+        assert_eq!(
+            evaluate_with(&with(extra), ME, Role::Target, true),
+            None,
+            "{label}"
+        );
+    }
+    // Ancestors keep ignoring inherit-only ACEs.
+    assert_eq!(
+        evaluate_with(
+            &with(ace(USERS, FULL, OI | IO, 0)),
+            ME,
+            Role::Ancestor { root: false },
+            true
+        ),
+        None
+    );
+    // The strict FER-490 rule is unchanged.
+    assert_eq!(
+        evaluate(&with(ace(USERS, FULL, OI | IO, 0)), ME, Role::Target),
+        None
+    );
+}

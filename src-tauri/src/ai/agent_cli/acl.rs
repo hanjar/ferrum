@@ -80,6 +80,7 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 /// ACCESS_DENIED, ACCESS_DENIED_OBJECT, ACCESS_DENIED_CALLBACK, ACCESS_DENIED_CALLBACK_OBJECT.
 const DENY_TYPES: [u8; 4] = [1, 6, 10, 12];
+const OBJECT_INHERIT_ACE: u8 = 0x01;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
 /// One ACE as read from a DACL.
@@ -135,8 +136,20 @@ pub fn evaluate_with(
         return Some("NULL DACL".to_owned());
     };
     for ace in dacl {
-        if ace.flags & INHERIT_ONLY_ACE != 0 || DENY_TYPES.contains(&ace.kind) {
+        if DENY_TYPES.contains(&ace.kind) {
             continue;
+        }
+        if ace.flags & INHERIT_ONLY_ACE != 0 {
+            // FER-559 (P3-D), callback-aware variant only: an inherit-only ACE that is inherited
+            // by FILES (OBJECT_INHERIT) is what a sibling DLL of the exe gets when it is created
+            // or replaced in the exe's folder, so on the exe's folder it counts like a normal
+            // ACE. Container-only inherit-only ACEs (subfolders) and the strict FER-490 rule keep
+            // skipping it.
+            let applies_to_files =
+                callback_as_plain && role == Role::Target && ace.flags & OBJECT_INHERIT_ACE != 0;
+            if !applies_to_files {
+                continue;
+            }
         }
         let plain = ace.kind == ACCESS_ALLOWED_ACE_TYPE
             || (callback_as_plain && ace.kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE);
