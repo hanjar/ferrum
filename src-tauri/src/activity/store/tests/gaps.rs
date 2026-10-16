@@ -83,8 +83,18 @@ fn chat_provenance_never_creates_entity_or_episode() {
 fn watcher_never_touches_activity() {
     let watch = include_str!("../../../watch.rs");
     // The word "activity" appears in a doc comment; check real call surfaces.
-    for needle in ["activity_service", "ActivityService", "ActivityHandle", "record_visit", "note_fs_changes", "ferrum_activity"] {
-        assert!(!watch.contains(needle), "watch.rs must not reference {needle}");
+    for needle in [
+        "activity_service",
+        "ActivityService",
+        "ActivityHandle",
+        "record_visit",
+        "note_fs_changes",
+        "ferrum_activity",
+    ] {
+        assert!(
+            !watch.contains(needle),
+            "watch.rs must not reference {needle}"
+        );
     }
 }
 
@@ -95,13 +105,28 @@ fn out_of_order_receipts_keep_one_episode_and_consistent_rollups() {
     let mut store = ActivityStore::in_memory().unwrap();
     let base = 3 * DAY + 100_000;
     // Frequent needs two active days: one earlier episode on day 1.
-    assert_eq!(store.record(&folder("z", "x", 0, DAY + 1_000)).unwrap(), RecordOutcome::NewEpisode);
-    assert_eq!(store.record(&folder("a", "x", 0, base + 20_000)).unwrap(), RecordOutcome::NewEpisode);
-    assert_eq!(store.record(&folder("b", "x", 0, base + 5_000)).unwrap(), RecordOutcome::ContinuedEpisode);
+    assert_eq!(
+        store.record(&folder("z", "x", 0, DAY + 1_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
+    assert_eq!(
+        store.record(&folder("a", "x", 0, base + 20_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
+    assert_eq!(
+        store.record(&folder("b", "x", 0, base + 5_000)).unwrap(),
+        RecordOutcome::ContinuedEpisode
+    );
     // Older than the start but inside the window: still the same episode.
-    assert_eq!(store.record(&folder("c", "x", 0, base - 5_000)).unwrap(), RecordOutcome::ContinuedEpisode);
+    assert_eq!(
+        store.record(&folder("c", "x", 0, base - 5_000)).unwrap(),
+        RecordOutcome::ContinuedEpisode
+    );
     // Outside the window relative to the (now extended) start: new episode.
-    assert_eq!(store.record(&folder("d", "x", 0, base - 40_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("d", "x", 0, base - 40_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     assert_eq!(store.episode_count().unwrap(), 3);
     let epoch = store.privacy_epoch().unwrap();
     let rows = store
@@ -123,9 +148,24 @@ fn out_of_order_receipts_keep_one_episode_and_consistent_rollups() {
 fn out_of_order_across_midnight_keeps_the_bucket_on_the_newest_day() {
     let mut store = ActivityStore::in_memory().unwrap();
     let midnight = 5 * DAY;
-    assert_eq!(store.record(&folder("m0", "y", 0, 2 * DAY + 1_000)).unwrap(), RecordOutcome::NewEpisode);
-    assert_eq!(store.record(&folder("m1", "y", 0, midnight + 5_000)).unwrap(), RecordOutcome::NewEpisode);
-    assert_eq!(store.record(&folder("m2", "y", 0, midnight - 5_000)).unwrap(), RecordOutcome::ContinuedEpisode);
+    assert_eq!(
+        store
+            .record(&folder("m0", "y", 0, 2 * DAY + 1_000))
+            .unwrap(),
+        RecordOutcome::NewEpisode
+    );
+    assert_eq!(
+        store
+            .record(&folder("m1", "y", 0, midnight + 5_000))
+            .unwrap(),
+        RecordOutcome::NewEpisode
+    );
+    assert_eq!(
+        store
+            .record(&folder("m2", "y", 0, midnight - 5_000))
+            .unwrap(),
+        RecordOutcome::ContinuedEpisode
+    );
     let epoch = store.privacy_epoch().unwrap();
     let all = store
         .frequent(0, midnight + DAY, ActivityKind::FolderVisit, epoch, 10)
@@ -150,11 +190,18 @@ fn corrupt_file_is_quarantined_and_a_fresh_database_works() {
     .unwrap();
     let (mut store, recovered) = ActivityStore::open_recovering(&path).unwrap();
     assert!(recovered);
-    assert_eq!(store.record(&folder("r1", "fresh", 0, 1_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("r1", "fresh", 0, 1_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     drop(store);
     let moved = quarantined(dir.path());
     assert_eq!(moved.len(), 1, "exactly one quarantine file");
-    assert!(std::fs::read(&moved[0]).unwrap().starts_with(b"this is definitely"));
+    assert!(
+        std::fs::read(&moved[0])
+            .unwrap()
+            .starts_with(b"this is definitely")
+    );
     // Reopening the healthy database is not a recovery.
     let (mut again, recovered) = ActivityStore::open_recovering(&path).unwrap();
     assert!(!recovered);
@@ -188,7 +235,11 @@ fn future_schema_is_rejected_and_the_file_is_left_intact() {
     let before = std::fs::read(&path).unwrap();
     assert!(ActivityStore::open_recovering(&path).is_err());
     assert!(ActivityStore::open(&path).is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), before, "future-schema file untouched");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "future-schema file untouched"
+    );
     assert!(quarantined(dir.path()).is_empty());
 }
 
@@ -233,7 +284,11 @@ fn batch_failure_of_one_receipt_does_not_lose_the_others() {
     let mut bad = folder("bad", "z", 0, 1_000);
     bad.entity.locator = "relative".into(); // fails contract validation
     let out = store
-        .record_batch(&[folder("g1", "ok1", 0, 1_000), bad, folder("g2", "ok2", 0, 1_000)])
+        .record_batch(&[
+            folder("g1", "ok1", 0, 1_000),
+            bad,
+            folder("g2", "ok2", 0, 1_000),
+        ])
         .unwrap();
     assert!(out[0].is_ok() && out[1].is_err() && out[2].is_ok());
     assert_eq!(store.episode_count().unwrap(), 2);
@@ -248,7 +303,12 @@ fn measure_record_latency() {
     let mut store = ActivityStore::open(&dir.path().join("a.sqlite3")).unwrap();
     let mut samples = Vec::new();
     for i in 0..300_u64 {
-        let r = folder(&format!("l{i}"), &format!("e{}", i % 50), 0, 1_000_000 + i * 60_000);
+        let r = folder(
+            &format!("l{i}"),
+            &format!("e{}", i % 50),
+            0,
+            1_000_000 + i * 60_000,
+        );
         let t = std::time::Instant::now();
         store.record(&r).unwrap();
         samples.push(t.elapsed().as_micros());
@@ -259,7 +319,14 @@ fn measure_record_latency() {
         samples[150], samples[285], samples[299]
     );
     let batch: Vec<_> = (0..64_u64)
-        .map(|i| folder(&format!("m{i}"), &format!("e{}", i % 50), 0, 900_000_000 + i * 60_000))
+        .map(|i| {
+            folder(
+                &format!("m{i}"),
+                &format!("e{}", i % 50),
+                0,
+                900_000_000 + i * 60_000,
+            )
+        })
         .collect();
     let t = std::time::Instant::now();
     store.record_batch(&batch).unwrap();

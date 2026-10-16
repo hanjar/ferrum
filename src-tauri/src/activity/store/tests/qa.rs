@@ -90,7 +90,14 @@ fn exclusion_matches_case_slash_and_trailing_separator_aliases_on_windows_paths(
         "C:\\Work\\Private\\",
     ];
     for (index, alias) in aliases.iter().enumerate() {
-        let receipt = folder_at(&format!("e{index}"), &format!("p{index}"), alias, "x", 1, 10);
+        let receipt = folder_at(
+            &format!("e{index}"),
+            &format!("p{index}"),
+            alias,
+            "x",
+            1,
+            10,
+        );
         assert_eq!(
             store.record(&receipt).unwrap(),
             RecordOutcome::Ignored,
@@ -104,11 +111,22 @@ fn exclusion_matches_case_slash_and_trailing_separator_aliases_on_windows_paths(
 fn exclusion_uses_subtree_boundary_not_string_prefix() {
     let mut store = ActivityStore::in_memory().unwrap();
     store.exclude_root("C:\\Work\\Private").unwrap();
-    for (index, sibling) in ["C:\\Work\\PrivateX", "C:\\Work\\Private2\\a", "C:\\Work\\Priv"]
-        .iter()
-        .enumerate()
+    for (index, sibling) in [
+        "C:\\Work\\PrivateX",
+        "C:\\Work\\Private2\\a",
+        "C:\\Work\\Priv",
+    ]
+    .iter()
+    .enumerate()
     {
-        let receipt = folder_at(&format!("s{index}"), &format!("s{index}"), sibling, "x", 1, 10);
+        let receipt = folder_at(
+            &format!("s{index}"),
+            &format!("s{index}"),
+            sibling,
+            "x",
+            1,
+            10,
+        );
         assert_eq!(
             store.record(&receipt).unwrap(),
             RecordOutcome::NewEpisode,
@@ -130,7 +148,10 @@ fn exclusion_unc_is_case_insensitive_and_posix_is_case_sensitive() {
     // POSIX file systems are case sensitive: a different-case sibling is a
     // different directory and must stay recordable.
     let posix_other = folder_at("p2", "p2", "/home/me/secret/x", "x", 2, 10);
-    assert_eq!(store.record(&posix_other).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&posix_other).unwrap(),
+        RecordOutcome::NewEpisode
+    );
 }
 
 #[test]
@@ -164,7 +185,11 @@ fn exclusion_rejects_parent_traversal_and_relative_roots() {
     assert!(store.exclude_root("C:\\Work\\..\\Private").is_err());
     assert!(store.exclude_root("Private").is_err());
     assert!(store.exclude_root("").is_err());
-    assert_eq!(store.privacy_epoch().unwrap(), 0, "rejected exclusion must not bump the epoch");
+    assert_eq!(
+        store.privacy_epoch().unwrap(),
+        0,
+        "rejected exclusion must not bump the epoch"
+    );
 }
 
 /// Junction / symlink / 8.3 short-name / verbatim (`\\?\`) aliases are NOT
@@ -179,7 +204,10 @@ fn junction_short_name_and_verbatim_aliases_are_not_resolved_by_store_documented
     store.exclude_root("C:\\Secret").unwrap();
     // Junction `C:\Work\Link` -> `C:\Secret` (caller did not canonicalize).
     let via_junction = folder_at("j", "j", "C:\\Work\\Link\\Docs", "Docs", 1, 10);
-    assert_eq!(store.record(&via_junction).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&via_junction).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     // 8.3 short name of a long exclusion root.
     let mut store = ActivityStore::in_memory().unwrap();
     store.exclude_root("C:\\Program Files\\Secret").unwrap();
@@ -215,7 +243,12 @@ fn offline_entities_are_kept_and_not_treated_as_deleted() {
     .into_iter()
     .enumerate()
     {
-        let mut receipt = folder(&format!("o{index}"), &format!("o{index}"), 0, 1_000 + index as u64);
+        let mut receipt = folder(
+            &format!("o{index}"),
+            &format!("o{index}"),
+            0,
+            1_000 + index as u64,
+        );
         receipt.entity.availability = availability.clone();
         assert_eq!(store.record(&receipt).unwrap(), RecordOutcome::NewEpisode);
     }
@@ -247,7 +280,10 @@ fn availability_change_updates_entity_without_new_episode_or_identity_loss() {
     assert_eq!(store.record(&offline).unwrap(), RecordOutcome::NewEpisode);
     // Device comes back; same entity id, same volume, a few seconds later.
     let online = folder("d2", "usb", 0, 5_000);
-    assert_eq!(store.record(&online).unwrap(), RecordOutcome::ContinuedEpisode);
+    assert_eq!(
+        store.record(&online).unwrap(),
+        RecordOutcome::ContinuedEpisode
+    );
     let epoch = store.privacy_epoch().unwrap();
     let rows = store
         .recent(0, 10_000, ActivityKind::FolderVisit, epoch, 10)
@@ -264,7 +300,10 @@ fn drive_letter_reuse_with_another_volume_is_rejected_not_silently_retargeted() 
     store.record(&folder("v1", "removable", 0, 1_000)).unwrap();
     let mut reused = folder("v2", "removable", 0, 100_000);
     reused.entity.volume_id = "another-volume".into();
-    assert!(store.record(&reused).is_err(), "volume change under the same entity id");
+    assert!(
+        store.record(&reused).is_err(),
+        "volume change under the same entity id"
+    );
     // Failed record must roll back completely.
     assert_eq!(store.episode_count().unwrap(), 1);
     // The event id of the failed attempt is not consumed.
@@ -299,7 +338,10 @@ fn failed_or_invalid_navigation_receipts_leave_no_trace_and_do_not_burn_ids() {
     assert_eq!(store.episode_count().unwrap(), 0);
     assert!(recent_ids(&mut store, 100).is_empty());
     // The IDs of the rejected receipts are still available for a valid retry.
-    assert_eq!(store.record(&folder("f1", "f1", 0, 10)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("f1", "f1", 0, 10)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
 }
 
 #[test]
@@ -316,7 +358,9 @@ fn late_receipts_from_a_cancelled_or_pre_clear_navigation_are_dropped_by_epoch()
     assert_eq!(store.record(&queued).unwrap(), RecordOutcome::StaleEpoch);
     // Current-epoch receipt while paused is ignored, not stored.
     assert_eq!(
-        store.record(&folder("paused", "paused", after_pause, 30)).unwrap(),
+        store
+            .record(&folder("paused", "paused", after_pause, 30))
+            .unwrap(),
         RecordOutcome::Ignored
     );
     assert_eq!(store.episode_count().unwrap(), 0);
@@ -345,7 +389,14 @@ fn restart_and_session_restore_replay_do_not_inflate_counts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("restore.sqlite3");
     let receipts: Vec<ActivityReceipt> = (0..500)
-        .map(|i| folder(&format!("r{i}"), &format!("restore-{}", i % 50), 0, 1_000 + i * 60_000))
+        .map(|i| {
+            folder(
+                &format!("r{i}"),
+                &format!("restore-{}", i % 50),
+                0,
+                1_000 + i * 60_000,
+            )
+        })
         .collect();
     let baseline;
     {
@@ -396,10 +447,16 @@ fn duplicate_event_or_action_ids_are_idempotent_regardless_of_other_fields() {
     let mut same_action = first.clone();
     same_action.event_id = "other-event".into();
     same_action.occurred_utc_ms = 10 * DAY;
-    assert_eq!(store.record(&same_action).unwrap(), RecordOutcome::Duplicate);
+    assert_eq!(
+        store.record(&same_action).unwrap(),
+        RecordOutcome::Duplicate
+    );
     // Same event id on a different entity must not leak onto it either.
     let other_entity = folder("ev-1", "someone-else", 0, 2_000);
-    assert_eq!(store.record(&other_entity).unwrap(), RecordOutcome::Duplicate);
+    assert_eq!(
+        store.record(&other_entity).unwrap(),
+        RecordOutcome::Duplicate
+    );
     assert_eq!(store.episode_count().unwrap(), 1);
     assert_eq!(recent_ids(&mut store, 11 * DAY), vec!["dup"]);
 }
@@ -407,14 +464,20 @@ fn duplicate_event_or_action_ids_are_idempotent_regardless_of_other_fields() {
 #[test]
 fn cross_pane_hooks_within_cooldown_form_one_episode_with_window_boundary() {
     let mut store = ActivityStore::in_memory().unwrap();
-    assert_eq!(store.record(&folder("p1", "x", 0, 100_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("p1", "x", 0, 100_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     // Second pane/window, different event/action IDs, 29.999 s later: same episode.
     assert_eq!(
         store.record(&folder("p2", "x", 0, 129_999)).unwrap(),
         RecordOutcome::ContinuedEpisode
     );
     // Exactly 30 s after the episode's *last* timestamp starts a new episode.
-    assert_eq!(store.record(&folder("p3", "x", 0, 159_999)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("p3", "x", 0, 159_999)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     assert_eq!(store.episode_count().unwrap(), 2);
 }
 
@@ -424,17 +487,29 @@ fn two_store_handles_on_one_file_share_cooldown_like_two_windows() {
     let path = dir.path().join("multi.sqlite3");
     let mut window_a = ActivityStore::open(&path).unwrap();
     let mut window_b = ActivityStore::open(&path).unwrap();
-    assert_eq!(window_a.record(&folder("a1", "shared", 0, 10_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        window_a.record(&folder("a1", "shared", 0, 10_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     assert_eq!(
         window_b.record(&folder("b1", "shared", 0, 12_000)).unwrap(),
         RecordOutcome::ContinuedEpisode
     );
-    assert_eq!(window_a.record(&folder("a2", "shared", 0, 14_000)).unwrap(), RecordOutcome::ContinuedEpisode);
-    assert_eq!(window_b.record(&folder("b1", "shared", 0, 12_000)).unwrap(), RecordOutcome::Duplicate);
+    assert_eq!(
+        window_a.record(&folder("a2", "shared", 0, 14_000)).unwrap(),
+        RecordOutcome::ContinuedEpisode
+    );
+    assert_eq!(
+        window_b.record(&folder("b1", "shared", 0, 12_000)).unwrap(),
+        RecordOutcome::Duplicate
+    );
     assert_eq!(window_a.episode_count().unwrap(), 1);
     // A privacy change in one window invalidates the other's queued write.
     let epoch = window_a.set_recording_enabled(false).unwrap();
-    assert_eq!(window_b.record(&folder("b2", "shared", 0, 16_000)).unwrap(), RecordOutcome::StaleEpoch);
+    assert_eq!(
+        window_b.record(&folder("b2", "shared", 0, 16_000)).unwrap(),
+        RecordOutcome::StaleEpoch
+    );
     assert_eq!(window_b.privacy_epoch().unwrap(), epoch);
 }
 
@@ -446,7 +521,10 @@ fn two_store_handles_on_one_file_share_cooldown_like_two_windows() {
 #[test]
 fn out_of_order_cross_pane_receipt_inside_cooldown_continues_the_episode() {
     let mut store = ActivityStore::in_memory().unwrap();
-    assert_eq!(store.record(&folder("n1", "ooo", 0, 20_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("n1", "ooo", 0, 20_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
     // Older timestamp (pane B's commit was stamped earlier but delivered later).
     let outcome = store.record(&folder("n2", "ooo", 0, 15_000)).unwrap();
     assert_eq!(outcome, RecordOutcome::ContinuedEpisode);
@@ -466,7 +544,10 @@ fn one_thousand_refresh_style_receipts_collapse_into_one_episode() {
     let start = 1_000_000_u64;
     let mut outcomes = [0usize; 2];
     for i in 0..1_000_u64 {
-        match store.record(&folder(&format!("rf{i}"), "refreshed", 0, start + i * 100)).unwrap() {
+        match store
+            .record(&folder(&format!("rf{i}"), "refreshed", 0, start + i * 100))
+            .unwrap()
+        {
             RecordOutcome::NewEpisode => outcomes[0] += 1,
             RecordOutcome::ContinuedEpisode => outcomes[1] += 1,
             other => panic!("unexpected outcome {other:?}"),
@@ -499,23 +580,47 @@ fn bulk_sync_of_ten_thousand_files_does_not_touch_access_counts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sync.sqlite3");
     let mut store = ActivityStore::open(&path).unwrap();
-    store.record(&file_open("real-open", "report", 0, 5_000)).unwrap();
+    store
+        .record(&file_open("real-open", "report", 0, 5_000))
+        .unwrap();
     let started = std::time::Instant::now();
     for i in 0..10_000_u64 {
-        let mut receipt = file_open(&format!("sync-{i}"), &format!("synced-{i:05}"), 0, 10_000 + i);
+        let mut receipt = file_open(
+            &format!("sync-{i}"),
+            &format!("synced-{i:05}"),
+            0,
+            10_000 + i,
+        );
         receipt.source = ReceiptSource::JobCompleted;
         receipt.kind = ActivityKind::OperationCompleted;
         assert_eq!(store.record(&receipt).unwrap(), RecordOutcome::Ignored);
     }
     let elapsed = started.elapsed();
-    assert_eq!(store.episode_count().unwrap(), 1, "only the explicit open counts");
+    assert_eq!(
+        store.episode_count().unwrap(),
+        1,
+        "only the explicit open counts"
+    );
     drop(store);
     let raw = Connection::open(&path).unwrap();
-    let entities: i64 = raw.query_row("SELECT COUNT(*) FROM activity_entities", [], |r| r.get(0)).unwrap();
-    let vocab: i64 = raw.query_row("SELECT COUNT(*) FROM activity_vocabulary", [], |r| r.get(0)).unwrap();
-    let receipts: i64 = raw.query_row("SELECT COUNT(*) FROM activity_receipts", [], |r| r.get(0)).unwrap();
-    assert_eq!((entities, vocab, receipts), (1, 1, 1), "ignored receipts must not create entities/vocabulary/receipt rows");
-    assert!(elapsed.as_secs() < 60, "10k ignored receipts took {elapsed:?}");
+    let entities: i64 = raw
+        .query_row("SELECT COUNT(*) FROM activity_entities", [], |r| r.get(0))
+        .unwrap();
+    let vocab: i64 = raw
+        .query_row("SELECT COUNT(*) FROM activity_vocabulary", [], |r| r.get(0))
+        .unwrap();
+    let receipts: i64 = raw
+        .query_row("SELECT COUNT(*) FROM activity_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        (entities, vocab, receipts),
+        (1, 1, 1),
+        "ignored receipts must not create entities/vocabulary/receipt rows"
+    );
+    assert!(
+        elapsed.as_secs() < 60,
+        "10k ignored receipts took {elapsed:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +631,11 @@ fn bulk_sync_of_ten_thousand_files_does_not_touch_access_counts() {
 fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
     let profile = tempfile::tempdir().unwrap();
     // Fresh profile: directory does not exist yet; open() must create it.
-    let db_path = profile.path().join("appdata").join("activity").join("activity.sqlite3");
+    let db_path = profile
+        .path()
+        .join("appdata")
+        .join("activity")
+        .join("activity.sqlite3");
     assert!(!db_path.exists());
     let now = 20 * DAY + 3_600_000;
 
@@ -537,12 +646,27 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, SCHEMA_VERSION, "fresh profile starts at the current schema");
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "fresh profile starts at the current schema"
+        );
         assert!(store.recording_enabled().unwrap());
         let epoch = store.privacy_epoch().unwrap();
         assert_eq!(epoch, 0);
-        assert!(store.recent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().unwrap().is_empty());
-        assert!(store.frequent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().unwrap().is_empty());
+        assert!(
+            store
+                .recent(0, now, ActivityKind::FolderVisit, epoch, 20)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .frequent(0, now, ActivityKind::FolderVisit, epoch, 20)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
         let mut serial = 0;
         let mut visit = |store: &mut ActivityStore, id: &str, name: &str, day: u64, offset: u64| {
             serial += 1;
@@ -570,7 +694,10 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
         assert_eq!(store.episode_count().unwrap(), 8);
     }
 
-    assert!(db_path.exists(), "session 1 must have created the database file");
+    assert!(
+        db_path.exists(),
+        "session 1 must have created the database file"
+    );
 
     // --- session 2: restart ---------------------------------------------------
     let mut store = ActivityStore::open(&db_path).unwrap();
@@ -578,17 +705,26 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
     assert_eq!(epoch, 0);
     assert_eq!(store.episode_count().unwrap(), 8);
 
-    let recent = store.recent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().unwrap();
+    let recent = store
+        .recent(0, now, ActivityKind::FolderVisit, epoch, 20)
+        .unwrap()
+        .unwrap();
     let ids: Vec<&str> = recent.iter().map(|row| row.entity.id.as_str()).collect();
     // Last-access descending: invoices d19+2000 < reports d19+1000? invoices is later in-day.
     assert_eq!(ids, vec!["invoices", "reports", "quarry"]);
     assert_eq!(recent[1].episode_count, 4);
-    let files = store.recent(0, now, ActivityKind::FileOpenRequested, epoch, 20).unwrap().unwrap();
+    let files = store
+        .recent(0, now, ActivityKind::FileOpenRequested, epoch, 20)
+        .unwrap()
+        .unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].entity.id, "budget");
 
     // Frequent needs >= 2 distinct active UTC days: reports first, then invoices.
-    let frequent = store.frequent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().unwrap();
+    let frequent = store
+        .frequent(0, now, ActivityKind::FolderVisit, epoch, 20)
+        .unwrap()
+        .unwrap();
     let ids: Vec<&str> = frequent.iter().map(|row| row.entity.id.as_str()).collect();
     assert_eq!(ids, vec!["reports", "invoices"]);
     assert_eq!(frequent[0].active_days, 4);
@@ -605,8 +741,16 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
             .collect()
     };
     assert_eq!(search(&mut store, "reports"), vec!["reports"]);
-    assert_eq!(search(&mut store, "reoprts"), vec!["reports"], "transposition typo");
-    assert_eq!(search(&mut store, "quarry"), vec!["quarry"], "visited once, old, not in Frequent");
+    assert_eq!(
+        search(&mut store, "reoprts"),
+        vec!["reports"],
+        "transposition typo"
+    );
+    assert_eq!(
+        search(&mut store, "quarry"),
+        vec!["quarry"],
+        "visited once, old, not in Frequent"
+    );
     assert!(search(&mut store, "never visited folder").is_empty());
     let located = store
         .locator_candidates("work!\\reports", ActivityKind::FolderVisit, epoch, 5)
@@ -619,22 +763,73 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
     let new_epoch = store.privacy_epoch().unwrap();
     assert_eq!(new_epoch, epoch + 1);
     // Queries from the pre-forget epoch are late and must return nothing.
-    assert!(store.recent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().is_none());
-    assert!(store.frequent(0, now, ActivityKind::FolderVisit, epoch, 20).unwrap().is_none());
-    assert!(store.search_candidates("reports", ActivityKind::FolderVisit, epoch, 20).unwrap().is_none());
+    assert!(
+        store
+            .recent(0, now, ActivityKind::FolderVisit, epoch, 20)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .frequent(0, now, ActivityKind::FolderVisit, epoch, 20)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .search_candidates("reports", ActivityKind::FolderVisit, epoch, 20)
+            .unwrap()
+            .is_none()
+    );
     // Current-epoch queries: gone from every surface, others intact, files untouched.
-    let recent_after = store.recent(0, now, ActivityKind::FolderVisit, new_epoch, 20).unwrap().unwrap();
+    let recent_after = store
+        .recent(0, now, ActivityKind::FolderVisit, new_epoch, 20)
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        recent_after.iter().map(|r| r.entity.id.as_str()).collect::<Vec<_>>(),
+        recent_after
+            .iter()
+            .map(|r| r.entity.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["invoices", "quarry"]
     );
-    assert!(store.search_candidates("reports", ActivityKind::FolderVisit, new_epoch, 20).unwrap().unwrap().is_empty());
-    assert!(store.search_candidates("reoprts", ActivityKind::FolderVisit, new_epoch, 20).unwrap().unwrap().is_empty());
-    let frequent_after = store.frequent(0, now, ActivityKind::FolderVisit, new_epoch, 20).unwrap().unwrap();
-    assert_eq!(frequent_after.iter().map(|r| r.entity.id.as_str()).collect::<Vec<_>>(), vec!["invoices"]);
+    assert!(
+        store
+            .search_candidates("reports", ActivityKind::FolderVisit, new_epoch, 20)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .search_candidates("reoprts", ActivityKind::FolderVisit, new_epoch, 20)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    let frequent_after = store
+        .frequent(0, now, ActivityKind::FolderVisit, new_epoch, 20)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frequent_after
+            .iter()
+            .map(|r| r.entity.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["invoices"]
+    );
     // A queued/late receipt from before the forget cannot resurrect it.
     assert_eq!(
-        store.record(&folder_at("late", "reports", "C:\\Work\\Reports", "Reports", epoch, 20 * DAY)).unwrap(),
+        store
+            .record(&folder_at(
+                "late",
+                "reports",
+                "C:\\Work\\Reports",
+                "Reports",
+                epoch,
+                20 * DAY
+            ))
+            .unwrap(),
         RecordOutcome::StaleEpoch
     );
     drop(store);
@@ -645,9 +840,19 @@ fn e2e_fresh_profile_visits_restart_recent_frequent_search_forget() {
     assert_eq!(recent_ids(&mut store, now), vec!["invoices", "quarry"]);
     assert_eq!(store.episode_count().unwrap(), 4);
     // A deliberate new visit after forgetting starts from scratch (count 1).
-    let again = folder_at("again", "reports", "C:\\Work\\Reports", "Reports", new_epoch, 20 * DAY + 1_000);
+    let again = folder_at(
+        "again",
+        "reports",
+        "C:\\Work\\Reports",
+        "Reports",
+        new_epoch,
+        20 * DAY + 1_000,
+    );
     assert_eq!(store.record(&again).unwrap(), RecordOutcome::NewEpisode);
-    let rows = store.recent(0, now, ActivityKind::FolderVisit, new_epoch, 20).unwrap().unwrap();
+    let rows = store
+        .recent(0, now, ActivityKind::FolderVisit, new_epoch, 20)
+        .unwrap()
+        .unwrap();
     assert_eq!(rows[0].entity.id, "reports");
     assert_eq!(rows[0].episode_count, 1);
     assert!(store.recording_enabled().unwrap());
@@ -662,15 +867,28 @@ fn e2e_pause_exclude_and_clear_persist_across_restart() {
         store.record(&folder("k1", "keep", 0, 1_000)).unwrap();
         let paused = store.set_recording_enabled(false).unwrap();
         assert_eq!(paused, 1);
-        assert_eq!(store.record(&folder("k2", "paused-visit", paused, 2_000)).unwrap(), RecordOutcome::Ignored);
+        assert_eq!(
+            store
+                .record(&folder("k2", "paused-visit", paused, 2_000))
+                .unwrap(),
+            RecordOutcome::Ignored
+        );
     }
     {
         let mut store = ActivityStore::open(&db_path).unwrap();
-        assert!(!store.recording_enabled().unwrap(), "pause persists across restart");
+        assert!(
+            !store.recording_enabled().unwrap(),
+            "pause persists across restart"
+        );
         assert_eq!(store.privacy_epoch().unwrap(), 1);
         let resumed = store.set_recording_enabled(true).unwrap();
         assert_eq!(resumed, 2);
-        assert_eq!(store.record(&folder("k3", "resumed", resumed, 3_000)).unwrap(), RecordOutcome::NewEpisode);
+        assert_eq!(
+            store
+                .record(&folder("k3", "resumed", resumed, 3_000))
+                .unwrap(),
+            RecordOutcome::NewEpisode
+        );
         let epoch = store.clear_all().unwrap();
         assert_eq!(epoch, 3);
     }
@@ -678,9 +896,18 @@ fn e2e_pause_exclude_and_clear_persist_across_restart() {
     assert_eq!(store.privacy_epoch().unwrap(), 3);
     assert_eq!(store.episode_count().unwrap(), 0);
     assert!(recent_ids(&mut store, 10_000).is_empty());
-    assert!(store.search_candidates("keep", ActivityKind::FolderVisit, 3, 10).unwrap().unwrap().is_empty());
+    assert!(
+        store
+            .search_candidates("keep", ActivityKind::FolderVisit, 3, 10)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
     // Receipt IDs of cleared history can be reused (no stale dedup row survives).
-    assert_eq!(store.record(&folder("k1", "keep", 3, 20_000)).unwrap(), RecordOutcome::NewEpisode);
+    assert_eq!(
+        store.record(&folder("k1", "keep", 3, 20_000)).unwrap(),
+        RecordOutcome::NewEpisode
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +998,10 @@ mod bench {
         ];
         let mut lower = 0u128;
         for (upper, name) in edges {
-            let count = samples.iter().filter(|s| **s >= lower && **s < upper).count();
+            let count = samples
+                .iter()
+                .filter(|s| **s >= lower && **s < upper)
+                .count();
             lower = upper;
             if count == 0 {
                 continue;
@@ -787,7 +1017,9 @@ mod bench {
         drop(ActivityStore::open(path).unwrap()); // create schema
         let started = Instant::now();
         let mut connection = Connection::open(path).unwrap();
-        connection.execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;").unwrap();
+        connection
+            .execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;")
+            .unwrap();
         let tx = connection.transaction().unwrap();
         {
             let mut entity = tx
@@ -821,7 +1053,9 @@ mod bench {
                     availability: Availability::Available,
                 })
                 .unwrap();
-                entity.execute(params![id, locator, name, metadata]).unwrap();
+                entity
+                    .execute(params![id, locator, name, metadata])
+                    .unwrap();
                 let lower = name.to_lowercase();
                 vocab.execute(params![id, lower]).unwrap();
                 let chars: Vec<char> = lower.chars().collect();
@@ -854,11 +1088,15 @@ mod bench {
     /// row per transaction): the fixed floor any write-through record() pays.
     fn disk_floor(dir: &Path) {
         let connection = Connection::open(dir.join("floor.sqlite3")).unwrap();
-        connection.execute_batch("CREATE TABLE t(a INTEGER);").unwrap();
+        connection
+            .execute_batch("CREATE TABLE t(a INTEGER);")
+            .unwrap();
         let mut samples = Vec::new();
         for i in 0..400 {
             let started = Instant::now();
-            connection.execute("INSERT INTO t VALUES (?1)", [i]).unwrap();
+            connection
+                .execute("INSERT INTO t VALUES (?1)", [i])
+                .unwrap();
             samples.push(micros(started.elapsed()));
         }
         println!("disk floor (raw rusqlite 1-row autocommit insert, same dir):");
@@ -879,7 +1117,14 @@ mod bench {
         let mut first_batch = Vec::new();
         for i in 0..N {
             let id = format!("live-{i:05}");
-            let mut receipt = folder_at(&format!("n{i}"), &id, &format!("C:\\Live\\{id}"), &format!("Live Folder {i}"), epoch, t0 + i * 40_000);
+            let mut receipt = folder_at(
+                &format!("n{i}"),
+                &id,
+                &format!("C:\\Live\\{id}"),
+                &format!("Live Folder {i}"),
+                epoch,
+                t0 + i * 40_000,
+            );
             receipt.entity.volume_id = "C:".into();
             let started = Instant::now();
             assert_eq!(store.record(&receipt).unwrap(), RecordOutcome::NewEpisode);
@@ -890,7 +1135,14 @@ mod bench {
             // Existing seeded entity: new episode (>30 s after its last access).
             let index = (i * 7919) % entities;
             let id = format!("bench-{index:07}");
-            let mut receipt = folder_at(&format!("x{i}"), &id, &format!("C:\\Bench\\{index:07}"), "Folder Series", epoch, t0 + DAY + i * 40_000);
+            let mut receipt = folder_at(
+                &format!("x{i}"),
+                &id,
+                &format!("C:\\Bench\\{index:07}"),
+                "Folder Series",
+                epoch,
+                t0 + DAY + i * 40_000,
+            );
             receipt.entity.volume_id = "C:".into();
             // Keep display name consistent with the seeded entity kind of name.
             receipt.entity.display_name = match index % 10 {
@@ -907,7 +1159,10 @@ mod bench {
             again.action_id = format!("act-c{i}");
             again.occurred_utc_ms += 2_000;
             let started = Instant::now();
-            assert_eq!(store.record(&again).unwrap(), RecordOutcome::ContinuedEpisode);
+            assert_eq!(
+                store.record(&again).unwrap(),
+                RecordOutcome::ContinuedEpisode
+            );
             continued.push(micros(started.elapsed()));
         }
         for receipt in &first_batch {
@@ -923,7 +1178,9 @@ mod bench {
             assert_eq!(store.record(&receipt).unwrap(), RecordOutcome::Ignored);
             ignored.push(micros(started.elapsed()));
         }
-        println!("record() overhead per call (navigation hook cost on this DB; on-disk, default journal, fsync per commit):");
+        println!(
+            "record() overhead per call (navigation hook cost on this DB; on-disk, default journal, fsync per commit):"
+        );
         report("new entity + new episode", &mut new_entity);
         report("existing entity + new episode", &mut existing_new_episode);
         report("continued episode (<30 s)", &mut continued);
@@ -934,10 +1191,16 @@ mod bench {
     fn run(label: &str, entities: u64, episodes_per_entity: u64) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bench.sqlite3");
-        println!("=== {label}: {entities} entities x {episodes_per_entity} episodes = {} episodes ===", entities * episodes_per_entity);
+        println!(
+            "=== {label}: {entities} entities x {episodes_per_entity} episodes = {} episodes ===",
+            entities * episodes_per_entity
+        );
         let seed_time = seed(&path, entities, episodes_per_entity);
         let size = std::fs::metadata(&path).unwrap().len();
-        println!("seed time {seed_time:.1?}; db file {:.1} MiB", size as f64 / 1_048_576.0);
+        println!(
+            "seed time {seed_time:.1?}; db file {:.1} MiB",
+            size as f64 / 1_048_576.0
+        );
 
         // Startup: open() on an existing, current-schema DB. Page cache is warm
         // (just written) so this is a warm-start number; first-ever open after
@@ -967,23 +1230,30 @@ mod bench {
         // Upgrade path: pretend the DB was last written by schema v9, so open()
         // must create + rebuild the rank table (what a v9 user pays once).
         if SCHEMA_VERSION != 10 {
-            println!("migration simulation skipped: written for v9 -> v10, current schema is v{SCHEMA_VERSION}");
+            println!(
+                "migration simulation skipped: written for v9 -> v10, current schema is v{SCHEMA_VERSION}"
+            );
         } else {
             {
                 let connection = Connection::open(&path).unwrap();
-                connection.execute_batch("DROP TABLE activity_entity_rank; PRAGMA user_version = 9;").unwrap();
+                connection
+                    .execute_batch("DROP TABLE activity_entity_rank; PRAGMA user_version = 9;")
+                    .unwrap();
             }
             let started = Instant::now();
             let store = ActivityStore::open(&path);
             let took = started.elapsed();
             match store {
-                Ok(_) => println!("one-time migration v9 -> v{SCHEMA_VERSION} (rank rebuild) on this DB: {took:.2?}"),
-                Err(error) => println!("migration v9 -> v{SCHEMA_VERSION} could not be simulated: {error}"),
+                Ok(_) => println!(
+                    "one-time migration v9 -> v{SCHEMA_VERSION} (rank rebuild) on this DB: {took:.2?}"
+                ),
+                Err(error) => {
+                    println!("migration v9 -> v{SCHEMA_VERSION} could not be simulated: {error}")
+                }
             }
         }
         println!();
     }
-
 
     /// Baseline: same on-disk setup with a tiny DB, to separate the fixed
     /// per-commit cost (journal + fsync) from cost that scales with DB size.

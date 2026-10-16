@@ -55,10 +55,22 @@ fn search(store: &mut ActivityStore, q: &str) -> Vec<ActivityEntity> {
 fn rename_refreshes_recent_frequent_labels_and_search_index() {
     let mut store = ActivityStore::in_memory().unwrap();
     store
-        .record(&receipt(1, "C:\\Work\\Alphaproject", "C:\\Work", "Alphaproject", DAY + 1))
+        .record(&receipt(
+            1,
+            "C:\\Work\\Alphaproject",
+            "C:\\Work",
+            "Alphaproject",
+            DAY + 1,
+        ))
         .unwrap();
     store
-        .record(&receipt(2, "C:\\Work\\Alphaproject", "C:\\Work", "Alphaproject", 2 * DAY + 1))
+        .record(&receipt(
+            2,
+            "C:\\Work\\Alphaproject",
+            "C:\\Work",
+            "Alphaproject",
+            2 * DAY + 1,
+        ))
         .unwrap();
     assert_eq!(search(&mut store, "alphaproject").len(), 1);
 
@@ -96,7 +108,11 @@ fn rename_refreshes_recent_frequent_labels_and_search_index() {
     assert!(search(&mut store, "alphaproject").is_empty());
     assert!(search(&mut store, "alpha").is_empty());
     // Candidates are gram-based: a surviving old name would still be returned.
-    assert!(search(&mut store, "alphaproject").iter().all(|e| e.display_name != "Alphaproject"));
+    assert!(
+        search(&mut store, "alphaproject")
+            .iter()
+            .all(|e| e.display_name != "Alphaproject")
+    );
 }
 
 #[test]
@@ -106,10 +122,21 @@ fn renaming_a_parent_updates_descendant_parent_paths_and_keeps_their_names() {
         .record(&receipt(1, "C:\\Work\\Old", "C:\\Work", "Old", DAY + 1))
         .unwrap();
     store
-        .record(&receipt(2, "C:\\Work\\Old\\Sub", "C:\\Work\\Old", "Sub", DAY + 2))
+        .record(&receipt(
+            2,
+            "C:\\Work\\Old\\Sub",
+            "C:\\Work\\Old",
+            "Sub",
+            DAY + 2,
+        ))
         .unwrap();
     store
-        .apply_change(&rename(1, "C:\\Work\\Old", "C:\\Work\\New", FsChangeKind::Rename))
+        .apply_change(&rename(
+            1,
+            "C:\\Work\\Old",
+            "C:\\Work\\New",
+            FsChangeKind::Rename,
+        ))
         .unwrap();
     let recent = store
         .recent(0, 100 * DAY, ActivityKind::FolderVisit, 0, 10)
@@ -117,14 +144,24 @@ fn renaming_a_parent_updates_descendant_parent_paths_and_keeps_their_names() {
         .unwrap();
     let mut got: Vec<(String, String, String)> = recent
         .into_iter()
-        .map(|r| (r.entity.display_name, r.entity.parent_path, r.entity.locator))
+        .map(|r| {
+            (
+                r.entity.display_name,
+                r.entity.parent_path,
+                r.entity.locator,
+            )
+        })
         .collect();
     got.sort();
     assert_eq!(
         got,
         vec![
             ("New".into(), "C:\\Work".into(), "C:\\Work\\New".into()),
-            ("Sub".into(), "C:\\Work\\New".into(), "C:\\Work\\New\\Sub".into()),
+            (
+                "Sub".into(),
+                "C:\\Work\\New".into(),
+                "C:\\Work\\New\\Sub".into()
+            ),
         ]
     );
     assert_eq!(search(&mut store, "sub").len(), 1);
