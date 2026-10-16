@@ -299,18 +299,25 @@ pub fn run() {
             }));
             app.handle().manage(queue);
             // FER-514 P3-7: the app's own state folders are off limits to the generic file ops.
-            protected_dirs::register(
-                [
-                    profile::config_dir(app.handle()),
-                    profile::data_dir(app.handle()),
-                    profile::activity_dir(app.handle()),
-                    profile::local_data_dir(app.handle()),
-                    // The whole test-profile root when a smoke run isolates the profile.
-                    profile::profile_dir(),
-                ]
-                .into_iter()
-                .flatten(),
-            );
+            // A folder that cannot be determined is logged, not dropped silently.
+            let protected: Vec<std::path::PathBuf> = [
+                ("config", profile::config_dir(app.handle())),
+                ("data", profile::data_dir(app.handle())),
+                ("activity", profile::activity_dir(app.handle())),
+                ("local data", profile::local_data_dir(app.handle())),
+                // The whole test-profile root when a smoke run isolates the profile (absent
+                // in a normal run, which is not worth a warning).
+                ("test profile", profile::profile_dir()),
+            ]
+            .into_iter()
+            .filter_map(|(name, dir)| {
+                if dir.is_none() && name != "test profile" {
+                    log::warn!("protected folder ({name}) could not be determined");
+                }
+                dir
+            })
+            .collect();
+            protected_dirs::register(protected);
             // FER-471: live copy-thread state for the progress dialog.
             let control_handle = app.handle().clone();
             copy_pool::set_state_sink(Box::new(move |state| {
