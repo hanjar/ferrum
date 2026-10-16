@@ -136,6 +136,12 @@ leases(id TEXT PK, holder_kind TEXT, holder_pid INTEGER, holder_created INTEGER,
   requester (diagnostic UIs use `holder_kind` / `run_id` only). All manual leases of the process are released
   when the webview reloads its page. Known limit: a wall-clock jump forward of more than 30 s makes live
   leases look stale for at most one heartbeat (5 s); a step back is tolerated up to 5 minutes.
+  Accepted limit (FER-549): navigating away in the middle of a copy releases the manual lease while the
+  backend copy job already queued keeps running without a lease, so another holder may take the same
+  folders meanwhile. No baseline is written in that case (the settle code died with the page, and
+  `sync_baseline_save` needs a lease anyway), so the baseline stays consistent; only the copy itself is
+  unprotected. The reload release runs off the UI thread and an acquire racing with it is discarded
+  (registry epoch).
 - `sync_baseline_save` (existing command) MUST refuse with `lease_required` unless the calling process holds a lease
   covering both roots (manual lease or run lease). This makes concurrent baseline writes impossible across
   processes.
