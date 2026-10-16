@@ -76,8 +76,10 @@ impl Drop for DirHandle {
     }
 }
 
-/// Open the extraction root. Rejects reparse-point roots: the caller chose a
-/// real directory; a junction there means it no longer resolves as named.
+/// Open the extraction root. Rejects reparse-point roots and anything that is not a directory:
+/// the caller chose a real directory; a junction there means it no longer resolves as named.
+/// Links in the ANCESTORS of `path` are resolved by the OS as usual; callers that must reject
+/// those compare [`final_path`] with the path they recorded.
 #[allow(dead_code)]
 pub fn open_root(path: &Path) -> Result<DirHandle, PublishError> {
     #[cfg(windows)]
@@ -85,28 +87,57 @@ pub fn open_root(path: &Path) -> Result<DirHandle, PublishError> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
+            CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
         };
 
-        // Reparse check BEFORE open: opening with FILE_FLAG_OPEN_REPARSE_POINT
-        // yields a filtered handle that cannot parent NtCreateFile children.
-        use std::os::windows::fs::MetadataExt;
-        let attrs = std::fs::metadata(path)
-            .map(|m| m.file_attributes())
-            .map_err(PublishError::io)?;
-        if attrs & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(PublishError::Reparse);
-        }
-
-        let mut wide: Vec<u16> = path
+        let wide: Vec<u16> = path
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
+        let close = |h| unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        };
+
+        // Step 1: look at the object NAMED by `path` itself, without following it. A handle
+        // opened with FILE_FLAG_OPEN_REPARSE_POINT is filtered and cannot parent NtCreateFile
+        // children, so it is only used to inspect and to remember the object's identity.
+        // (`std::fs::metadata` follows links and would report the junction's TARGET.)
+        let probe = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if probe == INVALID_HANDLE_VALUE || probe.is_null() {
+            return Err(PublishError::io(io::Error::last_os_error()));
+        }
+        let probed = (|| {
+            if is_reparse(probe)? {
+                return Err(PublishError::Reparse);
+            }
+            let attrs = handle_attributes(probe).map_err(PublishError::io)?;
+            if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(PublishError::WrongKind);
+            }
+            object_id(probe).map_err(PublishError::io)
+        })();
+        close(probe);
+        let wanted = probed?;
+
+        // Step 2: open the usable handle (children are created through it), then prove ON THE
+        // HANDLE that it is the very object inspected in step 1. A name swapped for a junction,
+        // symlink or another directory between the two opens has another identity: refused.
         let handle = unsafe {
             CreateFileW(
-                wide.as_mut_ptr(),
+                wide.as_ptr(),
                 // GENERIC_WRITE carries FILE_ADD_FILE/FILE_ADD_SUBDIRECTORY,
                 // required to create children through this handle; DELETE is
                 // needed to roll back empty directories created by the run.
@@ -121,7 +152,24 @@ pub fn open_root(path: &Path) -> Result<DirHandle, PublishError> {
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
             return Err(PublishError::io(io::Error::last_os_error()));
         }
-        let _ = &mut wide;
+        let verified = (|| {
+            if is_reparse(handle)? {
+                return Err(PublishError::Reparse);
+            }
+            let attrs = handle_attributes(handle).map_err(PublishError::io)?;
+            if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(PublishError::WrongKind);
+            }
+            if object_id(handle).map_err(PublishError::io)? != wanted {
+                // The name now resolves to something else than what was inspected.
+                return Err(PublishError::Reparse);
+            }
+            Ok(())
+        })();
+        if let Err(e) = verified {
+            close(handle);
+            return Err(e);
+        }
         Ok(DirHandle {
             handle,
             created_for_rollback: false,
@@ -317,93 +365,64 @@ pub fn modified_ms(parent: &DirHandle, name: &OsStr) -> Option<i64> {
     }
 }
 
-/// Delete an open file through its own descriptor (POSIX semantics on
-/// Windows). The name disappears even if the path was swapped.
+/// Unlink `name` via the parent's own descriptor (no path resolution). A directory is only
+/// removed when empty. The entry is opened WITHOUT following a reparse point/symlink: when the
+/// name turned into a link (swapped in after the caller created a real entry there), the link
+/// is left untouched and `Err(Reparse)` is returned. Nothing behind a link is ever removed, and
+/// a link that this run did not create is not this run's to delete.
 #[allow(dead_code)]
-pub fn delete_open_file(file: std::fs::File) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Wdk::Storage::FileSystem::FILE_DISPOSITION_POSIX_SEMANTICS;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx, SetFileInformationByHandle,
-        };
-        let handle = std::os::windows::io::AsRawHandle::as_raw_handle(&file)
-            as windows_sys::Win32::Foundation::HANDLE;
-        let info = FILE_DISPOSITION_INFO_EX {
-            Flags: FILE_DISPOSITION_POSIX_SEMANTICS,
-        };
-        let ok = unsafe {
-            SetFileInformationByHandle(
-                handle,
-                FileDispositionInfoEx,
-                &info as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
-            )
-        };
-        if ok == 0 {
-            // Pre-1809 fallback: classic disposition (delete on close).
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_DISPOSITION_INFO, FileDispositionInfo,
-            };
-            let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
-            unsafe {
-                SetFileInformationByHandle(
-                    handle,
-                    FileDispositionInfo,
-                    &classic as *const _ as *const core::ffi::c_void,
-                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-                );
-            }
-        }
-        drop(file); // last handle closed; the name disappears
-    }
-    #[cfg(unix)]
-    {
-        // Unix rollback unlinks through the parent's fd (see unlink_entry);
-        // closing alone leaves the name, so callers must call unlink_entry.
-        drop(file);
-    }
-}
-
-/// Unlink `name` via the parent's own descriptor (no path resolution).
-#[allow(dead_code)]
-pub fn unlink_entry(parent: &DirHandle, name: &OsStr, is_dir: bool) {
+pub fn unlink_entry(parent: &DirHandle, name: &OsStr, is_dir: bool) -> Result<(), PublishError> {
     #[cfg(windows)]
     {
         let kind = if is_dir {
-            OpenKind::ExistingDirDelete
+            OpenKind::ExistingDirRemove
         } else {
-            OpenKind::ExistingFileDelete
+            OpenKind::ExistingFileRemove
         };
-        match open_windows(name, kind, Some(parent.handle)) {
-            Ok(handle) => {
-                if !matches!(is_reparse(handle), Ok(true)) {
-                    dispose_via_handle(handle);
-                } else {
-                    unsafe {
-                        windows_sys::Win32::Foundation::CloseHandle(handle);
-                    }
-                }
+        let handle = open_windows(name, kind, Some(parent.handle))?;
+        let close = |h| unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        };
+        match is_reparse(handle) {
+            Ok(false) => {}
+            Ok(true) => {
+                close(handle);
+                return Err(PublishError::Reparse);
             }
-            Err(e) => eprintln!(
-                "unlink_entry open failed: {e:?} name={name:?} kind={kind:?} parent_null={}",
-                parent.handle.is_null()
-            ),
+            Err(e) => {
+                close(handle);
+                return Err(e);
+            }
         }
+        let result = set_disposition(handle, false);
+        close(handle);
+        result.map_err(PublishError::io)
     }
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        let Ok(c) = std::ffi::CString::new(name.as_bytes()) else {
-            return;
-        };
-        unsafe {
+        let c = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| PublishError::Io("NUL in name".into()))?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(parent.fd, c.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) }
+            != 0
+        {
+            return Err(PublishError::io(io::Error::last_os_error()));
+        }
+        if libc::S_ISLNK(stat.st_mode) {
+            return Err(PublishError::Reparse);
+        }
+        let rc = unsafe {
             libc::unlinkat(
                 parent.fd,
                 c.as_ptr(),
                 if is_dir { libc::AT_REMOVEDIR } else { 0 },
-            );
+            )
+        };
+        if rc != 0 {
+            return Err(PublishError::io(io::Error::last_os_error()));
         }
+        Ok(())
     }
 }
 
@@ -1013,14 +1032,11 @@ enum OpenKind {
     NewFile,
     ExistingFileTruncate,
     ExistingFileRead,
-    /// Existing file opened with DELETE so POSIX disposition succeeds.
-    ExistingFileDelete,
-    /// Existing (empty) directory opened with DELETE.
-    ExistingDirDelete,
-    /// Sync engine: existing directory opened with DELETE, WITHOUT following a reparse point.
+    /// Existing directory opened with DELETE, WITHOUT following a reparse point (sync engine
+    /// removal and extraction rollback).
     ExistingDirRemove,
-    /// Sync engine: existing file opened with DELETE (delete or rename through the handle),
-    /// WITHOUT following a reparse point.
+    /// Existing file opened with DELETE (delete or rename through the handle), WITHOUT
+    /// following a reparse point (sync engine and extraction rollback).
     ExistingFileRemove,
     /// Sync engine: existing file held open only to read its facts and its final path, sharing
     /// DELETE so the shell can move it meanwhile. No reparse point is followed.
@@ -1137,21 +1153,6 @@ fn open_windows(
                 | FILE_OPEN_REPARSE_POINT
                 | FILE_OPEN_FOR_BACKUP_INTENT,
             FILE_ATTRIBUTE_NORMAL,
-        ),
-        OpenKind::ExistingFileDelete => (
-            // DELETE + READ_ATTRIBUTES (needed for the reparse check), but
-            // WITHOUT SYNCHRONIZE/synchronous-options: that combination is
-            // rejected as INVALID_PARAMETER by NtCreateFile.
-            FILE_DELETE_ACCESS | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
-            FILE_OPEN,
-            FILE_NON_DIRECTORY_FILE,
-            FILE_ATTRIBUTE_NORMAL,
-        ),
-        OpenKind::ExistingDirDelete => (
-            FILE_DELETE_ACCESS | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
-            FILE_OPEN,
-            FILE_DIRECTORY_FILE,
-            0u32,
         ),
         OpenKind::ExistingDirRemove => (
             FILE_DELETE_ACCESS | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
@@ -1289,30 +1290,50 @@ pub fn child_dir_link_aware(parent: &DirHandle, name: &OsStr) -> Result<DirHandl
     child_dir(parent, name)
 }
 
-/// POSIX-delete an open handle (file or empty directory).
+/// File attributes of the object behind an open handle.
 #[cfg(windows)]
-fn dispose_via_handle(handle: windows_sys::Win32::Foundation::HANDLE) {
-    use windows_sys::Wdk::Storage::FileSystem::FILE_DISPOSITION_POSIX_SEMANTICS;
+fn handle_attributes(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<u32> {
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx, SetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
-    let info = FILE_DISPOSITION_INFO_EX {
-        Flags: FILE_DISPOSITION_POSIX_SEMANTICS,
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: valid handle, writable out structure.
+    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.dwFileAttributes)
+}
+
+/// Identity of the object behind an open handle: volume serial plus the 128-bit file id
+/// (`FileIdInfo`; file systems without it fall back to the 64-bit index of the handle info).
+#[cfg(windows)]
+fn object_id(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<(u64, [u8; 16])> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx,
     };
+    let mut id: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: valid handle; `id` is a writable out structure of the given size.
     let ok = unsafe {
-        SetFileInformationByHandle(
+        GetFileInformationByHandleEx(
             handle,
-            FileDispositionInfoEx,
-            &info as *const _ as *const core::ffi::c_void,
-            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+            FileIdInfo,
+            &mut id as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
         )
     };
-    if ok == 0 {
-        eprintln!("dispose POSIX failed: {}", io::Error::last_os_error());
+    if ok != 0 {
+        return Ok((id.VolumeSerialNumber, id.FileId.Identifier));
     }
-    unsafe {
-        windows_sys::Win32::Foundation::CloseHandle(handle);
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: valid handle, writable out structure.
+    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
     }
+    let mut file_id = [0u8; 16];
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    file_id[..8].copy_from_slice(&index.to_le_bytes());
+    Ok((u64::from(info.dwVolumeSerialNumber), file_id))
 }
 
 // ── Unix implementation ─────────────────────────────────────────────────
@@ -1382,4 +1403,124 @@ fn is_reparse(fd: std::os::unix::io::RawFd) -> Result<bool, PublishError> {
         return Err(PublishError::io(io::Error::last_os_error()));
     }
     Ok(libc::S_ISLNK(stat.st_mode))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_junction(link: &Path, target: &Path) {
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "mklink /J failed (junctions need no privilege)");
+    }
+
+    fn name(s: &str) -> &OsStr {
+        OsStr::new(s)
+    }
+
+    #[test]
+    fn open_root_accepts_a_real_directory_and_creates_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = open_root(tmp.path()).unwrap();
+        let child = create_dir_new(&root, name("kid")).unwrap();
+        drop(child);
+        assert!(tmp.path().join("kid").is_dir());
+    }
+
+    #[test]
+    fn open_root_rejects_a_junction_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        make_junction(&link, &real);
+        assert!(matches!(open_root(&link), Err(PublishError::Reparse)));
+        // Nothing was created through the link.
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn open_root_rejects_a_plain_file_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        assert!(matches!(open_root(&file), Err(PublishError::WrongKind)));
+    }
+
+    #[test]
+    fn open_root_reports_a_missing_root_as_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            open_root(&tmp.path().join("nope")),
+            Err(PublishError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn unlink_entry_really_removes_an_empty_directory_and_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = open_root(tmp.path()).unwrap();
+        drop(create_dir_new(&root, name("d")).unwrap());
+        drop(create_file_new(&root, name("f.bin")).unwrap());
+        assert!(tmp.path().join("d").is_dir());
+        assert!(tmp.path().join("f.bin").is_file());
+        unlink_entry(&root, name("d"), true).unwrap();
+        unlink_entry(&root, name("f.bin"), false).unwrap();
+        assert!(!tmp.path().join("d").exists());
+        assert!(!tmp.path().join("f.bin").exists());
+    }
+
+    #[test]
+    fn unlink_entry_leaves_a_non_empty_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = open_root(tmp.path()).unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        fs::write(tmp.path().join("d").join("keep.txt"), b"keep").unwrap();
+        assert!(unlink_entry(&root, name("d"), true).is_err());
+        assert_eq!(
+            fs::read(tmp.path().join("d").join("keep.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn unlink_entry_does_not_follow_a_junction_planted_in_the_staging_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        // The run "created" `d`; someone swapped it for a junction to an empty folder outside.
+        make_junction(&staging.join("d"), &outside);
+        let root = open_root(&staging).unwrap();
+        assert!(matches!(
+            unlink_entry(&root, name("d"), true),
+            Err(PublishError::Reparse)
+        ));
+        // Neither the target nor the link was removed.
+        assert!(outside.is_dir(), "junction target must survive");
+        assert!(staging.join("d").exists(), "foreign link is left alone");
+    }
+
+    #[test]
+    fn unlink_entry_keeps_the_contents_behind_a_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("precious.txt"), b"data").unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        make_junction(&staging.join("d"), &outside);
+        let root = open_root(&staging).unwrap();
+        let _ = unlink_entry(&root, name("d"), true);
+        let _ = unlink_entry(&root, name("d"), false);
+        assert_eq!(fs::read(outside.join("precious.txt")).unwrap(), b"data");
+    }
 }
