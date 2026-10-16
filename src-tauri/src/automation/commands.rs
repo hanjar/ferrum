@@ -828,6 +828,10 @@ pub fn lease_acquire_in(
             "lease_busy",
             "Too many folder pairs are being synchronized at once",
         )),
+        ManualAcquire::Reloaded => Err(CommandError::new(
+            "lease_busy",
+            "The page was reloaded while the folders were being locked; try again",
+        )),
     }
 }
 
@@ -836,6 +840,19 @@ pub fn lease_acquire_in(
 /// `lib.rs`. Returns how many leases were released.
 pub fn release_manual_leases_on_page_load(state: &AutomationState) -> usize {
     state.leases.release_all()
+}
+
+/// Hook variant of [`release_manual_leases_on_page_load`] for the WebView2 UI thread: only
+/// drains the registry (no I/O) and hands the guards to a blocking worker, because dropping a
+/// guard joins its heartbeat thread and deletes its row (busy timeout up to 5 s per lease).
+/// Returns how many leases were handed off.
+pub fn release_manual_leases_on_page_load_async(state: &AutomationState) -> usize {
+    let guards = state.leases.take_all();
+    let n = guards.len();
+    if n > 0 {
+        tauri::async_runtime::spawn_blocking(move || drop(guards));
+    }
+    n
 }
 
 /// `sync_lease_release` core: idempotent. Only a token this process was given releases

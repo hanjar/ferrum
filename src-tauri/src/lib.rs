@@ -259,15 +259,19 @@ pub fn run() {
         .manage(hotlist::store::Store::new())
         .manage(ai::commands::AiState::default())
         .manage(ai::approval::ApprovalLedger::new())
-        // A reload or crash recovery of the webview loses the JavaScript that holds manual sync
-        // lease tokens; release them so folders do not stay locked (Automation P0.4). Started =
-        // WebView2 ContentLoading: fires for every new document, including F5 / DevTools reload.
+        // A reload or full navigation of the webview (F5, DevTools reload) loses the JavaScript
+        // that holds manual sync lease tokens; release them so folders do not stay locked
+        // (Automation P0.4). Started = WebView2 ContentLoading: fires for every new document.
+        // There is no ProcessFailed handler: after a renderer crash nothing reloads by itself,
+        // and the leases stay until Ferrum exits (the process probe then lets the next acquire
+        // reclaim them). The hook runs on the UI thread, so it only drains the registry; the
+        // guards are dropped on a blocking worker.
         .on_page_load(|webview, payload| {
             use tauri::Manager;
             if payload.event() == tauri::webview::PageLoadEvent::Started
                 && let Some(state) = webview.try_state::<automation::commands::AutomationState>()
             {
-                automation::commands::release_manual_leases_on_page_load(&state);
+                automation::commands::release_manual_leases_on_page_load_async(&state);
             }
         })
         .setup(move |app| {
