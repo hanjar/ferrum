@@ -151,9 +151,10 @@ function injectTauriMock(page: Page) {
     }
 
     interface RunningScan {
+      scanId: string;
       cancelled: boolean;
+      completed: boolean;
       model: MockModel;
-      timers: ReturnType<typeof setTimeout>[];
     }
 
     interface ListenArgs {
@@ -179,8 +180,20 @@ function injectTauriMock(page: Page) {
       starts: string[];
       cancels: string[];
       scans: Map<string, RunningScan>;
+      activeScanId: string | null;
+      holdScan: boolean;
+      scanStartWaiters: ((scan: RunningScan) => void)[];
       nextId: number;
-    } = { handlers: {}, starts: [], cancels: [], scans: new Map(), nextId: 1 };
+    } = {
+      handlers: {},
+      starts: [],
+      cancels: [],
+      scans: new Map(),
+      activeScanId: null,
+      holdScan: false,
+      scanStartWaiters: [],
+      nextId: 1,
+    };
 
     /** Build the full snapshot model of the frozen fixture. */
     function buildModel(scanId: string): MockModel {
@@ -442,37 +455,75 @@ function injectTauriMock(page: Page) {
       });
     }
 
+    function emitComplete(scan: RunningScan, scanId: string): void {
+      if (scan.cancelled || scan.completed) return;
+      scan.completed = true;
+      const s = scan.model.stats as Record<string, unknown>;
+      emit(scanId, {
+        ...s,
+        coverage: 'complete',
+        errors: [],
+        topChildren: [],
+        done: true,
+        cancelled: false,
+      });
+    }
+
+    function waitForActiveScan(): Promise<RunningScan> {
+      const current = state.activeScanId ? state.scans.get(state.activeScanId) : undefined;
+      if (current && !current.cancelled && !current.completed) {
+        return Promise.resolve(current);
+      }
+      return new Promise<RunningScan>((resolve) => {
+        state.scanStartWaiters.push(resolve);
+      });
+    }
+
     function startScan(): string {
       const scanId = `du-scan-${state.nextId}`;
       state.nextId++;
       state.starts.push(scanId);
-      const scan: RunningScan = { cancelled: false, model: buildModel(scanId), timers: [] };
-      state.scans.set(scanId, scan);
-      const schedule = (ms: number, fn: () => void) => {
-        const t = setTimeout(() => {
-          if (!scan.cancelled) fn();
-        }, ms);
-        scan.timers.push(t);
+      const scan: RunningScan = {
+        scanId,
+        cancelled: false,
+        completed: false,
+        model: buildModel(scanId),
       };
-      schedule(30, () => emitProgress(scan, scanId, 0.3));
-      schedule(60, () => emitProgress(scan, scanId, 0.6));
-      schedule(90, () => {
-        const s = scan.model.stats as Record<string, unknown>;
-        emit(scanId, {
-          ...s,
-          coverage: 'complete',
-          errors: [],
-          topChildren: [],
-          done: true,
-          cancelled: false,
-        });
-      });
+      state.scans.set(scanId, scan);
+      state.activeScanId = scanId;
+      const waiters = state.scanStartWaiters.splice(0);
+      for (const w of waiters) w(scan);
+      if (!state.holdScan) {
+        emitProgress(scan, scanId, 0.3);
+        emitProgress(scan, scanId, 0.6);
+        emitComplete(scan, scanId);
+      }
       return scanId;
     }
 
     (window as unknown as Record<string, unknown>).__duLog = {
       get starts(): string[] {
         return state.starts;
+      },
+    };
+    (window as unknown as Record<string, unknown>).__duScan = {
+      hold(): void {
+        state.holdScan = true;
+      },
+      isActive(): boolean {
+        const current = state.activeScanId ? state.scans.get(state.activeScanId) : undefined;
+        return !!current && !current.cancelled && !current.completed;
+      },
+      async progress(frac: number): Promise<void> {
+        const scan = await waitForActiveScan();
+        if (!scan.cancelled && !scan.completed) {
+          emitProgress(scan, scan.scanId, frac);
+        }
+      },
+      async complete(): Promise<void> {
+        const scan = await waitForActiveScan();
+        state.holdScan = false;
+        emitComplete(scan, scan.scanId);
       },
     };
     (window as unknown as Record<string, unknown>).__duEmit = (event: string, payload: unknown) => {
@@ -553,7 +604,7 @@ function injectTauriMock(page: Page) {
           const scan = state.scans.get(scanId);
           if (!scan) return Promise.resolve(false);
           scan.cancelled = true;
-          for (const t of scan.timers) clearTimeout(t);
+          state.holdScan = false;
           emitCancelled(scan, scanId);
           return Promise.resolve(true);
         }
@@ -674,6 +725,35 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
   const filesGrid = () => page.locator('.paneGrid');
   const startsLog = () =>
     page.evaluate(() => (window as unknown as { __duLog: { starts: string[] } }).__duLog.starts);
+  const holdScan = () =>
+    page.evaluate(() => (window as unknown as { __duScan: { hold: () => void } }).__duScan.hold());
+  /** Fail fast (5 s, clear message) instead of hanging in the page-side waiter. */
+  const expectScanActive = () =>
+    expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            (window as unknown as { __duScan: { isActive: () => boolean } }).__duScan.isActive(),
+          ),
+        { timeout: 5_000, message: 'scan never started (held scan is not active)' },
+      )
+      .toBe(true);
+  const emitScanProgress = async (frac: number) => {
+    await expectScanActive();
+    await page.evaluate(
+      (f) =>
+        (
+          window as unknown as { __duScan: { progress: (frac: number) => Promise<void> } }
+        ).__duScan.progress(f),
+      frac,
+    );
+  };
+  const completeScan = async () => {
+    await expectScanActive();
+    await page.evaluate(() =>
+      (window as unknown as { __duScan: { complete: () => Promise<void> } }).__duScan.complete(),
+    );
+  };
 
   /** Enter the workspace via a pane toolbar button (Alt+Shift+D's same entry). */
   async function openWorkspace(button = 'Scan') {
@@ -705,12 +785,16 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
   });
 
   test('scan runs progressive without percent/ETA, then completes with fixture totals', async () => {
+    await holdScan();
     await openWorkspace();
     // Progressive rules (states.md rule 2): counts arrive, NO percent/ETA.
     await expect(workspace().getByText('tanpa persen-selesai dan tanpa ETA')).toBeVisible();
     await expect(chip()).toHaveText('Scanning…');
+    await emitScanProgress(0.3);
+    await emitScanProgress(0.6);
     // Preview rows stream from event topChildren before the final event.
     await expect(rowByName('Projects')).toBeVisible();
+    await completeScan();
     // Final: complete chip + fixture counts (15 files / 13 folders).
     await expect(chip()).toHaveText('Complete', { timeout: 5_000 });
     await expect(counts()).toHaveText(`${EXPECTED_FILES} files · ${EXPECTED_DIRS} folders`);
@@ -837,7 +921,9 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
   });
 
   test('cancel mid-scan lands on cancelled partial (never complete), totals kept', async () => {
+    await holdScan();
     await openWorkspace();
+    await emitScanProgress(0.3);
     await expect(chip()).toHaveText('Scanning…');
     await workspace().getByRole('button', { name: 'Cancel' }).first().click();
     await expect(chip()).toHaveText('Cancelled', { timeout: 5_000 });
