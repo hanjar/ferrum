@@ -428,6 +428,8 @@ fn test_rar_create_tree_unicode_empty_dir_matches_zip() {
         limits: limits(),
         password: None,
     };
+    // The application installs the destination guard at startup; extraction refuses without it.
+    ferrum_lib::install_extract_guard();
     RarProvider::new()
         .extract(&extract_req, &mut |_| true)
         .expect("RAR extract succeeds");

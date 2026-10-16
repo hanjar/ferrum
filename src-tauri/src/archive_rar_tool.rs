@@ -143,7 +143,7 @@ impl std::fmt::Display for RarValidationError {
             Self::SymlinkRefused(path) => {
                 write!(
                     f,
-                    "Path is a symlink or junction, which is refused for security: {path}.                      Choose the real folder (junctions such as Scoop's 'current' are not accepted)"
+                    "Path is a symlink or junction, which is refused for security: {path}. Choose the real folder (junctions such as Scoop's 'current' are not accepted)"
                 )
             }
             Self::NotRegularFile(path) => {

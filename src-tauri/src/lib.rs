@@ -372,8 +372,15 @@ pub fn run() {
 
 /// FER-559: no archive entry may land in a Windows Startup folder (see `startup_guard`).
 pub fn install_extract_guard() {
-    archive_extract::set_entry_guard(|destination, rels| {
-        startup_guard::check_extraction(destination, rels.iter().copied()).map_err(|e| e.message)
+    archive_extract::set_entry_guard(archive_extract::ExtractGuard {
+        entries: |destination, rels| {
+            startup_guard::check_extraction(destination, rels.iter().copied())
+                .map_err(|e| e.message)
+        },
+        final_dir: |dir| {
+            startup_guard::check_into(&path_guard::strip_verbatim(&dir.to_string_lossy()))
+                .map_err(|e| e.message)
+        },
     });
 }
 

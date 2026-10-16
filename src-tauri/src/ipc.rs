@@ -3172,6 +3172,10 @@ fn report_failures(outcome: &crate::codecs::CodecReport) -> Result<(), FsError> 
 #[tauri::command]
 pub async fn comment_set(path: String, comment: Option<String>) -> Result<(), FsError> {
     let path = prepare_source(&path)?;
+    // The comment is stored in a sidecar (descript.ion) next to the item: a write into its folder.
+    if let Some(parent) = Path::new(&crate::path_guard::strip_verbatim(&path)).parent() {
+        crate::startup_guard::check_into(&parent.to_string_lossy())?;
+    }
     spawn_blocking(move || crate::comments::set_comment(&path, comment.as_deref()))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
@@ -3977,6 +3981,108 @@ mod fer512_ipc_gate_tests {
         let plan = plan_for(&[("Startup/f.txt", EntryKind::File)]);
         let err = run(&plan, tmp.path()).unwrap_err();
         assert!(!err.message.contains("Startup"), "{}", err.message);
+    }
+
+    /// FER-559 rework 2: an 8.3 short name hides the Startup folder from the lexical check
+    /// (`STARTM~1/Programs/Startup/...` extracted into `...\Windows`). The final path of every
+    /// folder the extractor opens is vetoed too. When the volume has no short name for
+    /// `Start Menu`, only the final-path veto function is exercised.
+    #[cfg(windows)]
+    #[test]
+    fn a_short_name_alias_of_the_startup_folder_is_refused_by_the_final_path_check() {
+        use crate::archive_contract::{ArchiveConflictPolicy, ArchiveErrorCode, ArchiveLimits};
+        use crate::archive_extract::{Entry, EntryKind, extract, preflight};
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        crate::install_extract_guard();
+        let startup =
+            crate::profile::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Startup)
+                .expect("startup folder");
+        let start_menu = startup.parent().unwrap().parent().unwrap().to_path_buf();
+        let windows_dir = start_menu.parent().unwrap().to_path_buf();
+        let short_of = |p: &std::path::Path| -> Option<String> {
+            let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: NUL-terminated input, writable output buffer of the given length.
+            let n = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+                    wide.as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                )
+            } as usize;
+            (n > 0 && n < buf.len()).then(|| {
+                std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        // The veto function itself: the final path of Startup is refused, a sibling is not.
+        let guard_dir = |p: &str| {
+            let mut ok = true;
+            crate::startup_guard::check_into(p).unwrap_or_else(|_| ok = false);
+            ok
+        };
+        assert!(!guard_dir(&startup.to_string_lossy()));
+        // A comment is a descript.ion sidecar write into the item's folder.
+        let item = startup
+            .join("ferrum-test-do-not-keep.txt")
+            .to_string_lossy()
+            .into_owned();
+        let err =
+            tauri::async_runtime::block_on(super::comment_set(item, Some("c".into()))).unwrap_err();
+        assert!(err.message.contains("Startup"), "{}", err.message);
+        assert!(!startup.join("descript.ion").exists());
+        assert!(guard_dir(&start_menu.to_string_lossy()));
+
+        let limits = ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        };
+        let alias = short_of(&start_menu).filter(|s| s.contains('~'));
+        let Some(alias) = alias else {
+            eprintln!("8.3 names are off on this volume: only the final-path veto was exercised");
+            return;
+        };
+        let name = format!("{alias}/Programs/Startup/ferrum-test-do-not-keep.txt");
+        let entries = [Entry {
+            raw_name: &name,
+            kind: EntryKind::File,
+            expanded_size: None,
+            compressed_size: None,
+            modified_ms: None,
+        }];
+        let plan = preflight(&entries, &limits).unwrap();
+        // The lexical check cannot see it ...
+        assert!(
+            crate::startup_guard::check_extraction(
+                &windows_dir,
+                plan.entries().iter().map(|e| e.relative_path.as_path())
+            )
+            .is_ok(),
+            "the alias is invisible to the lexical check, which is the point of the final-path veto"
+        );
+        // ... the extractor's per-folder final-path veto does.
+        let err = extract(
+            &plan,
+            &windows_dir,
+            &limits,
+            ArchiveConflictPolicy::Skip,
+            |_, _| {
+                Err(crate::archive_contract::ArchiveError::new(
+                    ArchiveErrorCode::Io,
+                    "stream reached",
+                ))
+            },
+            || false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::UnsafeEntry, "{err:?}");
+        assert!(err.message.contains("Startup"), "{}", err.message);
+        assert!(!startup.join("ferrum-test-do-not-keep.txt").exists());
     }
 
     /// FER-559 S1: a plain source next to a verbatim target must not defeat the "same path" and
