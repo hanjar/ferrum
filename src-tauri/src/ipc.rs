@@ -3733,7 +3733,7 @@ mod fer512_ipc_gate_tests {
         // The engine itself refuses a reserved name in the plain spelling (no device write).
         let plain_src = format!(r"{src}\nul");
         let out = run_copy(
-            &[plain_src.clone()],
+            std::slice::from_ref(&plain_src),
             &dst,
             ConflictPolicy::Overwrite,
             &cancel,
@@ -3798,7 +3798,7 @@ mod fer512_ipc_gate_tests {
         let v = crate::path_guard::verbatim_path(&plain);
         std::fs::write(format!(r"{v}\nul"), b"x").unwrap();
         let prepared = super::prepare_source(&format!(r"{plain}\nul")).unwrap();
-        let r = crate::mutations::delete_to_trash(&[prepared.clone()]);
+        let r = crate::mutations::delete_to_trash(std::slice::from_ref(&prepared));
         assert_eq!(r.deleted, 0);
         assert_eq!(r.failed.len(), 1);
         assert!(
@@ -3807,7 +3807,7 @@ mod fer512_ipc_gate_tests {
             r.failed
         );
         assert!(std::path::Path::new(&prepared).exists(), "untouched");
-        let r = crate::mutations::delete_permanent(&[prepared.clone()]);
+        let r = crate::mutations::delete_permanent(std::slice::from_ref(&prepared));
         assert_eq!(r.deleted, 1, "{:?}", r.failed);
         assert!(!std::path::Path::new(&prepared).exists());
         let _ = std::fs::remove_dir_all(&v);
