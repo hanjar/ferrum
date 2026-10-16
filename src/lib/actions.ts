@@ -850,6 +850,12 @@ export const actions: Action[] = [
     run: () => (ui.activityOpen = true),
   },
   {
+    id: 'sync.profiles.open',
+    label: 'Sync & Backup: Sync profiles',
+    group: 'Commands',
+    run: () => (ui.syncProfilesOpen = true),
+  },
+  {
     id: 'palette.open',
     label: 'Command palette',
     group: 'Commands',

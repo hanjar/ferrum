@@ -25,7 +25,7 @@ function paneIdOf(el: Element | null): PaneId | undefined {
  */
 export function handlePaneTab(e: KeyboardEvent): boolean {
   if (e.ctrlKey || e.metaKey || e.altKey || e.key !== 'Tab') return false;
-  if (ui.settingsOpen || ui.activityOpen) return false;
+  if (ui.settingsOpen || ui.activityOpen || ui.syncProfilesOpen) return false;
   if (contextMenu.isOpen || historyMenu.isOpen || hotlist.menuOpen) return false;
   const t = e.target instanceof Element ? e.target : null;
   if (t?.closest(OWN_TAB_SCOPES)) return false;

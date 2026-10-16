@@ -233,6 +233,26 @@
           </div>
         </div>
       {/if}
+      <div class="section" role="group" aria-label="Sync & Backup">
+        <div class="sectionTitle">Sync &amp; Backup</div>
+        <button class="item" onclick={() => (ui.syncProfilesOpen = true)}>
+          <span class="row">
+            <span class="itemIcon"><Icon name="queue" size={15} /></span>
+            <span class="label">Sync profiles</span>
+          </span>
+        </button>
+        <button
+          class="item"
+          disabled
+          aria-disabled="true"
+          title="Automation arrives in a later release"
+        >
+          <span class="row">
+            <span class="itemIcon"><Icon name="clock" size={15} /></span>
+            <span class="label">Automation</span>
+          </span>
+        </button>
+      </div>
     </nav>
   {/if}
 </aside>
@@ -311,6 +331,12 @@
   }
   .item:hover {
     background: var(--hover);
+  }
+  .item:disabled {
+    opacity: 0.5;
+  }
+  .item:disabled:hover {
+    background: transparent;
   }
   .row {
     display: flex;

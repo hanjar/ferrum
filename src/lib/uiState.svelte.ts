@@ -147,6 +147,8 @@ class UiState {
   paletteOpen: boolean = $state(false);
   settingsOpen: boolean = $state(false);
   activityOpen: boolean = $state(false);
+  /** Sync & Backup > Sync profiles page (Automation P0.5), a full page like Activity. */
+  syncProfilesOpen: boolean = $state(false);
   /** Global "show hidden files" (D08) — one switch for both panes. */
   showHidden: boolean = $state(false);
   /** Comments column (F2-27 Show > Comments) — one switch for both panes. */
