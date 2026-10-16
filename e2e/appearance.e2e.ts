@@ -1,15 +1,25 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 // FER-370 APP-05 — browser-mode E2E (vite webServer). Persistence across a
 // real app restart needs the Tauri backend and is covered by the desktop
 // run; here we verify apply-immediately semantics on the live document.
 
+async function bootApp(page: Page) {
+  await page.goto('/');
+  await expect(page.locator('[data-pane="0"] .row[data-path]').first()).toBeVisible();
+}
+
+async function openSettings(page: Page) {
+  await bootApp(page);
+  await page.keyboard.press('Control+,');
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 test.describe('Settings → Appearance', () => {
   test('palette/mode/density/icons/font apply immediately to the document', async ({ page }) => {
-    await page.goto('/');
-    await page.keyboard.press('Control+,');
-    const dialog = page.getByRole('dialog', { name: 'Settings' });
-    await expect(dialog).toBeVisible();
+    const dialog = await openSettings(page);
 
     await dialog.getByRole('radio', { name: 'Fresh Mint' }).click();
     await dialog.getByRole('radio', { name: 'Light' }).click();
@@ -40,9 +50,7 @@ test.describe('Settings → Appearance', () => {
   test('radiogroup keyboard: ArrowRight moves the color selection (radio semantics)', async ({
     page,
   }) => {
-    await page.goto('/');
-    await page.keyboard.press('Control+,');
-    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    const dialog = await openSettings(page);
     const violet = dialog.getByRole('radio', { name: 'Pop Violet' });
     await violet.click();
     await violet.press('ArrowRight');
@@ -54,19 +62,10 @@ test.describe('Settings → Appearance', () => {
   test('context menu: Open Terminal Here on a folder wires through to the shell store', async ({
     page,
   }) => {
-    const logs: string[] = [];
-    page.on('console', (m) => logs.push(`${m.type()}: ${m.text()}`));
-    page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`));
-    await page.goto('/');
-    const folder = page.locator('.row[data-path]', { hasText: 'archive-2025' });
+    await bootApp(page);
+    const folder = page.locator('.row[data-path]', { hasText: 'archive-2025' }).first();
     await folder.click({ button: 'right' });
-    console.log(
-      'E2E-MENU',
-      JSON.stringify(await page.locator('[role=menuitem]').allTextContents()),
-    );
     await page.getByRole('menuitem', { name: 'Open Terminal Here' }).click();
-    await page.waitForTimeout(800);
-    console.log('E2E-DIAG', JSON.stringify(logs));
     // Browser mode has no Tauri backend: the shell store surfaces the
     // unsupported error as a dialog — proving menu → store → IPC wiring.
     await expect(page.getByText('desktop app')).toBeVisible();
@@ -75,9 +74,7 @@ test.describe('Settings → Appearance', () => {
 
 test.describe('Settings → Appearance → Icon theme (FER-478)', () => {
   test('four themes apply immediately and combine with Monochrome', async ({ page }) => {
-    await page.goto('/');
-    await page.keyboard.press('Control+,');
-    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    const dialog = await openSettings(page);
     const group = dialog.getByRole('radiogroup', { name: 'Icon theme' });
     await expect(group.getByRole('radio')).toHaveText(['Line', 'Duotone', 'Label', 'Tile']);
     await expect(group.getByRole('radio', { name: 'Tile' })).toHaveAttribute(

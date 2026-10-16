@@ -206,25 +206,28 @@
   const domKeyOf = (key: string): string => `du-row-${key.replace(/[^A-Za-z0-9_-]/g, '_')}`;
 
   const activeRowDomId = $derived.by(() => {
-    if (activeKey && rows.some((r) => r.domKey === activeKey)) return domKeyOf(activeKey);
+    const match = activeKey ? rows.find((r) => r.id === activeKey) : undefined;
+    if (match) return domKeyOf(match.domKey);
     return rows.length > 0 ? domKeyOf(rows[0].domKey) : undefined;
   });
 
   function currentRow(): TreeRow | undefined {
-    return rows.find((r) => r.domKey === activeKey) ?? rows[0];
+    return (activeKey ? rows.find((r) => r.id === activeKey) : undefined) ?? rows[0];
   }
 
   function activeIndex(): number {
-    const i = rows.findIndex((r) => r.domKey === activeKey);
+    const i = activeKey ? rows.findIndex((r) => r.id === activeKey) : -1;
     return i === -1 ? 0 : i;
   }
 
   /** Move the cursor only (no treemap change). */
   function setActive(row: TreeRow): void {
-    activeKey = row.domKey;
+    activeKey = row.id;
     void tick().then(() => {
+      const cur = rows.find((r) => r.id === row.id);
+      if (!cur) return;
       // jsdom has no scrollIntoView — optional call keeps tests honest.
-      document.getElementById(domKeyOf(row.domKey))?.scrollIntoView?.({ block: 'nearest' });
+      document.getElementById(domKeyOf(cur.domKey))?.scrollIntoView?.({ block: 'nearest' });
     });
   }
 
@@ -240,9 +243,9 @@
     clearTimeout(zoomTimer);
     setActive(row);
     if (row.more) return;
-    const key = row.domKey;
+    const id = row.id;
     zoomTimer = setTimeout(() => {
-      const r = rows.find((x) => x.domKey === key);
+      const r = rows.find((x) => x.id === id && !x.more);
       if (r) syncTreemapTo(r);
     }, ZOOM_DEBOUNCE_MS);
   }
@@ -297,7 +300,7 @@
       const r = rows.find((x) => x.id === target && !x.more);
       if (r) {
         pendingTarget = null;
-        if (r.domKey !== activeKey) {
+        if (r.id !== activeKey) {
           clearTimeout(zoomTimer);
           setActive(r);
         }
@@ -312,7 +315,7 @@
       const r = rows.find((x) => x.id === pendingTarget && !x.more);
       if (r) {
         pendingTarget = null;
-        if (r.domKey !== activeKey) {
+        if (r.id !== activeKey) {
           clearTimeout(zoomTimer);
           setActive(r);
         }
@@ -345,7 +348,7 @@
   /** Next page of a folder's children; the cursor keeps its index. */
   async function loadMore(row: TreeRow): Promise<void> {
     if (!row.more || !row.moreParent || row.page?.loadingMore) return;
-    const at = rows.findIndex((r) => r.domKey === row.domKey);
+    const at = rows.findIndex((r) => r.id === row.id);
     await store.loadChildren(row.moreParent, true);
     await tick();
     const next = rows[Math.min(Math.max(at, 0), rows.length - 1)];
@@ -355,7 +358,7 @@
   /** Cursor step by `delta` rows (clamped at both ends). */
   function moveBy(delta: number): void {
     if (rows.length === 0) return;
-    const i = rows.findIndex((r) => r.domKey === activeKey);
+    const i = activeKey ? rows.findIndex((r) => r.id === activeKey) : -1;
     const next = i === -1 ? 0 : Math.min(rows.length - 1, Math.max(0, i + delta));
     cursorMoved(rows[next]);
   }

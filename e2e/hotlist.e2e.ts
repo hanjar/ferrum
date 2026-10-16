@@ -108,7 +108,9 @@ test.describe('nested hotlist (FER-458)', () => {
   test.beforeEach(async ({ page }) => {
     injectTauriMock(page);
     await page.goto('/');
-    await expect(page.locator('section.pane').first()).toBeVisible();
+    const pane = page.locator('section.pane').first();
+    await expect(pane).toBeVisible();
+    await expect(pane.getByRole('navigation', { name: 'Path' })).toContainText('demo');
     await expect.poll(async () => (await calls(page, 'hotlist_load')).length).toBeGreaterThan(0);
   });
 
