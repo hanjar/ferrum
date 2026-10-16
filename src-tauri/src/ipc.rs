@@ -350,6 +350,7 @@ pub fn create_entry(
 ) -> Result<crate::domain::FileEntry, FsError> {
     check_write_target(&parent)?;
     check_new_name(&name)?;
+    crate::startup_guard::check_name(&parent, &name)?;
     match kind.as_str() {
         "file" => crate::mutations::create_file(&parent, &name),
         "dir" => crate::mutations::create_dir(&parent, &name),
@@ -368,6 +369,9 @@ pub fn rename_entry(
 ) -> Result<crate::domain::FileEntry, FsError> {
     let path = prepare_source(&path)?;
     check_new_name(&new_name)?;
+    if let Some(parent) = Path::new(&path).parent() {
+        crate::startup_guard::check_name(&parent.to_string_lossy(), &new_name)?;
+    }
     let entry = crate::mutations::rename_entry(&path, &new_name)?;
     // The UI and the activity store only ever see the plain spelling.
     let path = crate::path_guard::strip_verbatim(&path);
@@ -446,6 +450,7 @@ pub fn plan_copy(
     target_dir: String,
 ) -> Result<crate::copy_engine::CopyPlan, FsError> {
     check_write_target(&target_dir)?;
+    crate::startup_guard::check_sources_into(&target_dir, &sources)?;
     let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     crate::copy_engine::plan_copy(&sources, &target_dir)
 }
@@ -459,6 +464,7 @@ pub fn enqueue_copy(
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
     check_protected_target(&target_dir)?;
+    crate::startup_guard::check_sources_into(&target_dir, &sources)?;
     let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     let policy = parse_policy(&policy)?;
     let activity_app = app.clone();
@@ -560,6 +566,7 @@ pub fn enqueue_move(
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
     check_protected_target(&target_dir)?;
+    crate::startup_guard::check_sources_into(&target_dir, &sources)?;
     for source in &sources {
         let normalised = crate::path_guard::check_str(source)?;
         check_not_local_unc(&normalised)?;
@@ -810,6 +817,7 @@ pub async fn archive_extract(
 ) -> Result<(), FsError> {
     let archive_path = request.archive_path.clone();
     check_protected_target(&request.destination_path)?;
+    crate::startup_guard::check_extract_into(&request.destination_path)?;
     let provider = archive_provider(&archive_path)?;
     spawn_blocking(move || {
         crate::archive_jobs::run_extract(
@@ -2444,6 +2452,16 @@ pub fn rename_batch(
     pairs: Vec<crate::rename_batch::RenamePair>,
 ) -> Result<crate::rename_batch::RenameBatchReport, FsError> {
     check_write_sources(pairs.iter().map(|p| &p.from))?;
+    for pair in &pairs {
+        // `to` is a bare name or a path; either way its final component is what gets created.
+        if let Some(parent) = Path::new(&pair.from).parent() {
+            let name = Path::new(&pair.to)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| pair.to.clone());
+            crate::startup_guard::check_name(&parent.to_string_lossy(), &name)?;
+        }
+    }
     Ok(crate::rename_batch::rename_batch(&pairs))
 }
 
@@ -2906,6 +2924,7 @@ fn enqueue_combine_parts_on(
 ) -> Result<OperationId, FsError> {
     validate_path(&first_part)?;
     check_write_target(&out_file)?;
+    crate::startup_guard::check_new_path(&out_file)?;
     let policy = parse_output_policy(policy)?;
     let make_body =
         move || crate::file_tools::combine_job(first_part.clone(), out_file.clone(), policy);
@@ -3090,6 +3109,12 @@ pub fn enqueue_decode_files(
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
     check_write_targets(&paths)?;
+    // Decoded names come from the file's content (uuencode headers): not into a Startup folder.
+    for p in &paths {
+        if let Some(parent) = Path::new(p).parent() {
+            crate::startup_guard::check_extract_into(&parent.to_string_lossy())?;
+        }
+    }
     Ok(queue.enqueue(
         crate::domain::OperationKind::Create,
         Box::new(move |cancel, report| {
@@ -3776,12 +3801,40 @@ mod fer512_ipc_gate_tests {
         let r = crate::mutations::delete_to_trash(&[prepared.clone()]);
         assert_eq!(r.deleted, 0);
         assert_eq!(r.failed.len(), 1);
-        assert!(r.failed[0].message.contains("permanent delete"), "{:?}", r.failed);
+        assert!(
+            r.failed[0].message.contains("permanent delete"),
+            "{:?}",
+            r.failed
+        );
         assert!(std::path::Path::new(&prepared).exists(), "untouched");
         let r = crate::mutations::delete_permanent(&[prepared.clone()]);
         assert_eq!(r.deleted, 1, "{:?}", r.failed);
         assert!(!std::path::Path::new(&prepared).exists());
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// FER-559 P3-C: executable names cannot be created in the Startup folders through the
+    /// commands (create_entry here; rename / copy / move / extract / combine share the same
+    /// helper, covered in `startup_guard`). Nothing is created by this test.
+    #[cfg(windows)]
+    #[test]
+    fn create_entry_refuses_executables_in_the_startup_folder() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let startup =
+            crate::profile::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Startup)
+                .expect("startup folder")
+                .to_string_lossy()
+                .into_owned();
+        for name in ["x.bat", "y.CMD", "z.lnk", "w.ps1."] {
+            let err = super::create_entry("file".into(), startup.clone(), name.into()).unwrap_err();
+            assert!(err.message.contains("Startup"), "{name}: {}", err.message);
+        }
+        assert!(
+            crate::startup_guard::check_extract_into(&startup).is_err(),
+            "extract refused"
+        );
     }
 
     /// Info-1: the harness job can never sleep longer than 10 s.

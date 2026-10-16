@@ -320,14 +320,19 @@ pub(crate) fn resolve_local_data_dir_in(
 /// `SHGetKnownFolderPath(FOLDERID_LocalAppData)`: the user's local (non-roaming) app data folder.
 #[cfg(windows)]
 pub(crate) fn known_local_app_data() -> Option<PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+}
+
+/// `SHGetKnownFolderPath(id)` for the current user (FER-559: also the Startup folders).
+#[cfg(windows)]
+pub(crate) fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
     let mut raw: *mut u16 = std::ptr::null_mut();
     // SAFETY: `raw` receives a CoTaskMem-allocated, NUL-terminated wide string on success; it is
     // read once and freed below. A null token means the current user.
-    let hr =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut raw) };
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw) };
     if hr != 0 || raw.is_null() {
         if !raw.is_null() {
             // SAFETY: allocated by the API above.

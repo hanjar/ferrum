@@ -53,6 +53,7 @@ pub mod rename_batch;
 pub mod search;
 pub mod selection_file;
 pub mod shell_open;
+pub mod startup_guard;
 pub mod sync_baseline;
 pub mod sync_engine;
 pub mod sync_incremental;
