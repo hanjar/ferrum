@@ -391,3 +391,25 @@ fn local_locations_refuse_devices_streams_unc_and_link_tags() {
     assert!(!reparse_tag_redirects(0x9000_001A));
     assert!(!reparse_tag_redirects(0x8000_001B));
 }
+
+/// FER-514 rework: the real machine names (GetComputerNameExW) are known and recognised.
+#[cfg(windows)]
+#[test]
+fn this_computers_own_names_are_recognised_as_local() {
+    let names = crate::path_guard::local_machine_names();
+    assert!(!names.is_empty(), "no machine name resolved");
+    for n in names {
+        let unc = format!(r"\\{n}\share\x");
+        assert!(crate::path_guard::is_local_machine_unc(&unc), "{unc}");
+    }
+}
+
+#[test]
+fn strip_verbatim_is_the_inverse_of_verbatim_path() {
+    use crate::path_guard::{strip_verbatim, verbatim_path};
+    for p in [r"C:\a\nul", r"\\srv\share\a"] {
+        assert_eq!(strip_verbatim(&verbatim_path(p)), p);
+    }
+    assert_eq!(strip_verbatim(r"\\?\GLOBALROOT\x"), r"\\?\GLOBALROOT\x");
+    assert_eq!(strip_verbatim(r"C:\plain"), r"C:\plain");
+}

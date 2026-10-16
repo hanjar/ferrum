@@ -90,6 +90,20 @@ fn rar_tool() -> Option<RarTool> {
     Some(validate_confirmed_rar_exe(&p, Some(&fp)).expect("host Rar.exe must validate"))
 }
 
+/// FER-514: Rar.exe is only run from a folder chain no other account can change. A private copy
+/// in %TEMP% therefore only works where %TEMP% itself passes that rule (a clean CI runner or a
+/// single-user PC); on a machine whose %TEMP% grants write access to another account the test
+/// skips instead of failing. The policy itself is covered by unit tests in `archive_rar_tool`.
+fn temp_copy_is_allowed(dir: &Path) -> bool {
+    match ferrum_lib::ai::agent_cli::acl::trusted_location_callback_aware(dir) {
+        Ok(()) => true,
+        Err(why) => {
+            eprintln!("SKIP: temp folder is not a trusted Rar.exe location here: {why}");
+            false
+        }
+    }
+}
+
 fn limits() -> ArchiveLimits {
     ArchiveLimits {
         max_entries: 100_000,
@@ -262,6 +276,9 @@ fn test_rar_create_requires_the_confirmed_fingerprint() {
     fs::create_dir_all(&tool_dir).unwrap();
     let private = tool_dir.join("Rar.exe");
     fs::copy(&host, &private).unwrap();
+    if !temp_copy_is_allowed(&private) {
+        return;
+    }
 
     let src = t.path().join("file.txt");
     fs::write(&src, b"hello").unwrap();
@@ -548,6 +565,9 @@ fn test_rar_create_cfg_switch_ignores_rar_ini_next_to_exe() {
     fs::create_dir_all(&tool_dir).unwrap();
     let private_rar = tool_dir.join("Rar.exe");
     fs::copy(&host, &private_rar).unwrap();
+    if !temp_copy_is_allowed(&private_rar) {
+        return;
+    }
     fs::write(tool_dir.join("rar.ini"), "switches=-df\r\n").unwrap();
 
     // Control: without -cfg- this rar.ini really deletes the source (the trap is armed).

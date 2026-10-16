@@ -84,10 +84,10 @@ describe('selection save dialog (FER-512 dir + name)', () => {
     dialogs.open({ kind: 'saveSelection', parent: 'C:\\Data', names: ['a.txt'] });
     await tick();
     const input = document.querySelector('[role="dialog"] input') as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: 'monday.sel' } });
+    await fireEvent.input(input, { target: { value: 'monday.json' } });
     await fireEvent.click(document.querySelector('[role="dialog"] button.primary')!);
     await tick();
-    expect(selMocks.saveSelectionFile).toHaveBeenCalledWith('C:\\Data', 'monday.sel', ['a.txt']);
+    expect(selMocks.saveSelectionFile).toHaveBeenCalledWith('C:\\Data', 'monday.json', ['a.txt']);
   });
 });
 
