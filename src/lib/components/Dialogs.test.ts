@@ -240,6 +240,35 @@ describe('FER-368: extractConflicts dialog (D21 one-ask)', () => {
   });
 });
 
+describe('FER-549 R2-P3-3: Escape during a running delete', () => {
+  it('does not close (settle) the delete dialog until deleteEntries has finished', async () => {
+    render(Dialogs);
+    let finish!: (r: { requested: number; deleted: number; failed: [] }) => void;
+    mutMocks.deleteEntries.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onSettled = vi.fn();
+    dialogs.open({ kind: 'delete', paths: ['C://x/a.txt'], permanent: false, onSettled });
+    await tick();
+    const del = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
+      (b) => b.textContent === 'Delete',
+    ) as HTMLElement;
+    fireEvent.click(del);
+    await tick();
+    expect(mutMocks.deleteEntries).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document.querySelector('[role="dialog"]') as HTMLElement, { key: 'Escape' });
+    await tick();
+    expect(dialogs.current?.kind).toBe('delete');
+    expect(onSettled).not.toHaveBeenCalled();
+    finish({ requested: 1, deleted: 1, failed: [] });
+    await vi.waitFor(() => expect(dialogs.current).toBeNull());
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('DSK-06.3: completed mutations invalidate a touching scan', () => {
   async function selectReadme() {
     render(App);

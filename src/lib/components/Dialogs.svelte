@@ -411,6 +411,10 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
+      // Like the scrim: a running operation cannot be dismissed. For a sync-driven delete,
+      // closing the dialog settles it, which releases the folder lease while the delete is
+      // still running (FER-549 R2-P3-3).
+      if (busy) return;
       dialogs.close();
     } else if (e.key === 'Enter' && !busy) {
       // FER-460 (review L7): in the scan offer, Enter on a focused button
