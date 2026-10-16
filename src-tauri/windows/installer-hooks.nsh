@@ -87,7 +87,7 @@
       ${OrIf} $PassiveMode = 1
         StrCpy $2 "install --mode-if-new shared"
       ${Else}
-        MessageBox MB_YESNO|MB_ICONQUESTION "Ferrum Indexer$\r$\n$\r$\nApakah PC ini hanya dipakai oleh Anda sendiri?$\r$\n$\r$\nYa = High performance (disarankan untuk PC pribadi): semua file diindeks tanpa filter per pengguna, termasuk nama file di akun lain.$\r$\n$\r$\nTidak = Bersama: hasil difilter sesuai hak akses tiap pengguna, dan profil pengguna lain tidak diindeks.$\r$\n$\r$\nBisa diubah nanti di Ferrum > Settings > Indexer." /SD IDNO IDYES fer474_hp
+        MessageBox MB_YESNO|MB_ICONQUESTION "Ferrum Indexer$\r$\n$\r$\nIs this PC used only by you?$\r$\n$\r$\nYes = High performance (recommended for a personal PC): all files are indexed without per-user filtering, including file names in other accounts.$\r$\n$\r$\nNo = Shared: results are filtered by each user's access rights, and other users' profiles are not indexed.$\r$\n$\r$\nYou can change this later in Ferrum > Settings > Indexer." /SD IDNO IDYES fer474_hp
         StrCpy $2 "install --mode-if-new shared"
         Goto fer474_run
         fer474_hp:
