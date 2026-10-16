@@ -37,14 +37,14 @@ const summary = (over: Partial<ProfileSummary> = {}): ProfileSummary => ({
   ...over,
 });
 
-const preview = (overwrites = 0): SyncPreview => ({
+const preview = (overwrites = 0, deletes = 0): SyncPreview => ({
   previewId: 'pv',
   summary: {
     total: 4,
     toRight: 3,
     toLeft: 0,
     overwrites,
-    deletes: 1,
+    deletes,
     conflicts: 0,
     skipped: 0,
     userSkipped: 0,
@@ -53,7 +53,11 @@ const preview = (overwrites = 0): SyncPreview => ({
   guard: { verdict: 'ok' },
 });
 
-function setup(list: ProfileSummary[], over: Partial<SyncProfilesBackend> = {}) {
+function setup(
+  list: ProfileSummary[],
+  over: Partial<SyncProfilesBackend> = {},
+  onclose?: () => void,
+) {
   const backend = {
     list: vi.fn(async () => list),
     get: vi.fn(),
@@ -65,8 +69,8 @@ function setup(list: ProfileSummary[], over: Partial<SyncProfilesBackend> = {}) 
     ...over,
   } as unknown as SyncProfilesBackend;
   const store = new SyncProfilesStore({ backend, subscribe: async () => () => undefined });
-  render(SyncProfilesPage, { store });
-  return { store, backend };
+  const { unmount } = render(SyncProfilesPage, { store, onclose });
+  return { store, backend, unmount };
 }
 
 describe('SyncProfilesPage', () => {
@@ -105,9 +109,9 @@ describe('SyncProfilesPage', () => {
     await waitFor(() => expect(screen.getByTestId('preview-summary')).toBeTruthy());
     expect(screen.getByTestId('preview-summary').textContent).toContain('2 overwrites');
     await fireEvent.click(run);
-    expect(screen.getByRole('alertdialog', { name: 'Confirm overwrite' })).toBeTruthy();
+    expect(screen.getByRole('alertdialog', { name: 'Confirm run' })).toBeTruthy();
     expect(backend.run).not.toHaveBeenCalled();
-    await fireEvent.click(screen.getByRole('button', { name: 'Overwrite 2 files' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm and run' }));
     await waitFor(() => expect(backend.run).toHaveBeenCalledTimes(1));
     expect(backend.run).toHaveBeenCalledWith({ id: 'p1', previewId: 'pv', confirmOverwrite: true });
   });
@@ -138,5 +142,97 @@ describe('SyncProfilesPage', () => {
     await waitFor(() =>
       expect(screen.getByText(/Canceled in the confirmation dialog/)).toBeTruthy(),
     );
+  });
+
+  it('asks before a Recycle Bin run with deletions and names them (SP-9.4)', async () => {
+    const { backend } = setup([summary()], { preview: vi.fn(async () => preview(0, 3)) });
+    await waitFor(() => expect(screen.getByText('Photos')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Preview sync' }));
+    await waitFor(() => expect(screen.getByTestId('preview-summary')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    const dlg = screen.getByRole('alertdialog', { name: 'Confirm run' });
+    expect(dlg.textContent?.replace(/\s+/g, ' ')).toContain(
+      '3 items will be deleted (Recycle Bin)',
+    );
+    expect(backend.run).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm and run' }));
+    await waitFor(() => expect(backend.run).toHaveBeenCalledTimes(1));
+    expect(backend.run).toHaveBeenCalledWith({
+      id: 'p1',
+      previewId: 'pv',
+      confirmOverwrite: false,
+    });
+  });
+
+  describe('leaving a dirty editor', () => {
+    async function openDirty() {
+      const onclose = vi.fn();
+      const r = setup([], {}, onclose);
+      await waitFor(() => expect(screen.getByTestId('sync-empty')).toBeTruthy());
+      await fireEvent.click(screen.getByRole('button', { name: 'New sync profile' }));
+      await fireEvent.input(screen.getByLabelText('Profile name'), { target: { value: 'x' } });
+      return { ...r, onclose };
+    }
+
+    it('X asks first, keeps the editor on "Keep editing" and closes on "Discard"', async () => {
+      const { store, onclose } = await openDirty();
+      await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      expect(screen.getByRole('alertdialog', { name: 'Discard changes' })).toBeTruthy();
+      expect(onclose).not.toHaveBeenCalled();
+      await fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+      expect(store.editor).not.toBeNull();
+      await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+      expect(onclose).toHaveBeenCalledTimes(1);
+      expect(store.editor).toBeNull();
+    });
+
+    it('Cancel and Escape take the same path and return to the list', async () => {
+      const { store, onclose } = await openDirty();
+      await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.getByRole('alertdialog', { name: 'Discard changes' })).toBeTruthy();
+      await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Sync profiles' }), {
+        key: 'Escape',
+      });
+      expect(screen.queryByRole('alertdialog', { name: 'Discard changes' })).toBeNull();
+      await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Sync profiles' }), {
+        key: 'Escape',
+      });
+      expect(screen.getByRole('alertdialog', { name: 'Discard changes' })).toBeTruthy();
+      await fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+      expect(store.editor).toBeNull();
+      expect(onclose).not.toHaveBeenCalled();
+    });
+
+    it('a clean editor closes straight away and unmounting leaves no editor behind', async () => {
+      const { store, unmount } = setup([], {}, vi.fn());
+      await waitFor(() => expect(screen.getByTestId('sync-empty')).toBeTruthy());
+      await fireEvent.click(screen.getByRole('button', { name: 'New sync profile' }));
+      await fireEvent.input(screen.getByLabelText('Profile name'), { target: { value: 'x' } });
+      expect(store.editor).not.toBeNull();
+      unmount();
+      expect(store.editor).toBeNull();
+    });
+  });
+
+  it('a running status can be hidden to release the buttons', async () => {
+    const store = new SyncProfilesStore({
+      backend: {
+        list: async () => [summary()],
+        preview: async () => preview(),
+        run: async () => ({ runId: 4 }),
+      } as unknown as SyncProfilesBackend,
+      subscribe: async () => {
+        throw new Error('no events');
+      },
+    });
+    render(SyncProfilesPage, { store });
+    await waitFor(() => expect(screen.getByText('Photos')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Preview sync' }));
+    await waitFor(() => expect(screen.getByTestId('preview-summary')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    await waitFor(() => expect(screen.getByText(/Progress isn't available/)).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Hide status' }));
+    expect(screen.queryByText(/Progress isn't available/)).toBeNull();
   });
 });

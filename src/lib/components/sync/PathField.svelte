@@ -13,6 +13,7 @@
     caption = '',
     errors = [],
     activePath,
+    useLabel = 'Use active pane',
     oninput,
   }: {
     id: string;
@@ -22,6 +23,8 @@
     errors?: string[];
     /** Path of the active pane, or undefined when there is none. */
     activePath?: string;
+    /** Text of the shortcut button (the right folder says "Use other pane"). */
+    useLabel?: string;
     oninput?: () => void;
   } = $props();
 
@@ -90,7 +93,7 @@
       onkeydown={onKey}
     />
     <button type="button" class="use" disabled={!activePath} onclick={useActive}>
-      Use active pane
+      {useLabel}
     </button>
   </div>
   {#if items.length > 0}

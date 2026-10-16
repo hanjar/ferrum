@@ -18,7 +18,7 @@ function injectTauriMock(page: Page, seed: SeedProfile[], theme: string) {
       const dir = 'C:\\Users\\demo';
       const calls: { cmd: string; args: Record<string, unknown> }[] = [];
       const runHandlers: number[] = [];
-      const sp = { overwrites: 0, cancelNative: false, forceStale: false };
+      const sp = { overwrites: 0, deletes: 1, cancelNative: false, forceStale: false };
       w.__calls = calls;
       w.__sp = sp;
 
@@ -228,7 +228,7 @@ function injectTauriMock(page: Page, seed: SeedProfile[], theme: string) {
                   toRight: 4,
                   toLeft: 0,
                   overwrites: sp.overwrites,
-                  deletes: 1,
+                  deletes: sp.deletes,
                   conflicts: 0,
                   skipped: 0,
                   userSkipped: 0,
@@ -435,7 +435,7 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
     await expect(row.getByTestId('preview-summary')).toContainText('2 overwrites');
 
     await row.getByRole('button', { name: 'Run now' }).click();
-    const confirm = row.getByRole('alertdialog', { name: 'Confirm overwrite' });
+    const confirm = row.getByRole('alertdialog', { name: 'Confirm run' });
     await expect(confirm).toContainText('2 files will be overwritten');
     expect(await calls(page, 'sync_profile_run')).toHaveLength(0);
 
@@ -444,7 +444,7 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
     expect(await calls(page, 'sync_profile_run')).toHaveLength(0);
 
     await row.getByRole('button', { name: 'Run now' }).click();
-    await row.getByRole('button', { name: 'Overwrite 2 files' }).click();
+    await row.getByRole('button', { name: 'Confirm and run' }).click();
     await expect(row.getByRole('status', { name: 'Run status' })).toContainText(
       'Completed. 5 done.',
     );
@@ -452,8 +452,26 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
     expect(runs).toEqual([{ id: 'p0', previewId: 'pv-p0', confirmOverwrite: true }]);
   });
 
-  test('a run without overwrites starts straight away with confirmOverwrite false', async () => {
+  test('a run with deletions (Recycle Bin) asks first, without any overwrite flag (SP-9.4)', async () => {
     await boot(page, [{ id: 'p0', name: 'Docs', left: 'D:\\Docs', right: 'E:\\Docs' }]);
+    await openPage(page);
+    const row = page.locator('li.profile');
+    await row.getByRole('button', { name: 'Preview sync' }).click();
+    await row.getByRole('button', { name: 'Run now' }).click();
+    const confirm = row.getByRole('alertdialog', { name: 'Confirm run' });
+    await expect(confirm).toContainText('1 item will be deleted (Recycle Bin)');
+    await expect(confirm).not.toContainText('overwritten');
+    expect(await calls(page, 'sync_profile_run')).toHaveLength(0);
+    await confirm.getByRole('button', { name: 'Confirm and run' }).click();
+    await expect(row.getByRole('status', { name: 'Run status' })).toContainText('Completed');
+    expect(await calls(page, 'sync_profile_run')).toEqual([
+      { id: 'p0', previewId: 'pv-p0', confirmOverwrite: false },
+    ]);
+  });
+
+  test('a run with nothing to overwrite or delete starts straight away', async () => {
+    await boot(page, [{ id: 'p0', name: 'Docs', left: 'D:\\Docs', right: 'E:\\Docs' }]);
+    await setMock(page, { deletes: 0 });
     await openPage(page);
     const row = page.locator('li.profile');
     await row.getByRole('button', { name: 'Preview sync' }).click();
@@ -462,6 +480,26 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
     expect(await calls(page, 'sync_profile_run')).toEqual([
       { id: 'p0', previewId: 'pv-p0', confirmOverwrite: false },
     ]);
+  });
+
+  test('closing a dirty editor asks first (X, Cancel and Escape share one path)', async () => {
+    await boot(page);
+    await openPage(page);
+    await page.getByRole('button', { name: 'New sync profile' }).click();
+    const form = page.getByRole('form', { name: 'New sync profile' });
+    await form.getByLabel('Profile name').fill('Draft');
+    await page
+      .getByRole('dialog', { name: 'Sync profiles' })
+      .getByRole('button', { name: 'Close' })
+      .click();
+    const ask = page.getByRole('alertdialog', { name: 'Discard changes' });
+    await expect(ask).toBeVisible();
+    await ask.getByRole('button', { name: 'Keep editing' }).click();
+    await expect(form.getByLabel('Profile name')).toHaveValue('Draft');
+    await form.getByRole('button', { name: 'Cancel' }).click();
+    await expect(ask).toBeVisible();
+    await ask.getByRole('button', { name: 'Discard changes' }).click();
+    await expect(page.getByRole('button', { name: 'New sync profile' })).toBeVisible();
   });
 
   test('a canceled native confirmation is reported and nothing is saved', async () => {

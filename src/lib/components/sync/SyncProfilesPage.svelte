@@ -31,6 +31,8 @@
   });
   onDestroy(() => {
     if (pollTimer) clearTimeout(pollTimer);
+    // However the page went away, no half-edited editor stays behind in the shared store.
+    store.closeEditor();
   });
 
   // The backend answers `checking` for a slow root (SP-8 budget); ask again a few times.
@@ -57,11 +59,24 @@
   function onKey(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     e.preventDefault();
-    if (store.runPrompt) store.cancelOverwrite();
+    if (store.discardTarget) store.discardTarget = null;
+    else if (store.runPrompt) store.cancelRunPrompt();
     else if (store.confirmDeleteId) store.cancelDelete();
-    else if (editor) {
-      if (!editor.dirty) store.closeEditor();
+    else if (editor) store.leaveEditor('list');
+    else onclose?.();
+  }
+
+  /** The X button: with unsaved editor changes it asks first, like Escape and Cancel do. */
+  function closePage() {
+    if (editor) {
+      if (store.leaveEditor('page')) onclose?.();
     } else onclose?.();
+  }
+
+  function discard() {
+    const target = store.discardTarget;
+    store.closeEditor();
+    if (target === 'page') onclose?.();
   }
 
   const runningNow = (id: string) =>
@@ -82,10 +97,20 @@
 >
   <header>
     <h2>{editor ? (editor.id ? 'Edit sync profile' : 'New sync profile') : 'Sync profiles'}</h2>
-    <button class="icon" title="Close" aria-label="Close" onclick={() => onclose?.()}>
+    <button class="icon" title="Close" aria-label="Close" onclick={closePage}>
       <Icon name="close" size={11} />
     </button>
   </header>
+
+  {#if editor && store.discardTarget}
+    <div class="panel confirm" role="alertdialog" aria-label="Discard changes">
+      <p>Discard your unsaved changes to this profile?</p>
+      <div class="buttons">
+        <button type="button" onclick={() => (store.discardTarget = null)}>Keep editing</button>
+        <button type="button" class="danger" onclick={discard}>Discard changes</button>
+      </div>
+    </div>
+  {/if}
 
   {#if editor}
     <SyncProfileEditor
@@ -93,7 +118,7 @@
       {editor}
       activePath={activePane()?.path}
       inactivePath={inactivePane()?.path}
-      oncancel={() => store.closeEditor()}
+      oncancel={() => void store.leaveEditor('list')}
     />
   {:else}
     <div class="toolbar">
@@ -198,18 +223,25 @@
           {/if}
 
           {#if store.runPrompt?.profileId === p.id}
-            <div class="panel confirm" role="alertdialog" aria-label="Confirm overwrite">
-              <p>
-                {store.runPrompt.overwrites}
-                {store.runPrompt.overwrites === 1 ? 'file' : 'files'} will be overwritten on the target
-                side. Overwritten files are replaced in place unless this profile keeps old versions in
-                a versioning folder.
-              </p>
+            {@const rp = store.runPrompt}
+            <div class="panel confirm" role="alertdialog" aria-label="Confirm run">
+              {#if rp.overwrites > 0}
+                <p>
+                  {rp.overwrites}
+                  {rp.overwrites === 1 ? 'file' : 'files'} will be overwritten on the target side. Overwritten
+                  files are replaced in place unless this profile keeps old versions in a versioning folder.
+                </p>
+              {/if}
+              {#if rp.deletes > 0}
+                <p>
+                  {rp.deletes}
+                  {rp.deletes === 1 ? 'item' : 'items'} will be deleted ({p.deleteLabel}).
+                </p>
+              {/if}
               <div class="buttons">
-                <button type="button" onclick={() => store.cancelOverwrite()}>Cancel</button>
-                <button type="button" class="danger" onclick={() => void store.confirmOverwrite()}>
-                  Overwrite {store.runPrompt.overwrites}
-                  {store.runPrompt.overwrites === 1 ? 'file' : 'files'}
+                <button type="button" onclick={() => store.cancelRunPrompt()}>Cancel</button>
+                <button type="button" class="danger" onclick={() => void store.confirmRunPrompt()}>
+                  Confirm and run
                 </button>
               </div>
             </div>
@@ -237,6 +269,13 @@
               {:else if run.status === 'running'}
                 Running{run.phase ? ` (${run.phase})` : ''}…
                 {#if run.counts}{run.counts.done} of {run.counts.total} done{/if}
+                {#if run.progressUnavailable}
+                  <div class="hint">
+                    Progress isn't available, so the result will not show here. Hide this status and
+                    refresh to check.
+                  </div>
+                {/if}
+                <button type="button" onclick={() => store.dismissRun()}>Hide status</button>
               {:else if run.status === 'finished' && run.result}
                 <div class:err={run.result.kind === 'failed' || run.result.kind === 'interrupted'}>
                   {runResultMessage(run.result)}

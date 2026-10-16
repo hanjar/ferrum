@@ -114,9 +114,8 @@ describe('SyncProfileEditor', () => {
   it('"Use active pane" fills the left root and the inactive pane fills the right root (SP-9.2)', async () => {
     const s = setup();
     await renderEditor(s, (st) => st.openNew());
-    const buttons = screen.getAllByRole('button', { name: 'Use active pane' });
-    await fireEvent.click(buttons[0]);
-    await fireEvent.click(buttons[1]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Use active pane' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Use other pane' }));
     expect((screen.getByLabelText('Left folder') as HTMLInputElement).value).toBe('D:\\Active');
     expect((screen.getByLabelText('Right folder') as HTMLInputElement).value).toBe('E:\\Inactive');
     expect(s.store.editor?.form.left).toBe('D:\\Active');
@@ -216,5 +215,43 @@ describe('SyncProfileEditor', () => {
     const sent = JSON.stringify((s.backend.save as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(sent).toContain('"deletePolicy":"permanent"');
     expect(sent).not.toMatch(/confirm|prompt|caption/i);
+  });
+
+  it('the right folder never falls back to the active pane path', async () => {
+    const s = setup({}, { inactivePath: undefined });
+    await renderEditor(s, (st) => st.openNew());
+    expect(
+      (screen.getByRole('button', { name: 'Use other pane' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it('disables every field while saving', async () => {
+    let release: (v: unknown) => void = () => undefined;
+    const save = vi.fn(() => new Promise((r) => (release = r)));
+    const s = setup({ save: save as never });
+    await renderEditor(s, (st) => st.openNew({ name: 'x', left: 'D:\\A', right: 'E:\\B' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(screen.getByRole('form').querySelector('fieldset')!.disabled).toBe(true);
+    expect((screen.getByLabelText('Profile name') as HTMLInputElement).matches(':disabled')).toBe(
+      true,
+    );
+    release({ status: 'canceled' });
+    await waitFor(() =>
+      expect(screen.getByRole('form').querySelector('fieldset')!.disabled).toBe(false),
+    );
+  });
+
+  it('clamps the guard inputs to the wire types', async () => {
+    const s = setup();
+    await renderEditor(s, (st) => st.openNew());
+    await fireEvent.input(screen.getByLabelText('More than (items)'), {
+      target: { value: '99999999999' },
+    });
+    await fireEvent.input(screen.getByLabelText('and more than (% of the target)'), {
+      target: { value: '900' },
+    });
+    expect(s.store.editor?.form.guardMaxCount).toBe(4294967295);
+    expect(s.store.editor?.form.guardMaxPercent).toBe(255);
   });
 });

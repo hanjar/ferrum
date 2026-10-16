@@ -6,6 +6,9 @@
   import PathField from './PathField.svelte';
   import type { SyncProfilesStore, EditorState } from '../../stores/syncProfilesStore.svelte';
   import {
+    GUARD_COUNT_WIRE_MAX,
+    GUARD_PERCENT_WIRE_MAX,
+    clampGuard,
     changeLine,
     errorsFor,
     excludeExample,
@@ -77,9 +80,8 @@
     form.deletePolicy = p;
     touch();
   }
-  function num(e: Event & { currentTarget: HTMLInputElement }): number {
-    const v = e.currentTarget.valueAsNumber;
-    return Number.isNaN(v) ? 0 : v;
+  function num(e: Event & { currentTarget: HTMLInputElement }, max: number): number {
+    return clampGuard(e.currentTarget.valueAsNumber, max);
   }
 
   const policyProblems = $derived(
@@ -106,7 +108,7 @@
     void store.save();
   }}
 >
-  <div class="scroll">
+  <fieldset class="scroll" disabled={editor.busy === 'saving'}>
     {#if editor.id}
       <p class="rev" data-testid="editor-revision">
         Revision {editor.revision}
@@ -157,7 +159,8 @@
         bind:value={form.right}
         caption={rootCaption(editor.identities.right, editor.kinds.right)}
         errors={rootProblems('right').map((e) => fieldMessage(e, form))}
-        activePath={inactivePath ?? activePath}
+        activePath={inactivePath}
+        useLabel="Use other pane"
         oninput={touch}
       />
     </section>
@@ -321,7 +324,7 @@
             max="100000"
             value={form.guardMaxCount}
             oninput={(e) => {
-              form.guardMaxCount = num(e);
+              form.guardMaxCount = num(e, GUARD_COUNT_WIRE_MAX);
               touch();
             }}
           />
@@ -333,7 +336,7 @@
             max="100"
             value={form.guardMaxPercent}
             oninput={(e) => {
-              form.guardMaxPercent = num(e);
+              form.guardMaxPercent = num(e, GUARD_PERCENT_WIRE_MAX);
               touch();
             }}
           />
@@ -416,7 +419,7 @@
         </ul>
       </section>
     {/if}
-  </div>
+  </fieldset>
 
   <footer>
     <div class="problems" aria-label="Problems" role={allMessages.length ? 'alert' : undefined}>
@@ -436,6 +439,11 @@
     min-height: 0;
     flex: 1;
     gap: 8px;
+  }
+  fieldset {
+    border: 0;
+    margin: 0;
+    min-width: 0;
   }
   .scroll {
     flex: 1;
