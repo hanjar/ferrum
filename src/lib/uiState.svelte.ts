@@ -246,3 +246,12 @@ class UiState {
 }
 
 export const ui = new UiState();
+
+/**
+ * FER-561: true while a full-page view covers the file panes (today only Activity). Keyboard
+ * shortcuts that act on files/panes must not run then, because the active pane is hidden.
+ * Add future full pages (for example Sync profiles) here, in this one place.
+ */
+export function fullPageOpen(): boolean {
+  return ui.activityOpen;
+}
