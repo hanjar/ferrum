@@ -10,12 +10,12 @@ There is no auto-updater: you upgrade by running the new setup over the old inst
 - **The installer is not signed.** Windows SmartScreen will warn. Check the SHA-256 shown on the release page against the file you downloaded (`Get-FileHash .\Ferrum_0.2.0_x64-setup.exe -Algorithm SHA256`), then choose More info > Run anyway.
 - **WebView2** is installed by a download bootstrapper when it is missing, so that machine needs internet access during install. Windows 11 and current Windows 10 builds normally have it already.
 - The installer copies the licence files and `THIRD-PARTY-NOTICES.txt` next to the app. Settings > "Third-party notices" opens the notice.
-- Installer smoke on a clean machine is not automated yet. <!-- PENDING: FER-445 -->
+- Install, run, upgrade and uninstall of the setup are smoke-tested automatically on a CI runner (including the indexer service). The installer is still unsigned.
 
 ### Ferrum Indexer service (optional)
 
 - The setup registers a Windows service named `FerrumIndexer` (automatic, delayed start) **only when the install folder is under Program Files**. A failing service step never aborts the Ferrum install, and Ferrum works without the service.
-- On a fresh configuration the setup asks which mode to use: **High performance** (all files on fixed NTFS volumes are indexed, including file names in other accounts; for a PC only you use) or **Shared** (results are filtered by each user's permissions). Silent and passive installs choose Shared. You can force the mode with `/INDEXERMODE=high_performance` or `/INDEXERMODE=shared` on the command line. An existing valid configuration is never overwritten. In this release the question is shown in Indonesian.
+- On a fresh configuration the setup asks which mode to use: **High performance** (all files on fixed NTFS volumes are indexed, including file names in other accounts; for a PC only you use) or **Shared** (results are filtered by each user's permissions). Silent and passive installs choose Shared. You can force the mode with `/INDEXERMODE=high_performance` or `/INDEXERMODE=shared` on the command line. An existing valid configuration is never overwritten.
 - Change the mode later in Settings > Indexer. The change asks for a native Windows confirmation.
 - During an upgrade the setup stops the running service before replacing files and registers it again afterwards.
 
@@ -43,6 +43,12 @@ There is no auto-updater: you upgrade by running the new setup over the old inst
 | RAR tool (`Rar.exe`) path                                                   | Settings > Archive                                                      | Setting or changing it asks for a native confirmation, and its fingerprint is checked before every run. After upgrading from a build without this check, set the path again if RAR is not offered.        |
 
 ## Behaviour that differs from 0.1.0
+
+- **Operations on administrative shares are refused.** Anything that changes files on `\\server\C$`, `ADMIN$` and similar shares (also through a drive mapped to one), or on a UNC path that points to this computer, is refused. Browsing and reading still work.
+- **Ferrum's own folders are protected.** Its config, data and Activity folders cannot be the target of create, rename, delete, copy, move, extract or archive create.
+- **Selection files** are saved only with the extension `.json` or `.ferrum-selection`.
+- **`Rar.exe` location.** It must be in a folder other accounts cannot write to (for example `C:\Program Files\WinRAR`) and not on a network drive. If RAR creation disappears after upgrading, check the path in Settings > Archive.
+- **AI endpoint.** Changing only the port of the saved host now asks for a native confirmation.
 
 - **Shortcuts.** `Ctrl+D` is the Directory Hotlist, `Alt+D` edits the path, Deselect all is `Shift+-`, Disk Usage is `Alt+Shift+D`, and `Ctrl+Shift+L` is "Add to chat". Full list: `SHORTCUTS.md`.
 - **Archives open as folders.** `Enter` or double-click on a `.zip`, `.7z` or `.rar` opens it read-only. `F5`/`F6` out of an archive extracts. `F5`/`F6` into an archive is an error: use `Alt+F5` to pack.

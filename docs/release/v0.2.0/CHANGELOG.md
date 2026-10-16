@@ -35,11 +35,19 @@ Everything in the RC1 [CHANGELOG](../rc1/CHANGELOG.md) is still part of the prod
 - **Dependency audit** (#17): vitest 5 clears the dev-tool advisories that `npm audit` reported (0 vulnerabilities after the upgrade, according to the PR).
 - **Workflows** (#16): explicit `contents: read` permissions and every action pinned to a commit SHA.
 
-<!-- PENDING: FER-514 / FER-515 — hardening P3 (IPC name/path validation, protection of the config folder from file operations, Rar.exe bidi/TOCTOU/network-drive checks, AI endpoint origin with port). List the merged PR numbers here before the release. -->
+- **P3 hardening of paths, Rar.exe and the AI endpoint** (#24):
+  - Stricter IPC name and path validation: reserved device names, alternate data streams and pipe/device namespaces are refused for file operations, and the address bar rewrites a typed `\\?\` path to the plain form.
+  - Ferrum's own config, data and Activity folders are protected from create, rename, delete, copy, move, extract, archive create and selection save.
+  - Operations that change files on administrative shares (`\\server\C$`, `ADMIN$`, also drives mapped to them) and on UNC paths that point to this computer are refused. Browsing and reading stay allowed.
+  - Selection files are saved only as `.json` or `.ferrum-selection`.
+  - `Rar.exe`: paths with spoofing (bidi, control, invisible) characters are refused, the file is locked from hash verification until it is started, folders writable by other accounts (DLL sideload) and network drives are refused, and the dialog takes the app-wide native dialog slot.
+  - AI endpoint: changing only the port on the same host now asks for a native confirmation, like a new host.
 
 ## Fixes
 
 - **Archives**: a 7z with explicit folder entries lists once instead of leaving the pane on "Loading"; a ZIP with explicit folder entries unpacks instead of failing with "Invalid archive member path"; `Enter` on a `.zip`, `.7z` or `.rar` enters it as a folder, like a double-click. These came with the initial public snapshot. Tests: `src-tauri/tests/archive_member_keys.rs`, and "Enter on a supported archive enters it ..." in `src/lib/actions.test.ts`.
+- **Disk Usage** (#23): the tree selection no longer jumps to another folder when the metric is switched quickly. Rows are tracked by node id instead of by position, and changing the metric no longer reloads the Files list when its scope did not change.
+- **Shortcuts** (#27): file shortcuts (F2, F5, F6, F7, F8, Shift+F8, Enter, Ctrl+A and the rest) no longer act on the hidden pane while the Activity page is open. Only Ctrl+K, Ctrl+, and the Activity toggle still work there.
 - **Hotlist** (#11): moving items in the Configure tree, and putting an item into an empty submenu, now works.
 - **Disk Usage** (#14): a block was labelled 1.0% when it was 99.8% of its parent. Labels are now relative to the focused folder.
 
@@ -51,8 +59,8 @@ Everything in the RC1 [CHANGELOG](../rc1/CHANGELOG.md) is still part of the prod
 - vitest 5 (#17), generated third-party notices with a `--check` step in CI (#18), pinned workflow actions (#16).
 - Docs: Automation spec (#2), public docs tidy-up (#16).
 
-<!-- PENDING: FER-445 — NSIS install/upgrade/uninstall smoke in CI. -->
-<!-- PENDING: FER-558 — stabilisation of the Playwright e2e suite. -->
+- Automated NSIS smoke on a CI runner (#21): silent install, run for about 10 seconds, upgrade, uninstall, with checks for the files, the Add/Remove Programs entry, the Start Menu shortcut and the `FerrumIndexer` service. The release workflow runs the same smoke against the release installer before it creates the draft release. The installer's indexer-mode question is now in English.
+- Flaky-test fixes: Activity `flush()` waits for the worker instead of giving up after 10 seconds (#26), and several Playwright tests wait for the app to finish booting (#23).
 
 ## Not included in this release
 

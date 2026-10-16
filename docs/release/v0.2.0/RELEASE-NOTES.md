@@ -31,7 +31,7 @@ The full per-feature status (Stable / Beta / Unsupported) is in [FEATURES.md](FE
 1. Download `Ferrum_0.2.0_x64-setup.exe` from the assets below.
 2. Check its SHA-256 (see "Unsigned installer").
 3. Run it and accept the administrator prompt.
-4. On a fresh configuration the setup asks how to run the optional indexer service: High performance (your own PC; indexes all files on fixed NTFS volumes, including file names in other accounts) or Shared (results filtered by each user's permissions). The question is in Indonesian in this release. Silent installs (`/S`) choose Shared; pass `/INDEXERMODE=high_performance` or `/INDEXERMODE=shared` to choose.
+4. On a fresh configuration the setup asks how to run the optional indexer service: High performance (your own PC; indexes all files on fixed NTFS volumes, including file names in other accounts) or Shared (results filtered by each user's permissions). Silent installs (`/S`) choose Shared; pass `/INDEXERMODE=high_performance` or `/INDEXERMODE=shared` to choose.
 
 ### Unsigned installer
 
@@ -50,9 +50,17 @@ Run the new setup over the old install. Settings, session, Hotlist and Activity 
 
 Windows Settings > Apps > Ferrum > Uninstall. The setup stops and removes the `FerrumIndexer` service. Tick **Delete the application data** only if you also want your settings and history removed; an upgrade never deletes data. Your own folders (including `.ferrum\comments.json` files) are never touched.
 
+## Behaviour changes
+
+- Operations that change files on administrative shares (`\\server\C$`, `ADMIN$`, also mapped drives) and on UNC paths pointing to this computer are refused. Browsing and reading still work.
+- Ferrum's own config, data and Activity folders cannot be a target of file operations.
+- Selection files are saved only as `.json` or `.ferrum-selection`.
+- `Rar.exe` must be in a folder other accounts cannot write to (for example `C:\Program Files\WinRAR`) and not on a network drive.
+- Changing only the port of the AI endpoint asks for a native confirmation.
+
 ## Known issues (main ones)
 
-- Not code-signed; install and uninstall are not yet covered by an automated CI smoke test.
+- Not code-signed. Install, upgrade and uninstall are smoke-tested on a CI runner, not on a machine without WebView2.
 - RAR: no checksum or Compare By Content of a member, creation needs your own WinRAR 7.00+, and RAR tests are not run in CI.
 - 7z: members of solid blocks needing more than 256 MiB of decoder memory are refused.
 - PDF preview is Beta: no JPEG 2000 / JBIG2 pages, files over 50 MiB are not previewed.
@@ -73,7 +81,3 @@ Automation / Sync Profiles (an engine exists in the code, but there is no screen
 - [UPGRADE-NOTES.md](UPGRADE-NOTES.md): install, upgrade, uninstall and data locations.
 - Security reports: see [SECURITY.md](../../../SECURITY.md) (GitHub private advisories).
 - Third-party licences: Settings > "Third-party notices", or `THIRD-PARTY-NOTICES.txt` in the install folder.
-
-<!-- PENDING: FER-514 / FER-515 — add a "Security" bullet for the P3 hardening once merged. -->
-<!-- PENDING: FER-445 — when the NSIS install/upgrade/uninstall smoke is in CI, update the first known issue. -->
-<!-- PENDING: FER-558 — mention the stabilised e2e suite in CHANGELOG only; no change needed here. -->
