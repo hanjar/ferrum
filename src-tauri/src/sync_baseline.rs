@@ -311,14 +311,10 @@ impl SyncBaselineStore {
 
     /// Simpan ATOMIK. Menolak root tak valid, baseline yang bukan milik pasangan ini, dan
     /// batas terlampaui (baseline lama dibiarkan).
-    /// UNGUARDED write, crate-private (a baseline is written only under a lease). Production code goes through
+    /// UNGUARDED write, private to this module (a baseline is written only under a lease). Production code goes through
     /// [`save_with_guard`] (a run) or [`save_with_lease`] (a command): only the lease holder writes
     /// a baseline (design §5.7). Integration tests use the leased path too.
-    pub(crate) fn save(
-        &self,
-        pair: &RootPair,
-        baseline: &BaselineDto,
-    ) -> Result<(), BaselineError> {
+    fn save(&self, pair: &RootPair, baseline: &BaselineDto) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {
@@ -359,9 +355,22 @@ impl SyncBaselineStore {
         write_atomic(dir, &target, &bytes).map_err(|_| err("io", "Could not write baseline"))
     }
 
-    /// Hapus baseline pasangan (kembali ke first-run). Idempotent. Crate-private like `save`:
+    /// Test-only seam for OTHER modules' tests that need a baseline on disk without taking a
+    /// lease. Production code cannot call it (it does not exist outside `cfg(test)`); `save`
+    /// itself is private to this module, so every non-test write goes through
+    /// [`save_with_lease`] or [`save_with_guard`].
+    #[cfg(test)]
+    pub(crate) fn save_unguarded_for_tests(
+        &self,
+        pair: &RootPair,
+        baseline: &BaselineDto,
+    ) -> Result<(), BaselineError> {
+        self.save(pair, baseline)
+    }
+
+    /// Hapus baseline pasangan (kembali ke first-run). Idempotent. Private like `save`:
     /// callers use [`clear_with_lease`].
-    pub(crate) fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
+    fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {
@@ -1303,47 +1312,6 @@ mod tests {
                 .unwrap_err()
                 .code,
             "lease_required"
-        );
-    }
-
-    /// FER-549: the unguarded `SyncBaselineStore::save` / `clear` stay crate-private AND are
-    /// called only inside this module (where the `*_with_lease` / `*_with_guard` wrappers and
-    /// the unit tests live). Any other source or integration-test file that calls them on a
-    /// baseline store would write a baseline without a lease (design §5.7).
-    #[test]
-    fn unguarded_baseline_writes_are_not_used_outside_this_module() {
-        fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-            for entry in fs::read_dir(dir).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    rs_files(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut files = Vec::new();
-        rs_files(&root.join("src"), &mut files);
-        rs_files(&root.join("tests"), &mut files);
-        let mut offenders = Vec::new();
-        for file in files {
-            if file.ends_with("src/sync_baseline.rs") {
-                continue;
-            }
-            let text = fs::read_to_string(&file).unwrap();
-            for (n, line) in text.lines().enumerate() {
-                let lower = line.to_ascii_lowercase();
-                if lower.contains("baseline")
-                    && (line.contains(".save(") || line.contains(".clear("))
-                {
-                    offenders.push(format!("{}:{}", file.display(), n + 1));
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "unguarded baseline write: {offenders:?}"
         );
     }
 }
