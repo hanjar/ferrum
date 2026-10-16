@@ -23,7 +23,8 @@
 //!   swapped between hashing and `CreateProcess`. A file larger than [`MAX_RAR_EXE_BYTES`] is
 //!   refused before it is hashed.
 //! - FER-514 (DLL sideload): the Rar.exe and its folder chain must pass the same
-//!   `trusted_location` rule as agent CLIs (FER-490): writable only by the current user,
+//!   `trusted_location` rule as agent CLIs (FER-490, with conditional ACEs judged by their
+//!   rights so the stock Program Files\WinRAR folder passes): writable only by the current user,
 //!   Administrators, SYSTEM or TrustedInstaller. Rar.exe loads helper DLLs from its own folder, so
 //!   a folder another account can write to is refused (at set_path, probe and before every spawn).
 //! - Clean execution: `env_remove("RAR")`, `CREATE_NO_WINDOW`, no shell.
@@ -316,7 +317,7 @@ fn check_trusted_location(path: &Path) -> Result<(), RarValidationError> {
     }
     #[cfg(windows)]
     {
-        crate::ai::agent_cli::acl::trusted_location(path)
+        crate::ai::agent_cli::acl::trusted_location_callback_aware(path)
             .map_err(RarValidationError::UntrustedLocation)
     }
     #[cfg(not(windows))]
@@ -418,7 +419,6 @@ pub fn validate_confirmed_rar_exe(
     stored: Option<&RarExeFingerprint>,
 ) -> Result<RarTool, RarValidationError> {
     check_rar_exe_file(path)?;
-    check_trusted_location(path)?;
     // FER-514: the handle stays open (write/delete denied) through the probe spawn below.
     let held = open_locked(path)?;
     let actual = fingerprint_file(&held, path)?;
@@ -431,6 +431,9 @@ pub fn validate_confirmed_rar_exe(
         }
         _ => {}
     }
+    // After the fingerprint gate (so "unconfirmed"/"changed" keep their own messages) and
+    // before the probe, which is the first time the file is executed.
+    check_trusted_location(path)?;
     let version = probe_rar_version(path)?;
     drop(held);
     Ok(RarTool {

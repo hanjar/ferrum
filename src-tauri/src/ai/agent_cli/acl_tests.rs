@@ -216,3 +216,44 @@ fn capability_sids_only_on_ancestors() {
         Some(CAP)
     );
 }
+
+/// FER-514: the callback-aware variant (used for Rar.exe) accepts a read-only conditional allow
+/// ACE but still reports one that grants a write right, and still fails closed on the other
+/// non-plain allow types. The strict FER-490 `evaluate` is unchanged.
+#[test]
+fn callback_aware_judges_conditional_aces_by_their_rights() {
+    use super::acl::evaluate_with;
+    let cond = |sid: &str, mask: u32, kind: u8| Ace {
+        kind,
+        flags: 0,
+        mask,
+        sid: Some(sid.to_owned()),
+    };
+    let mut read_only = standard();
+    read_only.push(cond(USERS, READ_EXEC, 9));
+    for role in ALL_ROLES {
+        assert!(
+            evaluate(&sec(ME, read_only.clone()), ME, role).is_some(),
+            "strict rule still fails closed on type 9 ({role:?})"
+        );
+        assert_eq!(
+            evaluate_with(&sec(ME, read_only.clone()), ME, role, true),
+            None,
+            "{role:?}"
+        );
+    }
+    let mut writable = standard();
+    writable.push(cond(USERS, FULL, 9));
+    assert_eq!(
+        evaluate_with(&sec(ME, writable), ME, Role::Target, true),
+        Some(USERS.to_owned())
+    );
+    for kind in [4u8, 5, 11] {
+        let mut aces = standard();
+        aces.push(cond(USERS, READ_EXEC, kind));
+        assert!(
+            evaluate_with(&sec(ME, aces), ME, Role::Target, true).is_some(),
+            "type {kind} stays fail-closed"
+        );
+    }
+}
