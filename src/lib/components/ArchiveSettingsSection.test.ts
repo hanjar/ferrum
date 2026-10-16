@@ -215,10 +215,10 @@ describe('FER-505/511: ArchiveSettingsSection component', () => {
     );
     const { getByTestId } = render(ArchiveSettingsSection);
     const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
-    await fireEvent.input(input, { target: { value: 'D:\typed\Rar.exe' } });
+    await fireEvent.input(input, { target: { value: 'D:\\typed\\Rar.exe' } });
     release(READY);
     await tick();
     await tick();
-    expect(input.value).toBe('D:\typed\Rar.exe');
+    expect(input.value).toBe('D:\\typed\\Rar.exe');
   });
 });
