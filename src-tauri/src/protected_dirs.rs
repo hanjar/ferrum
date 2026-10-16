@@ -101,6 +101,12 @@ fn fold(path: &Path) -> PathBuf {
 /// `roots` must already be [`resolve`]d.
 pub(crate) fn touches(path: &Path, roots: &[PathBuf], ancestors: bool) -> bool {
     let p = resolve(path);
+    // FER-514 rework (N4): a path that RESOLVES to a UNC reaching this very machine (a drive
+    // letter mapped to `\\localhost\c$`, a junction into an admin share) can hide a protected
+    // folder behind a spelling the roots do not match. Treated as touching.
+    if crate::path_guard::is_local_machine_unc(&p.to_string_lossy()) {
+        return true;
+    }
     roots
         .iter()
         .any(|r| p.starts_with(r) || (ancestors && r.starts_with(&p)))
@@ -164,6 +170,20 @@ mod tests {
         ] {
             assert!(!touches(Path::new(outside), &roots, false), "{outside}");
         }
+    }
+
+    /// The already resolved form decides: a UNC that reaches this machine is refused, a UNC to
+    /// another server is left alone. (A real mapped drive resolves to such a UNC.)
+    #[test]
+    fn a_resolved_unc_to_this_machine_counts_as_touching() {
+        let roots = roots_of(&[r"C:\Users\u\AppData\Roaming\dev.ferrum.app"]);
+        assert!(touches(
+            Path::new(r"\\localhost\c$\Users\u\x"),
+            &roots,
+            false
+        ));
+        assert!(touches(Path::new(r"\\127.0.0.1\share\x"), &roots, false));
+        assert!(!touches(Path::new(r"\\fileserver\data\x"), &roots, false));
     }
 
     #[test]

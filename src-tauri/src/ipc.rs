@@ -338,6 +338,8 @@ pub fn rename_entry(
     let path = prepare_source(&path)?;
     check_new_name(&new_name)?;
     let entry = crate::mutations::rename_entry(&path, &new_name)?;
+    // The UI and the activity store only ever see the plain spelling.
+    let path = crate::path_guard::strip_verbatim(&path);
     note_activity_changes(
         &app,
         FsChangeKind::Rename,
@@ -3514,7 +3516,10 @@ mod fer512_ipc_gate_tests {
     #[test]
     fn unc_paths_to_this_machine_are_classified() {
         use crate::path_guard::unc_reaches_local_machine as local;
-        let me = Some("DESKTOP-ABC");
+        let me = &[
+            "DESKTOP-ABC".to_string(),
+            "desktop-abc.corp.example".to_string(),
+        ][..];
         for bad in [
             r"\\localhost\C$\x",
             r"\\LOCALHOST\share\x",
@@ -3525,9 +3530,20 @@ mod fer512_ipc_gate_tests {
             r"\\DESKTOP-ABC.corp.example\share\x",
             r"\\otherhost\C$\x",
             r"\\otherhost\ADMIN$\x",
+            r"\\otherhost\ipc$",
+            r"\\otherhost\PRINT$\x",
             r"\\server\d$",
             r"\\localhost.localdomain\share",
             r"\\.\C:\x",
+            r"\\2130706433\share",
+            r"\\0x7f000001\share",
+            r"\\0177.0.0.1\share",
+            r"\\0x7f.1\share",
+            r"\\017700000001\share",
+            r"\\0\share",
+            r"\\fe80--1.ipv6-literal.net\share",
+            r"\\localhost\home$\x",
+            r"\\desktop-abc\backup$",
         ] {
             assert!(local(bad, me), "{bad}");
         }
@@ -3537,12 +3553,17 @@ mod fer512_ipc_gate_tests {
             r"\\10.0.0.5\share\dollar",
             r"C:\Users\u",
             r"\\fileserver.corp\data$like\x",
+            r"\\fs\home$\user",
+            r"\\nas\backup$",
+            r"\\nas\ab$",
+            r"\\192.168.1.9\share",
+            r"\\3232235777\share",
+            r"\\cafe\share",
         ] {
-            // The last one has no trailing `$` on the share: only a share NAMED `...$` counts.
             assert!(!local(good, me), "{good}");
         }
         assert!(
-            !local(r"\\desktop-abc\share", None),
+            !local(r"\\desktop-abc\share", &[]),
             "no computer name known"
         );
         // Wired into the mutation gate.
@@ -3584,9 +3605,21 @@ mod fer512_ipc_gate_tests {
         assert_eq!(report.deleted, 1, "{:?}", report.failed);
         assert!(!std::path::Path::new(&format!(r"{verbatim_dir}\nul")).exists());
 
+        // N2: a verbatim source applies the portable-name rules to the NEW name.
+        let aux = super::prepare_source(&format!(r"{plain}\aux.c")).unwrap();
+        for bad in ["x. ", "x.", "x ", "a<b", "q?", "CON", "w|z"] {
+            assert!(
+                crate::mutations::rename_entry(&aux, bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        assert!(std::path::Path::new(&format!(r"{verbatim_dir}\aux.c")).exists());
+
         // rename source with a reserved name to an ordinary name
         let con = super::prepare_source(&format!(r"{plain}\con.txt")).unwrap();
         let entry = crate::mutations::rename_entry(&con, "renamed.txt").expect("rename");
+        // N3: the result is the plain spelling, never `\\?\`.
+        assert!(!entry.path.starts_with(r"\\?\"), "{}", entry.path);
         assert!(entry.path.ends_with("renamed.txt"), "{}", entry.path);
         assert!(std::path::Path::new(&format!(r"{plain}\renamed.txt")).exists());
 
