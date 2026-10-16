@@ -69,12 +69,35 @@ pub enum SaveOutcome {
 /// Host dari endpoint yang sudah tervalidasi (`ProviderConfig::validate` memastikan bentuknya),
 /// huruf kecil. `None` hanya untuk bentuk yang tidak mengandung authority.
 pub fn endpoint_host(endpoint: &str) -> Option<String> {
-    let rest = endpoint
-        .strip_prefix("https://")
-        .or_else(|| endpoint.strip_prefix("http://"))?;
-    let authority = rest.split('/').next()?;
-    let host = authority.split(':').next()?;
-    Some(host.to_ascii_lowercase())
+    endpoint_origin(endpoint).map(|(_, host, _)| host)
+}
+
+/// FER-515 P3-4: the full origin of a validated endpoint: (scheme, lowercase host, effective
+/// port). A default port is made explicit (80 / 443), so `https://h/v1` and `https://h:443/v1`
+/// are the same origin, while `http://h:8080` and `http://h:9090` are not. Userinfo is ignored and
+/// a bracketed IPv6 host keeps its brackets.
+pub fn endpoint_origin(endpoint: &str) -> Option<(&'static str, String, u16)> {
+    let (scheme, default_port, rest) = if let Some(r) = endpoint.strip_prefix("https://") {
+        ("https", 443, r)
+    } else {
+        ("http", 80, endpoint.strip_prefix("http://")?)
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let (host, port_text) = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        (&authority[..=end], authority[end + 1..].strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
+    };
+    let port = match port_text {
+        None | Some("") => default_port,
+        Some(p) => p.parse::<u16>().ok()?,
+    };
+    Some((scheme, host.to_ascii_lowercase(), port))
 }
 
 /// Teks dialog konfirmasi native: HOST baru ditampilkan menonjol, dengan peringatan bahwa kunci
@@ -84,7 +107,7 @@ fn save_confirm_text(endpoint: &str, first: bool) -> String {
     let context = if first {
         "Ini setup AI pertama (belum ada endpoint tersimpan)."
     } else {
-        "Host ini BERBEDA dari endpoint yang tersimpan sekarang."
+        "Alamat ini (skema, host, atau port) BERBEDA dari endpoint yang tersimpan sekarang."
     };
     format!(
         "Ferrum akan mengirim KUNCI API (header Authorization) ke host berikut setiap kali Anda memakai fitur AI:\n\n{host}\n\nURL lengkap: {endpoint}\n\n{context}\n\nSimpan dan percayai endpoint ini? (Tanpa konfirmasi, permintaan AI ke endpoint lain ditolak.)"
@@ -109,7 +132,15 @@ pub fn save_setup_in(
     let stored = setup_store::load_from(dir);
     let host_changed = match &stored {
         None => true, // first setup: nothing is trusted yet
-        Some(current) => endpoint_host(&current.endpoint) != endpoint_host(&config.endpoint),
+        // FER-515 P3-4: the whole origin (scheme + host + port) decides, so moving the key to
+        // another port of the same host asks like a new host. Unparseable = different.
+        Some(current) => match (
+            endpoint_origin(&current.endpoint),
+            endpoint_origin(&config.endpoint),
+        ) {
+            (Some(old), Some(new)) => old != new,
+            _ => true,
+        },
     };
     if host_changed && !confirm(&save_confirm_text(&config.endpoint, stored.is_none())) {
         return Ok(SaveOutcome::Canceled);
@@ -181,6 +212,59 @@ mod tests {
             "storage_failure"
         );
         assert_eq!(SetupStoreError::NotConfirmed.kind(), "not_confirmed");
+    }
+
+    /// FER-515 P3-4: the origin keeps scheme and port; default ports are explicit.
+    #[test]
+    fn origin_includes_scheme_and_effective_port() {
+        let o = |e: &str| endpoint_origin(e);
+        assert_eq!(
+            o("https://Api.Example.com/v1"),
+            Some(("https", "api.example.com".into(), 443))
+        );
+        assert_eq!(
+            o("https://api.example.com:443/v1"),
+            o("https://api.example.com/v1")
+        );
+        assert_eq!(o("http://h/v1"), Some(("http", "h".into(), 80)));
+        assert_ne!(o("http://h:8080/v1"), o("http://h:9090/v1"));
+        assert_ne!(o("http://h/v1"), o("https://h/v1"));
+        assert_eq!(
+            o("http://[::1]:8080/v1"),
+            Some(("http", "[::1]".into(), 8080))
+        );
+        assert_eq!(o("http://h:99999/v1"), None);
+        assert_eq!(o("ftp://h"), None);
+    }
+
+    /// Same host, other port: the native confirmation is required, same origin stays silent.
+    #[test]
+    fn changing_only_the_port_asks_for_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            save_setup_in(dir.path(), &config(), |_| true).unwrap(),
+            SaveOutcome::Saved
+        );
+        let mut other_port = config();
+        other_port.endpoint = "http://127.0.0.1:9999/v1".into();
+        let asked = std::cell::Cell::new(false);
+        let out = save_setup_in(dir.path(), &other_port, |_| {
+            asked.set(true);
+            false
+        })
+        .unwrap();
+        assert!(asked.get(), "port change must ask");
+        assert_eq!(out, SaveOutcome::Canceled);
+        assert_eq!(
+            setup_store::load_from(dir.path()).unwrap().endpoint,
+            config().endpoint,
+            "declined = nothing stored"
+        );
+        // Same origin (different path/model) is silent.
+        let mut same = config();
+        same.endpoint = "http://127.0.0.1:20128/other".into();
+        let out = save_setup_in(dir.path(), &same, |_| panic!("must not ask")).unwrap();
+        assert_eq!(out, SaveOutcome::Saved);
     }
 
     #[test]
