@@ -52,6 +52,17 @@ use std::time::{Duration, Instant};
 /// configured multi-GiB file named `Rar.exe` cannot keep a worker thread busy reading it.
 pub const MAX_RAR_EXE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// FER-514 rework (P3-G): characters that can make a path look different from what it is:
+/// control, bidi/format characters, ANY whitespace other than a plain space (U+2028/U+2029, NBSP,
+/// ideographic space ...) and invisible fillers (Hangul fillers U+115F/U+1160/U+3164/U+FFA0,
+/// braille blank U+2800).
+fn is_spoofing_char(c: char) -> bool {
+    c.is_control()
+        || crate::hotlist::model::is_format_char(c)
+        || (c.is_whitespace() && c != ' ')
+        || matches!(c as u32, 0x115F | 0x1160 | 0x3164 | 0xFFA0 | 0x2800)
+}
+
 /// A `Rar.exe` that passed [`validate_confirmed_rar_exe`]. Only that function can construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RarTool {
@@ -262,10 +273,7 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
     if path_str.trim().is_empty() {
         return Err(RarValidationError::EmptyPath);
     }
-    if path_str
-        .chars()
-        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
-    {
+    if path_str.chars().any(is_spoofing_char) {
         return Err(RarValidationError::FormatCharacters);
     }
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
@@ -1710,6 +1718,14 @@ mod tests {
             "C:\\x\u{2066}\\Rar.exe",
             "C:\\x\u{FEFF}\\Rar.exe",
             "C:\\x\u{0007}\\Rar.exe",
+            "C:\\x\u{2028}y\\Rar.exe",
+            "C:\\x\u{2029}y\\Rar.exe",
+            "C:\\x\u{00A0}y\\Rar.exe",
+            "C:\\x\u{3000}y\\Rar.exe",
+            "C:\\x\u{3164}y\\Rar.exe",
+            "C:\\x\u{115F}y\\Rar.exe",
+            "C:\\x\u{2800}y\\Rar.exe",
+            "C:\\x\ty\\Rar.exe",
             "C:\\x\nfake line\\Rar.exe",
         ] {
             let err = check_rar_exe_file(Path::new(bad)).unwrap_err();
