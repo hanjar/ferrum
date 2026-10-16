@@ -267,6 +267,64 @@ describe('FER-549 R2-P3-3: Escape during a running delete', () => {
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
+
+  function startDelete(withLease: boolean) {
+    let finish!: (r: { requested: number; deleted: number; failed: [] }) => void;
+    mutMocks.deleteEntries.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onSettled = vi.fn();
+    dialogs.open({
+      kind: 'delete',
+      paths: ['C://x/a.txt'],
+      permanent: false,
+      ...(withLease ? { onSettled } : {}),
+    });
+    return { onSettled, finish: (r = { requested: 1, deleted: 1, failed: [] as [] }) => finish(r) };
+  }
+
+  async function confirmDelete() {
+    await tick();
+    const del = Array.from(document.querySelectorAll('[role="dialog"] button')).find(
+      (b) => b.textContent === 'Delete',
+    ) as HTMLElement;
+    fireEvent.click(del);
+    await tick();
+  }
+
+  it('a delete dialog WITHOUT a lease hook still closes on Escape while running', async () => {
+    render(Dialogs);
+    startDelete(false);
+    await confirmDelete();
+    fireEvent.keyDown(document.querySelector('[role="dialog"]') as HTMLElement, { key: 'Escape' });
+    await tick();
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('another dialog still closes on Escape while busy', async () => {
+    render(Dialogs);
+    dialogs.open({ kind: 'mkdir', parent: 'C://x' });
+    await tick();
+    fireEvent.keyDown(document.querySelector('[role="dialog"]') as HTMLElement, { key: 'Escape' });
+    await tick();
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('a dialog opened mid-delete is queued; the lease settles only when the delete ends (N3)', async () => {
+    render(Dialogs);
+    const run = startDelete(true);
+    await confirmDelete();
+    dialogs.open({ kind: 'error', title: 'T', message: 'M' });
+    await tick();
+    expect(dialogs.current?.kind).toBe('delete');
+    expect(run.onSettled).not.toHaveBeenCalled();
+    run.finish();
+    await vi.waitFor(() => expect(dialogs.current?.kind).toBe('error'));
+    expect(run.onSettled).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('DSK-06.3: completed mutations invalidate a touching scan', () => {
