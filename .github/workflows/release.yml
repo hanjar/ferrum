@@ -46,6 +46,21 @@ jobs:
       - name: Build Tauri NSIS bundle
         run: npx tauri build --bundles nsis
 
+      - name: Installer smoke (install, run, uninstall)
+        shell: pwsh
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $installer = (Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1).FullName
+          ./scripts/installer-smoke.ps1 -InstallerA $installer -VersionA $conf.version -LogDir installer-smoke-logs
+
+      - name: Upload installer smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-smoke-logs
+          path: installer-smoke-logs
+          if-no-files-found: warn
+
       - name: Create Draft GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
