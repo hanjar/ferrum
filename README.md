@@ -69,6 +69,12 @@ To build Ferrum from source:
 
 ---
 
+## Download and Install
+
+Download `Ferrum_<version>_x64-setup.exe` from the [Releases](https://github.com/hanjar/ferrum/releases) page (Windows 10/11 x64, NSIS installer, installs per machine). The installer is not code-signed: compare its SHA-256 with the digest on the release page, then use **More info > Run anyway** in SmartScreen. WebView2 is downloaded during install if it is missing. Details: [release notes](docs/release/v0.2.0/RELEASE-NOTES.md) and [upgrade notes](docs/release/v0.2.0/UPGRADE-NOTES.md).
+
+---
+
 ## Building from Source
 
 1. **Clone the repository**:
