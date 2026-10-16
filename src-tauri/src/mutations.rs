@@ -162,9 +162,34 @@ pub struct FailedItem {
 /// Delete entries to the Recycle Bin / Trash (D05). Per-item failures never
 /// abort the batch.
 pub fn delete_to_trash(paths: &[String]) -> DeleteReport {
-    delete_impl(paths, &|p| {
+    delete_to_trash_with(paths, &|p| {
         trash::delete(p).map_err(|e| std::io::Error::other(e.to_string()))
     })
+}
+
+/// FER-559 (N4): the Recycle Bin API parses names the Win32 way and rejects the `\?\` form with
+/// "The specified device name is invalid", so an entry with a reserved name (`nul`, `aux.c`, made
+/// by WSL/bash) cannot be sent there. It is reported as a failure that names the way out
+/// (permanent delete), never retried through the plain spelling (that would address the device).
+fn delete_to_trash_with(
+    paths: &[String],
+    remover: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> DeleteReport {
+    let (reserved, ordinary): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| {
+        crate::path_guard::has_reserved_device_component(&crate::path_guard::strip_verbatim(p))
+    });
+    let ordinary: Vec<String> = ordinary.into_iter().cloned().collect();
+    let mut report = delete_impl(&ordinary, remover);
+    for p in reserved {
+        report.failed.push(FailedItem {
+            path: p.clone(),
+            code: ErrorCode::Unsupported,
+            message: "The Recycle Bin cannot hold an item with a reserved Windows name (nul, con, aux ...). Use permanent delete (Shift+Delete) instead."
+                .into(),
+        });
+    }
+    report.requested = paths.len();
+    report
 }
 
 /// Permanently delete (explicit user intent only — the UI must confirm).

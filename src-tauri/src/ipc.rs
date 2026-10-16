@@ -3758,6 +3758,32 @@ mod fer512_ipc_gate_tests {
         let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
     }
 
+    /// FER-559 N4: the Recycle Bin cannot take an entry with a reserved name via `\?\`
+    /// (probed: "device name is invalid"). The entry is reported as failed, with the way out, and
+    /// stays untouched; permanent delete of the same entry works.
+    #[cfg(windows)]
+    #[test]
+    fn trash_of_reserved_name_entry_is_refused_with_advice_and_permanent_delete_works() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ferrum-n4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.to_string_lossy().into_owned();
+        let v = crate::path_guard::verbatim_path(&plain);
+        std::fs::write(format!(r"{v}\nul"), b"x").unwrap();
+        let prepared = super::prepare_source(&format!(r"{plain}\nul")).unwrap();
+        let r = crate::mutations::delete_to_trash(&[prepared.clone()]);
+        assert_eq!(r.deleted, 0);
+        assert_eq!(r.failed.len(), 1);
+        assert!(r.failed[0].message.contains("permanent delete"), "{:?}", r.failed);
+        assert!(std::path::Path::new(&prepared).exists(), "untouched");
+        let r = crate::mutations::delete_permanent(&[prepared.clone()]);
+        assert_eq!(r.deleted, 1, "{:?}", r.failed);
+        assert!(!std::path::Path::new(&prepared).exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     /// Info-1: the harness job can never sleep longer than 10 s.
     #[test]
     fn dummy_op_ticks_are_capped() {
