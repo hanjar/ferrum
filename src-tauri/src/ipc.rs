@@ -916,9 +916,18 @@ pub async fn archive_rar_tool_set_path(
 ) -> Result<RarToolSetPathResult, FsError> {
     let dir = crate::profile::config_dir(&app).unwrap_or_else(std::env::temp_dir);
     let owner = rar_owner_hwnd(&window);
+    // FER-514 P3-6: taking the app-wide dialog slot BEFORE any validation or hashing means a
+    // webview that floods this command (or races it with another native dialog) gets `Busy`
+    // immediately: no stacked dialogs, no repeated hashing. Clearing the setting needs no dialog.
+    let slot = if path.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        Some(crate::native_dialog::DialogGuard::try_acquire()?)
+    } else {
+        None
+    };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let _slot = slot;
         crate::archive_rar_tool::set_rar_exe_path_in(&dir, path, |text| {
-            crate::archive_rar_tool::native_confirm(owner, text)
+            crate::archive_rar_tool::native_confirm_held(owner, text)
         })
     })
     .await
