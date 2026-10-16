@@ -66,6 +66,11 @@ export interface PreviewState {
   profileId: string;
   revision: number;
   data: SyncPreview;
+  /**
+   * Delete policy CODE of the previewed revision, read from the stored profile. Absent when it
+   * could not be read or its revision differs: then the run is treated as non-permanent.
+   */
+  deletePolicy?: string;
 }
 
 export interface RunState {
@@ -415,7 +420,14 @@ export class SyncProfilesStore {
     this.previewBusyId = id;
     try {
       const data = await this.#deps.backend.preview(id);
-      this.preview = { profileId: id, revision: s.revision, data };
+      let deletePolicy: string | undefined;
+      try {
+        const profile = await this.#deps.backend.get(id);
+        if (profile.revision === s.revision) deletePolicy = profile.policy.deletePolicy;
+      } catch {
+        deletePolicy = undefined; // unknown policy: the webview prompt is shown (fail safe)
+      }
+      this.preview = { profileId: id, revision: s.revision, data, deletePolicy };
     } catch (e) {
       this.#fail('preview', e);
     } finally {
@@ -445,7 +457,7 @@ export class SyncProfilesStore {
     const data = this.preview!.data;
     const overwrites = data.summary.overwrites;
     const deletes = data.summary.deletes;
-    const permanent = this.summary(id)?.deleteLabel === 'Permanent';
+    const permanent = this.preview!.deletePolicy === 'permanent';
     if (overwrites > 0 || (deletes > 0 && !permanent)) {
       this.runPrompt = {
         profileId: id,

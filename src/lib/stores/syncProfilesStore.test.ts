@@ -505,13 +505,71 @@ describe('run prompt for deletions (SP-9.4)', () => {
     expect(backend.run).toHaveBeenCalledWith(expect.objectContaining({ confirmOverwrite: true }));
   });
 
-  it('a permanent run is left to the backend native dialog (no webview prompt)', async () => {
-    const { store, backend } = makeStore(fakeBackend(withDeletes('Permanent')));
+  const withPolicy = (
+    code: 'recycleBin' | 'versioning' | 'permanent',
+    label: string,
+    revision = 1,
+  ) => ({
+    ...withDeletes(label),
+    get: vi.fn(async () => dto({ revision, policy: { ...policy, deletePolicy: code } })),
+  });
+
+  it('the permanent CODE leaves the confirmation to the backend native dialog', async () => {
+    const { store, backend } = makeStore(fakeBackend(withPolicy('permanent', '')));
     await store.load();
     await store.previewProfile('p1');
+    expect(store.preview?.deletePolicy).toBe('permanent');
     await store.requestRun('p1');
     expect(store.runPrompt).toBeNull();
     expect(backend.run).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['recycleBin', 'versioning'] as const)(
+    'the %s code asks in the webview',
+    async (code) => {
+      const { store, backend } = makeStore(fakeBackend(withPolicy(code, 'whatever')));
+      await store.load();
+      await store.previewProfile('p1');
+      await store.requestRun('p1');
+      expect(store.runPrompt).toMatchObject({ deletes: 3 });
+      expect(backend.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it('the display label alone never decides: label "Permanent" with another code still asks', async () => {
+    const { store, backend } = makeStore(fakeBackend(withPolicy('recycleBin', 'Permanent')));
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.runPrompt).not.toBeNull();
+    expect(backend.run).not.toHaveBeenCalled();
+  });
+
+  it('an empty or unknown label with deletions asks when the code is unavailable', async () => {
+    for (const label of ['', 'Something new']) {
+      const { store, backend } = makeStore(
+        fakeBackend({
+          ...withDeletes(label),
+          get: vi.fn(async () => Promise.reject(new SyncProfilesError('not_found'))),
+        }),
+      );
+      await store.load();
+      await store.previewProfile('p1');
+      expect(store.preview?.deletePolicy).toBeUndefined();
+      await store.requestRun('p1');
+      expect(store.runPrompt).not.toBeNull();
+      expect(backend.run).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a profile revision that differs from the preview is not trusted as permanent', async () => {
+    const { store, backend } = makeStore(fakeBackend(withPolicy('permanent', 'Permanent', 2)));
+    await store.load();
+    await store.previewProfile('p1');
+    expect(store.preview?.deletePolicy).toBeUndefined();
+    await store.requestRun('p1');
+    expect(store.runPrompt).not.toBeNull();
+    expect(backend.run).not.toHaveBeenCalled();
   });
 
   it('a run without deletions or overwrites starts without a prompt', async () => {
