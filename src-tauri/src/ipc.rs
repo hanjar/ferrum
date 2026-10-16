@@ -103,11 +103,42 @@ fn prepare_sources<'a>(
     paths.into_iter().map(|p| prepare_source(p)).collect()
 }
 
-/// FER-514 rework (point 1): a SOURCE that is only read (copy / plan): the plain string gate
-/// (no pipes, device namespaces, ADS, `\\?\GLOBALROOT`); reserved names are not an issue for
-/// reads of existing entries.
-fn check_read_source(path: &str) -> Result<(), FsError> {
-    crate::path_guard::check_str(path).map(|_| ())
+/// FER-514 rework (point 1) + FER-559 (N5): a SOURCE that is only read (copy / plan / move). The
+/// string gate (no pipes, device namespaces, ADS, `\?\GLOBALROOT`). A path with a reserved device
+/// name component (`C:\x\nul`, `COM1`) is read through its `\?\` form when it really is a plain
+/// file or folder (made by WSL/bash); otherwise it is the device (or missing) and is refused, so the
+/// engine never opens a device. Returns the path to hand to the engine.
+fn prepare_read_source(path: &str) -> Result<String, FsError> {
+    let normalised = crate::path_guard::check_str(path)?;
+    if !crate::path_guard::has_reserved_device_component(&normalised) {
+        return Ok(path.to_string());
+    }
+    let verbatim = crate::path_guard::verbatim_path(&normalised);
+    match std::fs::symlink_metadata(&verbatim) {
+        Ok(meta) if meta.is_file() || meta.is_dir() => Ok(verbatim),
+        _ => Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Source path contains a reserved Windows device name and is not a plain file or folder",
+        )),
+    }
+}
+
+/// Sources and target folder for copy / move. When any source needs its `\?\` form, the target
+/// folder is switched to that form as well: the engines derive destination names from source
+/// names (`nul` -> `<target>\nul`), and only the `\?\` spelling makes that a file instead of the
+/// device. The target itself already passed the full mutation gate (no reserved component).
+fn prepare_copy_io(sources: &[String], target_dir: &str) -> Result<(Vec<String>, String), FsError> {
+    let prepared = sources
+        .iter()
+        .map(|s| prepare_read_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = if prepared.iter().any(|p| p.starts_with(r"\\?\")) {
+        let normalised = crate::path_guard::check_str(target_dir)?;
+        crate::path_guard::verbatim_path(&normalised)
+    } else {
+        target_dir.to_string()
+    };
+    Ok((prepared, target))
 }
 
 /// FER-514 P3-7: a mutation path that is a DESTINATION or a newly created entry: the string gate
@@ -356,6 +387,16 @@ fn note_activity_changes(
     pairs: Vec<(String, Option<String>)>,
 ) {
     if let Some(service) = app.state::<ActivityHandle>().0.as_ref() {
+        // Paths that went through the `\?\` form are recorded in their plain spelling.
+        let pairs: Vec<(String, Option<String>)> = pairs
+            .into_iter()
+            .map(|(a, b)| {
+                (
+                    crate::path_guard::strip_verbatim(&a),
+                    b.map(|b| crate::path_guard::strip_verbatim(&b)),
+                )
+            })
+            .collect();
         service.note_fs_changes(kind, &pairs);
     }
 }
@@ -404,10 +445,8 @@ pub fn plan_copy(
     sources: Vec<String>,
     target_dir: String,
 ) -> Result<crate::copy_engine::CopyPlan, FsError> {
-    for source in &sources {
-        check_read_source(source)?;
-    }
     check_write_target(&target_dir)?;
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     crate::copy_engine::plan_copy(&sources, &target_dir)
 }
 
@@ -419,10 +458,8 @@ pub fn enqueue_copy(
     app: AppHandle,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
-    for source in &sources {
-        check_read_source(source)?;
-    }
     check_protected_target(&target_dir)?;
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     let policy = parse_policy(&policy)?;
     let activity_app = app.clone();
     let prefs = load_prefs(app);
@@ -528,6 +565,7 @@ pub fn enqueue_move(
         check_not_local_unc(&normalised)?;
         crate::protected_dirs::check_write_source(source)?;
     }
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     let policy = parse_policy(&policy)?;
     remember_copy_defaults(&load_prefs(app.clone()));
     let make_body = move || {
@@ -3502,12 +3540,12 @@ mod fer512_ipc_gate_tests {
             r"\\?\C:\x",
             "relative",
         ] {
-            assert!(super::check_read_source(bad).is_err(), "source {bad}");
+            assert!(super::prepare_read_source(bad).is_err(), "source {bad}");
             assert!(super::check_protected_target(bad).is_err(), "target {bad}");
             assert!(super::prepare_source(bad).is_err(), "move source {bad}");
         }
         for good in [r"C:\Users\u\a.txt", r"\\server\share\dir"] {
-            assert!(super::check_read_source(good).is_ok(), "{good}");
+            assert!(super::prepare_read_source(good).is_ok(), "{good}");
             assert!(super::check_protected_target(good).is_ok(), "{good}");
         }
     }
@@ -3627,6 +3665,97 @@ mod fer512_ipc_gate_tests {
         assert!(super::check_new_name("con.txt").is_err());
         assert!(super::check_new_name("aux.c").is_err());
         let _ = std::fs::remove_dir_all(&verbatim_dir);
+    }
+
+    /// FER-559 N5: a plain file named like a device (made by WSL/bash) is copied and moved through
+    /// the `\?\` form with its content; the device itself, a missing entry and a reserved child
+    /// inside a plainly spelled tree are refused and no device is ever opened.
+    #[cfg(windows)]
+    #[test]
+    fn copy_and_move_read_existing_reserved_name_files_through_verbatim_form() {
+        use crate::copy_engine::{ConflictPolicy, run_copy};
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("ferrum-ipc-n5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let src = src_dir.to_string_lossy().into_owned();
+        let dst = dst_dir.to_string_lossy().into_owned();
+        let vsrc = crate::path_guard::verbatim_path(&src);
+        std::fs::write(format!(r"{vsrc}\nul"), b"real file named nul").unwrap();
+        std::fs::write(format!(r"{vsrc}\plain.txt"), b"plain").unwrap();
+        let cancel = crate::ops::CancelToken::default();
+
+        // Never created: the device. Refused, nothing opened.
+        assert!(super::prepare_copy_io(&[format!(r"{src}\COM1")], &dst).is_err());
+        assert!(super::prepare_copy_io(&[format!(r"{src}\CONIN$")], &dst).is_err());
+        assert!(super::prepare_copy_io(&[format!(r"{src}\prn.txt")], &dst).is_err());
+
+        // copy: the content arrives, in a file really named nul (verbatim target).
+        let (srcs, target) = super::prepare_copy_io(&[format!(r"{src}\nul")], &dst).unwrap();
+        assert!(srcs[0].starts_with(r"\\?\") && target.starts_with(r"\\?\"));
+        let out = run_copy(&srcs, &target, ConflictPolicy::Overwrite, &cancel, &|_| {});
+        assert!(out.failures.is_empty(), "{:?}", out.failures);
+        assert_eq!(
+            std::fs::read(format!(r"{}\nul", crate::path_guard::verbatim_path(&dst))).unwrap(),
+            b"real file named nul"
+        );
+
+        // The engine itself refuses a reserved name in the plain spelling (no device write).
+        let plain_src = format!(r"{src}\nul");
+        let out = run_copy(
+            &[plain_src.clone()],
+            &dst,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+
+        // A reserved child inside a plain tree is a per-item failure; its siblings still copy.
+        let tree = root.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        let vtree = crate::path_guard::verbatim_path(&tree.to_string_lossy());
+        std::fs::write(format!(r"{vtree}\nul"), b"x").unwrap();
+        std::fs::write(format!(r"{vtree}\ok.txt"), b"y").unwrap();
+        let out = run_copy(
+            &[tree.to_string_lossy().into_owned()],
+            &dst,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+        assert!(dst_dir.join("tree").join("ok.txt").exists());
+
+        // move: same-volume rename keeps the verbatim name.
+        let moved = root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let (srcs, target) =
+            super::prepare_copy_io(&[format!(r"{src}\nul")], &moved.to_string_lossy()).unwrap();
+        let mv = crate::move_engine::run_move(
+            &srcs,
+            &target,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+            false,
+        );
+        assert!(mv.failures.is_empty(), "{:?}", mv.failures);
+        assert_eq!(
+            std::fs::read(format!(
+                r"{}\nul",
+                crate::path_guard::verbatim_path(&moved.to_string_lossy())
+            ))
+            .unwrap(),
+            b"real file named nul"
+        );
+        assert!(!std::path::Path::new(&format!(r"{vsrc}\nul")).exists());
+        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
     }
 
     /// Info-1: the harness job can never sleep longer than 10 s.
