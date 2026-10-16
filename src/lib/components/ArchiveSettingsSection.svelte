@@ -21,6 +21,9 @@
   let draftPath = $state('');
   let probeStatus = $state<{ ok: boolean; message: string } | null>(null);
   let confirmState = $state<RarToolStatusState>('unset');
+  /** FER-514: the path the backend has stored (shown in the status line, prefills the draft). */
+  let storedPath = $state<string | null>(null);
+  let draftTouched = false;
   let busy = $state(false);
 
   const savedPath = $derived(ui.rarExePath);
@@ -31,9 +34,14 @@
 
   async function refreshStatus(): Promise<void> {
     try {
-      confirmState = (await archiveRarToolStatus()).state;
+      const status = await archiveRarToolStatus();
+      confirmState = status.state;
+      storedPath = status.path;
+      // FER-514: show the saved path in the input unless the user is already typing another one.
+      if (status.path && !draftTouched && draftPath.trim().length === 0) draftPath = status.path;
     } catch {
       confirmState = 'unset';
+      storedPath = null;
     }
   }
 
@@ -68,6 +76,7 @@
       await archiveRarToolSetPath(value.length > 0 ? value : null);
       ui.rarExePath = value.length > 0 ? value : null;
       draftPath = ui.rarExePath ?? '';
+      draftTouched = false;
       await refreshStatus();
       probeStatus = {
         ok: true,
@@ -139,6 +148,7 @@
       placeholder="C:\Program Files\WinRAR\Rar.exe"
       bind:value={draftPath}
       oninput={() => {
+        draftTouched = true;
         probeStatus = null;
       }}
       disabled={busy}
@@ -197,12 +207,20 @@
     class:error={confirmState === 'unconfirmed' || confirmState === 'changed'}
   >
     {#if confirmState === 'ready'}
-      ✓ Path terkonfirmasi dan siap digunakan.
+      ✓ Path terkonfirmasi dan siap digunakan: <span class="mono" data-testid="rar-status-path"
+        >{storedPath}</span
+      >
     {:else if confirmState === 'unconfirmed'}
       ✗ Path tersimpan tetapi BELUM dikonfirmasi (pengaturan lama) — Ferrum tidak akan
-      menjalankannya. Klik "Pakai path ini" untuk mengonfirmasi.
+      menjalankannya. Klik "Pakai path ini" untuk mengonfirmasi: <span
+        class="mono"
+        data-testid="rar-status-path">{storedPath}</span
+      >
     {:else if confirmState === 'changed'}
-      ✗ WinRAR berubah sejak dikonfirmasi; atur ulang di Settings.
+      ✗ WinRAR berubah sejak dikonfirmasi; atur ulang di Settings: <span
+        class="mono"
+        data-testid="rar-status-path">{storedPath}</span
+      >
     {:else}
       Belum ada path WinRAR yang diatur; pembuatan arsip RAR nonaktif.
     {/if}

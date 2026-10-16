@@ -74,7 +74,9 @@ describe('addressPath hardening helpers', () => {
     expect(stripVerbatimPrefix('//?/C:/x')).toBe('C:\\x');
     expect(stripVerbatimPrefix('\\\\?\\UNC\\srv\\share\\f')).toBe('\\\\srv\\share\\f');
     // Not a plain location: left for the Rust guard to refuse.
-    expect(stripVerbatimPrefix('\\\\?\\GLOBALROOT\\Device\\x')).toBe('\\\\?\\GLOBALROOT\\Device\\x');
+    expect(stripVerbatimPrefix('\\\\?\\GLOBALROOT\\Device\\x')).toBe(
+      '\\\\?\\GLOBALROOT\\Device\\x',
+    );
     expect(stripVerbatimPrefix('\\\\.\\C:\\x')).toBe('\\\\.\\C:\\x');
     expect(stripVerbatimPrefix('C:\\plain')).toBe('C:\\plain');
     expect(stripVerbatimPrefix('\\\\srv\\share')).toBe('\\\\srv\\share');
