@@ -23,7 +23,7 @@
   });
   import { prefs } from './lib/stores/prefsStore.svelte';
   import { applyStartupPreview } from './lib/stores/previewStartup';
-  import { actionForEvent, runAction } from './lib/actions';
+  import { actionForEvent, runAction, shortcutBlockedByFullPage } from './lib/actions';
   import { dialogs } from './lib/stores/dialogStore.svelte';
   import { ops } from './lib/stores/opsStore.svelte';
   import { watcher } from './lib/stores/watchStore.svelte';
@@ -119,6 +119,8 @@
     const action = actionForEvent(e);
     // The Tab shortcut is registered for the palette / menu label; its key is handled above.
     if (action?.scope === 'app-keydown') return;
+    // FER-561: a full page hides the panes; only global shortcuts may run.
+    if (action && shortcutBlockedByFullPage(action)) return;
     if (action) {
       e.preventDefault();
       runAction(action);
