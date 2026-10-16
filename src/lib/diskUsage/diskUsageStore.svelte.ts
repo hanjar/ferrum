@@ -566,14 +566,21 @@ export class DiskUsageStore {
    *  cursor is on a folder); `selectedId` is the cursor row. Navigation never
    *  touches the scan root (rootInput/rootId): that would be a new scan. */
   focusFromTree(zoomPath: string[], selectedId: string | null): void {
-    const same =
+    const prevFilesScope = this.filesScopeId;
+    const sameZoom =
       zoomPath.length === this.zoomStack.length &&
       zoomPath.every((id, i) => id === this.zoomStack[i]);
-    if (!same) {
+    if (!sameZoom) {
       this.zoomStack = [...zoomPath];
-      this.refreshScopedQueries();
     }
-    this.selectNode(selectedId);
+    this.selectedNodeId = selectedId;
+    if (!sameZoom && this.hasData) {
+      void this.loadTreemap();
+    }
+    if (this.filesScopeId !== prevFilesScope) {
+      this.filesSeq++;
+      if (this.hasData) void this.loadFiles();
+    }
   }
 
   /**

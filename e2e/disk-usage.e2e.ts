@@ -769,6 +769,7 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
   async function scanToComplete(): Promise<string[]> {
     await openWorkspace();
     await expect(chip()).toHaveText('Complete', { timeout: 5_000 });
+    await expect(rowByName('Projects')).toBeVisible();
     return startsLog();
   }
 

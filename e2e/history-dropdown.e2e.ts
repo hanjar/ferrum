@@ -96,6 +96,7 @@ async function setup(page: Page, recording: boolean) {
   await page.goto('/');
   const pane = page.locator('section.pane').first();
   await expect(pane).toBeVisible();
+  await expect(pane.getByRole('navigation', { name: 'Path' })).toContainText('demo');
   // History in the first pane's tab: demo -> Documents -> Users (current).
   await goTo(page, 'C:\\Users\\demo\\Documents');
   await goTo(page, 'C:\\Users');

@@ -67,7 +67,9 @@ test.describe('address bar (FER-456)', () => {
   test.beforeEach(async ({ page }) => {
     injectTauriMock(page);
     await page.goto('/');
-    await expect(page.locator('section.pane').first()).toBeVisible();
+    const pane = page.locator('section.pane').first();
+    await expect(pane).toBeVisible();
+    await expect(pane.getByRole('navigation', { name: 'Path' })).toContainText('demo');
   });
 
   test('click empty area, type, pick a suggestion with Tab, Enter opens the folder', async ({

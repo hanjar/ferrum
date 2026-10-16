@@ -107,9 +107,12 @@ test.describe('hotlist in the command palette (FER-481)', () => {
   test.beforeEach(async ({ page }) => {
     injectTauriMock(page);
     await page.goto('/');
-    await expect(page.locator('section.pane').first()).toBeVisible();
+    const pane = page.locator('section.pane').first();
+    await expect(pane).toBeVisible();
+    await expect(pane.getByRole('navigation', { name: 'Path' })).toContainText('demo');
     await expect.poll(async () => (await calls(page, 'hotlist_load')).length).toBeGreaterThan(0);
     await page.keyboard.press('Control+k');
+    await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();
   });
 
   test('empty query shows a Hotlist section, no empty submenu, no & marks', async ({ page }) => {
