@@ -66,6 +66,17 @@ describe('toDraft', () => {
   });
 });
 
+describe('guard clamping', () => {
+  it('keeps numbers inside the wire types (u32 count, u8 percent)', () => {
+    const g = (count: number, percent: number) =>
+      toDraft({ ...emptyForm(), guardMaxCount: count, guardMaxPercent: percent }).guard;
+    expect(g(1e12, 1000)).toMatchObject({ maxCount: 4294967295, maxPercent: 255 });
+    expect(g(-5, -1)).toMatchObject({ maxCount: 0, maxPercent: 0 });
+    expect(g(12.9, 20.2)).toMatchObject({ maxCount: 12, maxPercent: 20 });
+    expect(g(NaN, Infinity)).toMatchObject({ maxCount: 0, maxPercent: 0 });
+  });
+});
+
 describe('wording', () => {
   it('has one sentence per mode and side (SP-2.4)', () => {
     expect(modeSentence('mirror', 'left')).toMatch(/Left always wins.*right becomes an exact copy/);

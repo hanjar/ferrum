@@ -309,9 +309,14 @@ describe('preview and run', () => {
     await store.load();
     await store.previewProfile('p1');
     await store.requestRun('p1');
-    expect(store.runPrompt).toEqual({ profileId: 'p1', overwrites: 2 });
+    expect(store.runPrompt).toEqual({
+      profileId: 'p1',
+      previewId: 'pv1',
+      overwrites: 2,
+      deletes: 0,
+    });
     expect(backend.run).not.toHaveBeenCalled();
-    await store.confirmOverwrite();
+    await store.confirmRunPrompt();
     expect(backend.run).toHaveBeenCalledWith({
       id: 'p1',
       previewId: 'pv1',
@@ -319,11 +324,11 @@ describe('preview and run', () => {
     });
   });
 
-  it('confirmOverwrite without an open prompt does nothing', async () => {
+  it('confirmRunPrompt without an open prompt does nothing', async () => {
     const { store, backend } = makeStore();
     await store.load();
     await store.previewProfile('p1');
-    await store.confirmOverwrite();
+    await store.confirmRunPrompt();
     expect(backend.run).not.toHaveBeenCalled();
   });
 
@@ -335,7 +340,7 @@ describe('preview and run', () => {
     await store.load();
     await store.previewProfile('p1');
     await store.requestRun('p1');
-    store.cancelOverwrite();
+    store.cancelRunPrompt();
     expect(store.runPrompt).toBeNull();
     expect(backend.run).not.toHaveBeenCalled();
     expect(store.preview).not.toBeNull();
@@ -464,5 +469,200 @@ describe('preview and run', () => {
     await store.previewProfile('p1');
     await store.load();
     expect(store.preview).toBeNull();
+  });
+});
+
+describe('run prompt for deletions (SP-9.4)', () => {
+  const withDeletes = (label: string, overwrites = 0) => ({
+    list: vi.fn(async () => [summary({ deleteLabel: label })]),
+    preview: vi.fn(async () =>
+      preview({ summary: { ...preview().summary, deletes: 3, overwrites } }),
+    ),
+  });
+
+  it('a Recycle Bin run with deletions asks first, and sends no overwrite flag', async () => {
+    const { store, backend } = makeStore(fakeBackend(withDeletes('Recycle Bin')));
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.runPrompt).toMatchObject({ overwrites: 0, deletes: 3 });
+    expect(backend.run).not.toHaveBeenCalled();
+    await store.confirmRunPrompt();
+    expect(backend.run).toHaveBeenCalledWith({
+      id: 'p1',
+      previewId: 'pv1',
+      confirmOverwrite: false,
+    });
+  });
+
+  it('a versioning run with deletions and overwrites uses ONE prompt naming both', async () => {
+    const { store, backend } = makeStore(fakeBackend(withDeletes('Versioning · F:\\V', 2)));
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.runPrompt).toMatchObject({ overwrites: 2, deletes: 3 });
+    await store.confirmRunPrompt();
+    expect(backend.run).toHaveBeenCalledWith(expect.objectContaining({ confirmOverwrite: true }));
+  });
+
+  it('a permanent run is left to the backend native dialog (no webview prompt)', async () => {
+    const { store, backend } = makeStore(fakeBackend(withDeletes('Permanent')));
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.runPrompt).toBeNull();
+    expect(backend.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('a run without deletions or overwrites starts without a prompt', async () => {
+    const { store, backend } = makeStore();
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.runPrompt).toBeNull();
+    expect(backend.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a prompt that belongs to another preview', async () => {
+    const previews = [preview({ previewId: 'a' }), preview({ previewId: 'b' })];
+    const fb = withDeletes('Recycle Bin');
+    let n = 0;
+    const { store, backend } = makeStore(
+      fakeBackend({
+        ...fb,
+        preview: vi.fn(async () => {
+          const base = previews[n++];
+          return { ...base, summary: { ...base.summary, deletes: 1 } };
+        }),
+      }),
+    );
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    await store.previewProfile('p1'); // a new preview clears the old prompt...
+    expect(store.runPrompt).toBeNull();
+    store.runPrompt = { profileId: 'p1', previewId: 'a', overwrites: 0, deletes: 1 }; // ...a stale one
+    await store.confirmRunPrompt();
+    expect(backend.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('run events are tied to our run id', () => {
+  it('ignores foreign events held before the response and replays only ours', async () => {
+    let resolveRun: (v: { runId: number }) => void = () => undefined;
+    const run = vi.fn(() => new Promise<{ runId: number }>((r) => (resolveRun = r)));
+    const m = makeStore(fakeBackend({ run }));
+    await m.store.load();
+    await m.store.previewProfile('p1');
+    const started = m.store.requestRun('p1');
+    await vi.waitFor(() => expect(run).toHaveBeenCalled());
+    const counts = (done: number) => ({
+      total: 3,
+      done,
+      failed: 0,
+      skipped: 0,
+      changed: 0,
+      held: 0,
+      notStarted: 0,
+    });
+    m.emit({ runId: 99, phase: 'comparing', counts: counts(1) });
+    m.emit({
+      runId: 99,
+      result: {
+        kind: 'failed',
+        pendingRerun: false,
+        settle: { state: 'notAttempted' },
+        problems: [],
+      },
+    });
+    m.emit({ runId: 7, phase: 'syncing', counts: counts(2) });
+    resolveRun({ runId: 7 });
+    await started;
+    expect(m.store.run).toMatchObject({ status: 'running', runId: 7, phase: 'syncing' });
+    expect(m.store.run?.counts?.done).toBe(2);
+    m.emit({
+      runId: 99,
+      result: {
+        kind: 'failed',
+        pendingRerun: false,
+        settle: { state: 'notAttempted' },
+        problems: [],
+      },
+    });
+    expect(m.store.run?.status).toBe('running');
+  });
+
+  it('drops buffered events when the run is refused', async () => {
+    const m = makeStore(
+      fakeBackend({
+        run: vi.fn(async () => {
+          m.emit({ runId: 5, phase: 'syncing' });
+          throw new SyncProfilesError('lease_busy');
+        }),
+      }),
+    );
+    await m.store.load();
+    await m.store.previewProfile('p1');
+    await m.store.requestRun('p1');
+    expect(m.store.run?.status).toBe('failed');
+    expect(m.store.run?.phase).toBeUndefined();
+  });
+
+  it('a run whose result never arrives can be dismissed and unblocks Run now', async () => {
+    const subscribe = vi.fn(async () => {
+      throw new Error('no events');
+    });
+    const backend = fakeBackend();
+    const store = new SyncProfilesStore({ backend, subscribe });
+    await store.load();
+    await store.previewProfile('p1');
+    await store.requestRun('p1');
+    expect(store.run).toMatchObject({ status: 'running', progressUnavailable: true });
+    await store.previewProfile('p1');
+    expect(store.canRun('p1')).toBe(false);
+    store.dismissRun();
+    expect(store.run).toBeNull();
+    expect(store.canRun('p1')).toBe(true);
+  });
+});
+
+describe('editor details', () => {
+  it('shows a duplicate name on the name field (SP-1.3)', async () => {
+    const { store } = makeStore(
+      fakeBackend({
+        save: vi.fn(async () =>
+          Promise.reject(new SyncProfilesError('invalid_input', 'This name is already in use')),
+        ),
+      }),
+    );
+    store.openNew({ name: 'Photos', left: 'D:\\A', right: 'E:\\B' });
+    await store.save();
+    expect(store.editor?.errors).toEqual([{ field: 'name', code: 'name_taken' }]);
+    expect(store.editor?.notice).toBeNull();
+  });
+
+  it('leaving a dirty editor asks first; a clean one just closes', () => {
+    const { store } = makeStore();
+    store.openNew();
+    expect(store.leaveEditor('page')).toBe(true);
+    expect(store.editor).toBeNull();
+    store.openNew();
+    store.touch();
+    expect(store.leaveEditor('page')).toBe(false);
+    expect(store.discardTarget).toBe('page');
+    expect(store.editor).not.toBeNull();
+    store.closeEditor();
+    expect(store.discardTarget).toBeNull();
+    expect(store.editor).toBeNull();
+  });
+
+  it('clamps guard numbers to the wire types so the backend reports the range error', async () => {
+    const { store, backend } = makeStore();
+    store.openNew({ name: 'x', left: 'D:\\A', right: 'E:\\B' });
+    store.editor!.form.guardMaxCount = 1e12;
+    store.editor!.form.guardMaxPercent = 1000;
+    await store.save();
+    const arg = (backend.save as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(arg.draft.guard).toMatchObject({ maxCount: 4294967295, maxPercent: 255 });
   });
 });

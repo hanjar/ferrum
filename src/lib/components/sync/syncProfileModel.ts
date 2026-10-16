@@ -48,6 +48,19 @@ export interface ProfileForm {
 export const GUARD_DEFAULT_COUNT = 50;
 export const GUARD_DEFAULT_PERCENT = 20;
 
+/**
+ * Wire limits of the guard numbers (u32 count, u8 percent). Out-of-range values are clamped to
+ * the wire type so the backend answers with its range error (guard_*_range) and not with a
+ * deserialization error. Anything below 1 is sent as 0 for the same reason.
+ */
+export const GUARD_COUNT_WIRE_MAX = 4_294_967_295;
+export const GUARD_PERCENT_WIRE_MAX = 255;
+
+export function clampGuard(n: number, max: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(max, Math.max(0, Math.trunc(n)));
+}
+
 export function emptyForm(): ProfileForm {
   return {
     name: '',
@@ -87,8 +100,8 @@ export function toDraft(form: ProfileForm): SyncProfileDraft {
     exclude: patternsOf(form.excludeText),
     guard: {
       enabled: form.guardEnabled,
-      maxCount: Number.isFinite(form.guardMaxCount) ? Math.trunc(form.guardMaxCount) : 0,
-      maxPercent: Number.isFinite(form.guardMaxPercent) ? Math.trunc(form.guardMaxPercent) : 0,
+      maxCount: clampGuard(form.guardMaxCount, GUARD_COUNT_WIRE_MAX),
+      maxPercent: clampGuard(form.guardMaxPercent, GUARD_PERCENT_WIRE_MAX),
     },
   };
   if (form.mode === 'oneWay' || form.mode === 'mirror') draft.from = form.from;
@@ -182,6 +195,7 @@ export function excludeExample(patterns: string[]): string {
 const FIELD_MESSAGES: Record<string, string> = {
   name_required: 'Enter a name for this profile.',
   name_too_long: 'The name can have at most 80 characters.',
+  name_taken: 'Another profile already uses this name.',
   name_control: "The name can't contain control characters.",
   roots_identical: 'The two folders are the same folder.',
   roots_nested:

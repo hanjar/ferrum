@@ -76,6 +76,8 @@ export interface RunState {
   counts?: SyncRunCounts;
   result?: SyncRunResult;
   error?: Notice;
+  /** The progress listener could not be set up: the result will not arrive by itself. */
+  progressUnavailable?: boolean;
 }
 
 export interface StoreDeps {
@@ -89,6 +91,9 @@ async function tauriSubscribe(cb: (e: SyncRunEvent) => void): Promise<() => void
   const { listen } = await import('@tauri-apps/api/event');
   return listen<SyncRunEvent>(SYNC_PROFILE_RUN_EVENT, (e) => cb(e.payload));
 }
+
+/** The backend's fixed message for a duplicate profile name (path-free). */
+const NAME_TAKEN = 'This name is already in use';
 
 const codeOf = (e: unknown): string => (e instanceof SyncProfilesError ? e.code : 'unknown');
 
@@ -104,7 +109,14 @@ export class SyncProfilesStore {
   preview = $state<PreviewState | null>(null);
   previewBusyId = $state<string | null>(null);
   /** Open while the user is asked to confirm the overwrites listed in the preview. */
-  runPrompt = $state<{ profileId: string; overwrites: number } | null>(null);
+  runPrompt = $state<{
+    profileId: string;
+    previewId: string;
+    overwrites: number;
+    deletes: number;
+  } | null>(null);
+  /** Set while the user is asked whether to throw away unsaved editor changes. */
+  discardTarget = $state<'list' | 'page' | null>(null);
   run = $state<RunState | null>(null);
 
   #deps: StoreDeps;
@@ -112,6 +124,8 @@ export class SyncProfilesStore {
   #validateSeq = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #unlisten: (() => void) | null = null;
+  #buffer: SyncRunEvent[] | null = null;
+  #runId: number | null = null;
 
   constructor(deps?: Partial<StoreDeps>) {
     this.#deps = {
@@ -195,7 +209,18 @@ export class SyncProfilesStore {
     }
   }
 
+  /** Leave the editor; unsaved changes first need the user's say (`discardTarget`). True when it closed. */
+  leaveEditor(target: 'list' | 'page'): boolean {
+    if (this.editor?.dirty) {
+      this.discardTarget = target;
+      return false;
+    }
+    this.closeEditor();
+    return true;
+  }
+
   closeEditor(): void {
+    this.discardTarget = null;
     this.#clearTimer();
     this.#validateSeq++;
     this.editor = null;
@@ -278,6 +303,14 @@ export class SyncProfilesStore {
         const code = codeOf(e);
         if (code === 'stale') {
           await this.#reloadAfterStale(ed);
+        } else if (
+          code === 'invalid_input' &&
+          e instanceof SyncProfilesError &&
+          e.detail === NAME_TAKEN
+        ) {
+          // SP-1.3: show it on the name field; the next edit re-validates.
+          ed.errors = [{ field: 'name', code: 'name_taken' }];
+          ed.validated = true;
         } else if (code === 'invalid_input') {
           ed.notice = { kind: 'error', text: ipcErrorMessage(code, 'save') };
           await this.validate();
@@ -402,29 +435,42 @@ export class SyncProfilesStore {
     return true;
   }
 
-  /** "Run now": opens the overwrite prompt when the preview lists overwrites, else starts. */
+  /**
+   * "Run now": opens the confirmation prompt when the preview lists overwrites, or deletions that
+   * follow a Recycle Bin / versioning policy (SP-9.4: those are confirmed in the webview; the
+   * `permanent` policy is confirmed natively by the backend instead). Otherwise starts at once.
+   */
   async requestRun(id: string): Promise<void> {
     if (!this.canRun(id)) return;
-    const overwrites = this.preview!.data.summary.overwrites;
-    if (overwrites > 0) {
-      this.runPrompt = { profileId: id, overwrites };
+    const data = this.preview!.data;
+    const overwrites = data.summary.overwrites;
+    const deletes = data.summary.deletes;
+    const permanent = this.summary(id)?.deleteLabel === 'Permanent';
+    if (overwrites > 0 || (deletes > 0 && !permanent)) {
+      this.runPrompt = {
+        profileId: id,
+        previewId: data.previewId,
+        overwrites,
+        deletes: permanent ? 0 : deletes,
+      };
       return;
     }
     await this.#startRun(id, false);
   }
 
-  /** The user accepted the overwrite prompt. The ONLY caller that sends `confirmOverwrite: true`. */
-  async confirmOverwrite(): Promise<void> {
+  /**
+   * The user accepted the run prompt. The ONLY caller that can send `confirmOverwrite: true`, and
+   * only for the very preview the prompt was opened for.
+   */
+  async confirmRunPrompt(): Promise<void> {
     const prompt = this.runPrompt;
-    if (!prompt || !this.canRun(prompt.profileId)) {
-      this.runPrompt = null;
-      return;
-    }
     this.runPrompt = null;
-    await this.#startRun(prompt.profileId, true);
+    if (!prompt || !this.canRun(prompt.profileId)) return;
+    if (this.preview?.data.previewId !== prompt.previewId) return;
+    await this.#startRun(prompt.profileId, prompt.overwrites > 0);
   }
 
-  cancelOverwrite(): void {
+  cancelRunPrompt(): void {
     this.runPrompt = null;
   }
 
@@ -434,10 +480,14 @@ export class SyncProfilesStore {
     this.notice = null;
     this.run = { profileId: id, status: 'starting' };
     this.#stopListening();
+    // `sync-profile://run` is broadcast app-wide: hold every event until `run` names OUR run id.
+    this.#buffer = [];
+    let listening = true;
     try {
       this.#unlisten = await this.#deps.subscribe((e) => this.#onEvent(id, e));
     } catch {
-      this.#unlisten = null; // progress is optional; the result also lands in the list on reload
+      this.#unlisten = null;
+      listening = false;
     }
     try {
       const started = await this.#deps.backend.run({
@@ -447,11 +497,19 @@ export class SyncProfilesStore {
       });
       // The backend consumed the preview when the run started.
       this.preview = null;
-      const cur = this.run;
-      if (cur && cur.profileId === id && cur.status !== 'finished') {
-        this.run = { ...cur, status: 'running', runId: cur.runId ?? started.runId };
-      }
+      const held = this.#buffer ?? [];
+      this.#buffer = null;
+      this.#runId = started.runId;
+      this.run = {
+        profileId: id,
+        status: 'running',
+        runId: started.runId,
+        ...(listening ? {} : { progressUnavailable: true }),
+      };
+      for (const e of held) this.#onEvent(id, e);
     } catch (e) {
+      this.#buffer = null;
+      this.#runId = null;
       this.#stopListening();
       const code = codeOf(e);
       this.run = {
@@ -469,9 +527,12 @@ export class SyncProfilesStore {
     const cur = this.run;
     if (!cur || cur.profileId !== id || cur.status === 'finished' || cur.status === 'failed')
       return;
-    // Events may arrive before `run` resolves: the first one names the run we started.
-    if (cur.runId !== undefined && cur.runId !== e.runId) return;
-    const next: RunState = { ...cur, runId: e.runId };
+    if (this.#buffer) {
+      this.#buffer.push(e);
+      return;
+    }
+    if (this.#runId === null || e.runId !== this.#runId) return;
+    const next: RunState = { ...cur };
     if (e.phase) next.phase = e.phase;
     if (e.counts) next.counts = e.counts;
     if (e.result) {
@@ -483,13 +544,20 @@ export class SyncProfilesStore {
       void this.load();
       return;
     }
-    if (next.status === 'starting') next.status = 'running';
     this.run = next;
   }
 
+  /**
+   * Hide the run status. Also the way out of a run whose result never arrived (events missed or
+   * the listener failed): it releases the buttons; the list is reloaded to show the current state.
+   */
   dismissRun(): void {
-    if (this.run && (this.run.status === 'finished' || this.run.status === 'failed'))
-      this.run = null;
+    if (!this.run) return;
+    this.#stopListening();
+    this.#buffer = null;
+    this.#runId = null;
+    this.run = null;
+    void this.load();
   }
 
   #fail(op: IpcOp, e: unknown): void {
@@ -525,6 +593,9 @@ export class SyncProfilesStore {
     this.preview = null;
     this.previewBusyId = null;
     this.runPrompt = null;
+    this.discardTarget = null;
+    this.#buffer = null;
+    this.#runId = null;
     this.run = null;
   }
 }
