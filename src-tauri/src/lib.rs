@@ -28,6 +28,7 @@ pub mod disk_usage;
 pub mod disk_usage_cache;
 pub mod domain;
 pub mod fast_scan;
+pub mod file_identity;
 pub mod file_tools;
 pub mod fs_service;
 pub mod hotlist;
