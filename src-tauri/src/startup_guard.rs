@@ -1,124 +1,121 @@
-//! FER-559 (P3-C): no file that Windows runs at logon may be created in a Startup folder through
-//! the generic file operations. A compromised webview could otherwise write a harmless-looking
-//! `a.json` there and rename it to `a.bat` (two steps), or copy / extract a script in.
+//! FER-559 (P3-C, reworked): the file manager writes NOTHING into a Windows Startup folder
+//! (per-user and all-users): programs and scripts there run at every logon, and a denylist of
+//! extensions is bypassed by renaming in two steps, by archives, by folder trees and by `.lnk`
+//! targets. Reading, opening and DELETING inside Startup stay allowed (the user can clean it up).
 //!
-//! "Startup" = the per-user and the all-users Startup folder
-//! (`SHGetKnownFolderPath(FOLDERID_Startup / FOLDERID_CommonStartup)`), compared on resolved
-//! paths (junctions and symlinks resolve, case is folded; see `protected_dirs::resolve`). A name
-//! counts as executable when its extension (trailing dots and spaces, which Windows drops, are
-//! ignored) is one of [`EXECUTABLE_EXTENSIONS`].
+//! "Startup" = `SHGetKnownFolderPath(FOLDERID_Startup / FOLDERID_CommonStartup)`, plus the standard
+//! `%APPDATA%` / `%ProgramData%` spellings. The union is used, so a failing known-folder call can
+//! never leave the list empty (fail closed). Comparison is on resolved paths (junctions and
+//! symlinks resolve, case is folded; see `protected_dirs::resolve`).
 //!
-//! What is refused: create, rename (new name), copy / move (source names), multi-rename (new names)
-//! and combine (output file) of an executable name inside a Startup folder, and extraction of any
-//! archive into one (the entry names are not known up front). Moving things OUT of Startup,
-//! deleting and plain reads stay allowed.
+//! Enforced at: the IPC gate for every destination / new entry (create, copy, move, extract,
+//! archive create, split, combine, encode, decode, checksum, selection save); rename (the new path
+//! may not be inside Startup, nor Startup or one of its ancestors); the copy and move engines per
+//! created directory and for the final path of a moved entry; the extractor for every planned entry.
 
 use crate::domain::{ErrorCode, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub const EXECUTABLE_EXTENSIONS: &[&str] = &[
-    "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "lnk", "url", "scr",
-    "exe", "com", "pif", "hta", "msi", "reg",
-];
-
-/// True when the file name ends in an extension Windows runs or interprets.
-pub fn has_executable_extension(name: &str) -> bool {
-    let trimmed = name.trim_end_matches(['.', ' ']);
-    match trimmed.rsplit_once('.') {
-        Some((_, ext)) => {
-            let ext = ext.trim_end_matches(' ').to_ascii_lowercase();
-            EXECUTABLE_EXTENSIONS.contains(&ext.as_str())
-        }
-        None => false,
-    }
-}
+const MESSAGE: &str = "Ferrum does not write into the Windows Startup folder.";
 
 /// Resolved Startup folders of this machine/user (cached for the process lifetime).
 fn startup_dirs() -> &'static [PathBuf] {
     static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     DIRS.get_or_init(|| {
+        let mut raw: Vec<PathBuf> = Vec::new();
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::Shell::{FOLDERID_CommonStartup, FOLDERID_Startup};
-            [&FOLDERID_Startup, &FOLDERID_CommonStartup]
-                .into_iter()
-                .filter_map(crate::profile::known_folder)
-                .map(|d| crate::protected_dirs::resolve(&d))
-                .collect()
+            for id in [&FOLDERID_Startup, &FOLDERID_CommonStartup] {
+                match crate::profile::known_folder(id) {
+                    Some(d) => raw.push(d),
+                    None => log::warn!(
+                        "a Startup known folder could not be resolved; using the standard path"
+                    ),
+                }
+            }
         }
-        #[cfg(not(windows))]
-        {
-            Vec::new()
+        let tail = r"Microsoft\Windows\Start Menu\Programs\Startup";
+        for var in ["APPDATA", "ProgramData"] {
+            if let Some(base) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+                raw.push(PathBuf::from(base).join(tail));
+            }
         }
+        let mut out: Vec<PathBuf> = Vec::new();
+        for d in raw {
+            let r = crate::protected_dirs::resolve(&d);
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        if out.is_empty() {
+            log::error!("no Startup folder could be determined");
+        }
+        out
     })
 }
 
-/// Pure core: is `dir` inside (or equal to) one of the resolved `startups`?
+fn refused() -> FsError {
+    FsError::new(ErrorCode::InvalidPath, MESSAGE)
+}
+
+/// Pure core: is `dir` (resolved) inside, or equal to, one of the resolved `startups`?
 pub(crate) fn dir_is_in(dir: &Path, startups: &[PathBuf]) -> bool {
     let d = crate::protected_dirs::resolve(dir);
     startups.iter().any(|s| d.starts_with(s))
 }
 
-fn refused() -> FsError {
-    FsError::new(
-        ErrorCode::InvalidPath,
-        "Programs and scripts (.bat, .cmd, .ps1, .lnk, .exe ...) cannot be created in a Startup \
-         folder from the file manager, because they would run at every logon",
-    )
+/// Pure core: is `path` (resolved) a Startup folder or one of its ancestors?
+pub(crate) fn is_startup_or_ancestor(path: &Path, startups: &[PathBuf]) -> bool {
+    let p = crate::protected_dirs::resolve(path);
+    startups.iter().any(|s| s.starts_with(&p))
 }
 
-fn refused_extract() -> FsError {
-    FsError::new(
-        ErrorCode::InvalidPath,
-        "Archives cannot be extracted into a Startup folder from the file manager, because \
-         programs and scripts there would run at every logon",
-    )
+/// Pure core: would any entry `root`/`rel` land inside Startup? `root` is resolved once; the
+/// relative parts are appended lexically (the extractor and the copy engine never follow links).
+pub(crate) fn tree_hits(
+    root: &Path,
+    rels: impl IntoIterator<Item = impl AsRef<Path>>,
+    startups: &[PathBuf],
+) -> bool {
+    let root = crate::protected_dirs::resolve(root);
+    rels.into_iter().any(|rel| {
+        let joined = crate::protected_dirs::resolve_lexical(&root.join(rel.as_ref()));
+        startups.iter().any(|s| joined.starts_with(s))
+    })
 }
 
-pub(crate) fn check_name_in(dir: &str, name: &str, startups: &[PathBuf]) -> Result<(), FsError> {
-    if has_executable_extension(name) && dir_is_in(Path::new(dir), startups) {
+/// True when `path` is a Startup folder or inside one.
+pub fn is_inside(path: &Path) -> bool {
+    dir_is_in(path, startup_dirs())
+}
+
+/// A destination / new entry / output path: refused inside Startup.
+pub fn check_into(path: &str) -> Result<(), FsError> {
+    if is_inside(Path::new(path)) {
         return Err(refused());
     }
     Ok(())
 }
 
-/// `name` is created in / moved into / renamed to inside `dir`.
-pub fn check_name(dir: &str, name: &str) -> Result<(), FsError> {
-    check_name_in(dir, name, startup_dirs())
-}
-
-/// The final component of `full_path` is created in its parent folder.
-pub fn check_new_path(full_path: &str) -> Result<(), FsError> {
-    let p = Path::new(full_path);
-    match (p.parent(), p.file_name()) {
-        (Some(parent), Some(name)) => {
-            check_name(&parent.to_string_lossy(), &name.to_string_lossy())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Copy / move of `sources` into `target_dir`: refused when a source name is executable and the
-/// target is a Startup folder.
-pub fn check_sources_into(target_dir: &str, sources: &[String]) -> Result<(), FsError> {
-    if !dir_is_in(Path::new(target_dir), startup_dirs()) {
-        return Ok(());
-    }
-    for s in sources {
-        if let Some(name) = Path::new(s).file_name()
-            && has_executable_extension(&name.to_string_lossy())
-        {
-            return Err(refused());
-        }
+/// The new path of a rename: refused inside Startup and when it IS Startup or one of its
+/// ancestors (renaming a folder to `Startup`, or a case-only rename of an ancestor).
+pub fn check_rename_to(new_path: &str) -> Result<(), FsError> {
+    let p = Path::new(new_path);
+    if is_inside(p) || is_startup_or_ancestor(p, startup_dirs()) {
+        return Err(refused());
     }
     Ok(())
 }
 
-/// Extraction destination (output names are not known up front).
-pub fn check_extract_into(dir: &str) -> Result<(), FsError> {
-    if dir_is_in(Path::new(dir), startup_dirs()) {
-        return Err(refused_extract());
+/// Extraction: refused when any planned entry would land inside Startup.
+pub fn check_extraction<'a>(
+    destination: &Path,
+    rels: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), FsError> {
+    if tree_hits(destination, rels, startup_dirs()) {
+        return Err(refused());
     }
     Ok(())
 }
@@ -127,11 +124,12 @@ pub fn check_extract_into(dir: &str) -> Result<(), FsError> {
 mod tests {
     use super::*;
 
+    const USER: &str = r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup";
+    const PROGRAMS: &str = r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs";
+
     fn startups() -> Vec<PathBuf> {
         vec![
-            crate::protected_dirs::resolve(Path::new(
-                r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
-            )),
+            crate::protected_dirs::resolve(Path::new(USER)),
             crate::protected_dirs::resolve(Path::new(
                 r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp",
             )),
@@ -139,91 +137,86 @@ mod tests {
     }
 
     #[test]
-    fn classifies_executable_extensions() {
-        for yes in [
-            "a.bat",
-            "A.CMD",
-            "x.ps1",
-            "m.psm1",
-            "a.vbs",
-            "a.vbe",
-            "a.js",
-            "a.jse",
-            "a.wsf",
-            "a.wsh",
-            "a.lnk",
-            "a.url",
-            "a.scr",
-            "a.exe",
-            "a.com",
-            "a.pif",
-            "a.hta",
-            "a.msi",
-            "a.reg",
-            "a.bat.",
-            "a.bat ",
-            "a.b.c.Bat",
-            "a.json.cmd",
+    fn anything_inside_startup_counts_siblings_do_not() {
+        let s = startups();
+        for dir in [
+            USER.to_string(),
+            r"c:/programdata/microsoft/windows/start menu/programs/startup/x.txt".to_string(),
+            format!(r"{USER}\sub\a.txt"),
+            format!(r"\\?\{USER}\a.bat"),
         ] {
-            assert!(has_executable_extension(yes), "{yes}");
+            assert!(dir_is_in(Path::new(&dir), &s), "{dir}");
         }
-        for no in [
-            "a.json",
-            "a.ferrum-selection",
-            "bat",
-            ".gitignore",
-            "a.txt",
-            "a.bat.txt",
-            "a.jsx",
-            "exe",
-            "",
-            "a.",
+        for dir in [
+            r"C:\Users\u\Documents".to_string(),
+            PROGRAMS.to_string(),
+            format!(r"{PROGRAMS}\Startup2\a.bat"),
         ] {
-            assert!(!has_executable_extension(no), "{no}");
+            assert!(!dir_is_in(Path::new(&dir), &s), "{dir}");
         }
     }
 
     #[test]
-    fn executable_names_are_refused_only_inside_startup() {
+    fn startup_and_its_ancestors_are_recognised() {
         let s = startups();
-        let user = r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup";
-        let common = r"c:/programdata/microsoft/windows/start menu/programs/startup";
-        for dir in [
-            user.to_string(),
-            common.to_string(),
-            format!(r"{user}\sub"),
-            format!(r"\\?\{user}"),
-        ] {
-            assert!(check_name_in(&dir, "a.bat", &s).is_err(), "{dir}");
-            assert!(check_name_in(&dir, "link.LNK", &s).is_err(), "{dir}");
-            assert!(check_name_in(&dir, "a.json", &s).is_ok(), "{dir}");
+        for p in [USER, PROGRAMS, r"C:\Users\u", r"C:\"] {
+            assert!(is_startup_or_ancestor(Path::new(p), &s), "{p}");
         }
-        for dir in [
-            r"C:\Users\u\Documents",
-            r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs",
-            r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup2",
-        ] {
-            assert!(check_name_in(dir, "a.bat", &s).is_ok(), "{dir}");
+        for p in [format!(r"{PROGRAMS}\Startup2"), r"C:\Users\v".to_string()] {
+            assert!(!is_startup_or_ancestor(Path::new(&p), &s), "{p}");
         }
+    }
+
+    /// A tree whose own structure contains `Startup\a.bat` lands in Startup when it is copied or
+    /// extracted into `Programs`; the same tree elsewhere does not.
+    #[test]
+    fn a_tree_that_reaches_startup_below_its_destination_is_detected() {
+        let s = startups();
+        let rels = [Path::new("Startup"), Path::new("Startup/a.bat")];
+        assert!(tree_hits(Path::new(PROGRAMS), rels, &s));
+        assert!(tree_hits(
+            Path::new(PROGRAMS),
+            [Path::new("startup\\a.bat")],
+            &s
+        ));
+        assert!(tree_hits(Path::new(USER), [Path::new("a.txt")], &s));
+        assert!(!tree_hits(
+            Path::new(PROGRAMS),
+            [Path::new("Startup2/a.bat")],
+            &s
+        ));
+        assert!(!tree_hits(Path::new(r"C:\Users\u\Documents"), rels, &s));
     }
 
     #[cfg(windows)]
     #[test]
     fn the_real_startup_folders_resolve_and_gate() {
         let dirs = startup_dirs();
-        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert!(dirs.len() >= 2, "{dirs:?}");
         for d in dirs {
-            let s = d.to_string_lossy();
-            assert!(s.ends_with("startup"), "{s}");
+            assert!(d.to_string_lossy().ends_with("startup"), "{d:?}");
         }
         let user = dirs[0].to_string_lossy().into_owned();
-        assert!(check_name(&user, "x.bat").is_err());
-        assert!(check_new_path(&format!(r"{user}\x.cmd")).is_err());
-        assert!(check_new_path(&format!(r"{user}\x.txt")).is_ok());
-        assert!(check_sources_into(&user, &[r"C:\t\x.ps1".into()]).is_err());
-        assert!(check_sources_into(&user, &[r"C:\t\x.txt".into()]).is_ok());
-        assert!(check_sources_into(r"C:\t", &[r"C:\t\x.ps1".into()]).is_ok());
-        assert!(check_extract_into(&user).is_err());
-        assert!(check_extract_into(r"C:\t").is_ok());
+        assert!(check_into(&user).is_err());
+        assert!(
+            check_into(&format!(r"{user}\x.txt")).is_err(),
+            "even a text file"
+        );
+        assert!(check_into(r"C:\t\x.txt").is_ok());
+        assert!(check_rename_to(&user).is_err());
+        let programs = Path::new(&user)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(check_rename_to(&programs).is_err(), "an ancestor");
+        assert!(check_rename_to(&format!(r"{programs}\Other")).is_ok());
+        assert!(check_extraction(Path::new(&programs), [Path::new("Startup/a.bat")]).is_err());
+        assert!(check_extraction(Path::new(&programs), [Path::new("Other/a.bat")]).is_ok());
+        let err = check_into(&user).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Ferrum does not write into the Windows Startup folder."
+        );
     }
 }

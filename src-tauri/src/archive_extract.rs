@@ -495,6 +495,17 @@ where
 /// removed through its own handle, so no partial file that *looks* complete
 /// survives. Directories created by this run are removed (empty, innermost
 /// first) on failure. Entries already fully written stay — they are complete.
+/// Extra veto over the final locations of all planned entries (FER-559: the Windows Startup
+/// folder). Installed once by the application (`lib.rs`); this module is also compiled on its
+/// own by the archive test crates, which have no such policy. `Err(message)` refuses the whole
+/// extraction before anything is written.
+pub type EntryGuard = fn(&Path, &[&Path]) -> Result<(), String>;
+static ENTRY_GUARD: std::sync::OnceLock<EntryGuard> = std::sync::OnceLock::new();
+
+pub fn set_entry_guard(guard: EntryGuard) {
+    let _ = ENTRY_GUARD.set(guard);
+}
+
 pub fn extract<F, C>(
     plan: &Plan,
     destination: &Path,
@@ -534,6 +545,17 @@ where
             ArchiveErrorCode::UnsafeEntry,
             "Plan path does not match raw member",
         ));
+    }
+
+    // FER-559: nothing is extracted into a Windows Startup folder, whether the destination is
+    // Startup itself or an archive entry such as `Startup/a.bat` reaches it from above.
+    if let Some(guard) = ENTRY_GUARD.get() {
+        let rels: Vec<&Path> = plan
+            .entries
+            .iter()
+            .map(|e| e.relative_path.as_path())
+            .collect();
+        guard(destination, &rels).map_err(|m| error(ArchiveErrorCode::UnsafeEntry, m))?;
     }
 
     let mut report = ExtractReport::default();

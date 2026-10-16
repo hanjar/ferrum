@@ -73,6 +73,12 @@ pub(crate) fn resolve(path: &Path) -> PathBuf {
     }
 }
 
+/// Case-folded, prefix-normalised form WITHOUT touching the file system (for relative parts
+/// appended to an already resolved root).
+pub(crate) fn resolve_lexical(path: &Path) -> PathBuf {
+    fold(path)
+}
+
 fn fold(path: &Path) -> PathBuf {
     let s = path.to_string_lossy().replace('/', "\\");
     let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {

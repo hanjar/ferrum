@@ -291,9 +291,17 @@ fn modified_ms(p: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Plain and `\?\` spellings, case and `/` do not matter (FER-559: a verbatim target next to a
+/// plain source must still be recognised as "into itself").
 fn is_within(child: &Path, ancestor: &Path) -> bool {
-    child.starts_with(ancestor)
+    crate::path_guard::key_is_within(
+        &crate::path_guard::path_key(child),
+        &crate::path_guard::path_key(ancestor),
+    )
 }
+
+const STARTUP_MSG: &str = "Ferrum does not write into the Windows Startup folder.";
+const ITSELF_MSG: &str = "Cannot copy a folder into itself";
 
 const RESERVED_NAME_MSG: &str = "Name is a reserved Windows device name (nul, con, com1 ...): rename it first, a copy would address the device";
 
@@ -314,7 +322,7 @@ pub fn plan_copy(sources: &[String], target_dir: &str) -> Result<CopyPlan, FsErr
             return Err(err(ErrorCode::NotFound, "Source not found").with_path(src));
         }
         // Rejections that make no sense to ask about (task 11 tests).
-        if s == target || is_within(target, &s) {
+        if is_within(target, &s) {
             return Err(
                 err(ErrorCode::InvalidPath, "Cannot copy a folder into itself").with_path(src),
             );
@@ -851,6 +859,24 @@ fn walk_sources(sh: &Shared, sources: &[String], target: &Path, policy: Conflict
             });
             continue;
         }
+        // A folder cannot be copied into itself (also when the target is spelled `\?\`).
+        if s.is_dir() && is_within(target, &s) {
+            sh.out.lock().unwrap().failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: ITSELF_MSG.into(),
+            });
+            continue;
+        }
+        // A plain file lands directly in `target`; folders are checked entry by entry in `walk`.
+        if !s.is_dir() && crate::startup_guard::is_inside(target) {
+            sh.out.lock().unwrap().failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: STARTUP_MSG.into(),
+            });
+            continue;
+        }
         let src_modified = modified_ms(&s);
         let wanted = target.join(&src_name);
         let resolved = resolve_dest(wanted, src_modified, policy, &planned);
@@ -907,6 +933,11 @@ fn walk(sh: &Shared, src: &Path, dest: &Path, group: &Arc<Group>) -> Result<(), 
         return copy_link(sh, src, dest, group);
     }
     if meta.is_dir() {
+        // FER-559: no directory is created inside a Startup folder, however deep in the tree.
+        if crate::startup_guard::is_inside(dest) {
+            sh.fail(group, src, err(ErrorCode::InvalidPath, STARTUP_MSG));
+            return Ok(());
+        }
         if let Err(e) = fs::create_dir_all(dest) {
             sh.fail(group, src, FsError::from(e));
             return Ok(());
