@@ -143,7 +143,7 @@ impl std::fmt::Display for RarValidationError {
             Self::SymlinkRefused(path) => {
                 write!(
                     f,
-                    "Path is a symlink or junction, which is refused for security: {path}"
+                    "Path is a symlink or junction, which is refused for security: {path}.                      Choose the real folder (junctions such as Scoop's 'current' are not accepted)"
                 )
             }
             Self::NotRegularFile(path) => {
@@ -301,12 +301,17 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
         if dir.parent().is_none() {
             break; // the volume root
         }
-        if let Ok(m) = std::fs::symlink_metadata(dir)
-            && m.file_type().is_symlink()
-        {
-            return Err(RarValidationError::SymlinkRefused(
-                dir.display().to_string(),
-            ));
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(RarValidationError::SymlinkRefused(
+                    dir.display().to_string(),
+                ));
+            }
+            Ok(_) => {}
+            // A folder that is not there: the exe check below reports "not found".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else (access denied, ...): the chain cannot be vetted, so it is refused.
+            Err(e) => return Err(RarValidationError::Io(e)),
         }
     }
 
