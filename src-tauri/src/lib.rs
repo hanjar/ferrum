@@ -305,6 +305,8 @@ pub fn run() {
                     profile::data_dir(app.handle()),
                     profile::activity_dir(app.handle()),
                     profile::local_data_dir(app.handle()),
+                    // The whole test-profile root when a smoke run isolates the profile.
+                    profile::profile_dir(),
                 ]
                 .into_iter()
                 .flatten(),

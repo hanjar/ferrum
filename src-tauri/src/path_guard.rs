@@ -100,6 +100,51 @@ pub fn has_reserved_device_component(normalised: &str) -> bool {
         .any(is_reserved_device_name)
 }
 
+/// FER-514 rework (P3-A): UNC spellings that reach THIS machine's own file system, which would
+/// let a path inside a protected folder be written as `\\localhost\C$\...`: a loopback host
+/// (`localhost`, `127.x.x.x`, `0.0.0.0`, `.`), the computer's own name (any domain suffix), or an
+/// administrative share (`C$`, `ADMIN$`, ...) on any host. `computer` is the local computer name.
+pub fn unc_reaches_local_machine(normalised: &str, computer: Option<&str>) -> bool {
+    let Some(rest) = normalised.strip_prefix(r"\\") else {
+        return false;
+    };
+    let mut parts = rest.split('\\');
+    let host = parts.next().unwrap_or("").to_ascii_lowercase();
+    let share = parts.next().unwrap_or("").to_ascii_lowercase();
+    if share.ends_with('$') {
+        return true;
+    }
+    let first_label = host.split('.').next().unwrap_or("");
+    let numeric_loopback = host.starts_with("127.") || host == "0.0.0.0";
+    host == "."
+        || host == "localhost"
+        || host.starts_with("localhost.")
+        || numeric_loopback
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("::1")
+        || computer.is_some_and(|c| {
+            let c = c.to_ascii_lowercase();
+            !c.is_empty() && (host == c || first_label == c)
+        })
+}
+
+/// [`unc_reaches_local_machine`] with the real computer name.
+pub fn is_local_machine_unc(normalised: &str) -> bool {
+    let computer = std::env::var("COMPUTERNAME").ok();
+    unc_reaches_local_machine(normalised, computer.as_deref())
+}
+
+/// FER-515 rework (P3-F): `\\?\` form of a path already accepted by `check_str`, used to touch an
+/// EXISTING entry whose name is reserved (`nul`, `aux.c` made by WSL/bash). The `\\?\` prefix
+/// switches off Win32 name parsing, so `...\nul` names a file, not the NUL device.
+pub fn verbatim_path(normalised: &str) -> String {
+    match normalised.strip_prefix(r"\\") {
+        Some(unc) => format!(r"\\?\UNC\{unc}"),
+        None => format!(r"\\?\{normalised}"),
+    }
+}
+
 pub fn is_reserved_device_name(comp: &str) -> bool {
     let trimmed = comp.trim_end_matches(['.', ' ']);
     let stem = trimmed

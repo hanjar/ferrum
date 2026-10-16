@@ -58,7 +58,56 @@ fn check_mutation_path(path: &str) -> Result<(), FsError> {
             "Path contains a reserved Windows device name",
         ));
     }
+    check_not_local_unc(&normalised)
+}
+
+/// FER-514 rework (P3-A): a mutation may not reach this machine through a UNC spelling
+/// (`\\localhost\C$\...`, `\\127.0.0.1\...`, the computer's own name, any administrative
+/// share): that would walk around the protected-folder check and the local-drive rules.
+fn check_not_local_unc(normalised: &str) -> Result<(), FsError> {
+    if crate::path_guard::is_local_machine_unc(normalised) {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Network path to this computer or an administrative share is not allowed here",
+        ));
+    }
     Ok(())
+}
+
+/// FER-515 rework (P3-F): an EXISTING entry that is renamed, deleted or changed. Same gates as
+/// [`check_write_source`], except that a reserved device name is allowed when the entry really is
+/// a plain file or folder of that name (made by WSL/bash: `nul`, `aux.c`). Such an entry is
+/// reached through its `\\?\` form, which does no device-name parsing, and that form is returned
+/// to be used for the operation. A reserved name that does not exist as a plain file or folder
+/// (the device itself) is refused.
+fn prepare_source(path: &str) -> Result<String, FsError> {
+    let normalised = crate::path_guard::check_str(path)?;
+    check_not_local_unc(&normalised)?;
+    crate::protected_dirs::check_write_source(&normalised)?;
+    if !crate::path_guard::has_reserved_device_component(&normalised) {
+        return Ok(path.to_string());
+    }
+    let verbatim = crate::path_guard::verbatim_path(&normalised);
+    match std::fs::symlink_metadata(&verbatim) {
+        Ok(meta) if meta.is_file() || meta.is_dir() => Ok(verbatim),
+        _ => Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Path contains a reserved Windows device name",
+        )),
+    }
+}
+
+fn prepare_sources<'a>(
+    paths: impl IntoIterator<Item = &'a String>,
+) -> Result<Vec<String>, FsError> {
+    paths.into_iter().map(|p| prepare_source(p)).collect()
+}
+
+/// FER-514 rework (point 1): a SOURCE that is only read (copy / plan): the plain string gate
+/// (no pipes, device namespaces, ADS, `\\?\GLOBALROOT`); reserved names are not an issue for
+/// reads of existing entries.
+fn check_read_source(path: &str) -> Result<(), FsError> {
+    crate::path_guard::check_str(path).map(|_| ())
 }
 
 /// FER-514 P3-7: a mutation path that is a DESTINATION or a newly created entry: the string gate
@@ -109,14 +158,10 @@ fn check_new_name(name: &str) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Protected-folder gate only, for commands that never had the string gate (copy / move / archive
-/// create+extract): adding `check_str` there is a behaviour change that is reported separately.
+/// Copy / move / archive destinations: the full mutation gate (string gate, reserved names, local
+/// UNC) plus the protected folders.
 fn check_protected_target(path: &str) -> Result<(), FsError> {
-    crate::protected_dirs::check_write_target(path)
-}
-
-fn check_protected_source(path: &str) -> Result<(), FsError> {
-    crate::protected_dirs::check_write_source(path)
+    check_write_target(path)
 }
 
 #[tauri::command]
@@ -290,7 +335,7 @@ pub fn rename_entry(
     new_name: String,
     app: AppHandle,
 ) -> Result<crate::domain::FileEntry, FsError> {
-    check_write_source(&path)?;
+    let path = prepare_source(&path)?;
     check_new_name(&new_name)?;
     let entry = crate::mutations::rename_entry(&path, &new_name)?;
     note_activity_changes(
@@ -319,7 +364,7 @@ pub fn delete_entries(
     permanent: bool,
     app: AppHandle,
 ) -> Result<crate::mutations::DeleteReport, FsError> {
-    check_write_sources(&paths)?;
+    let paths = prepare_sources(&paths)?;
     let report = if permanent {
         crate::mutations::delete_permanent(&paths)
     } else {
@@ -357,6 +402,10 @@ pub fn plan_copy(
     sources: Vec<String>,
     target_dir: String,
 ) -> Result<crate::copy_engine::CopyPlan, FsError> {
+    for source in &sources {
+        check_read_source(source)?;
+    }
+    check_write_target(&target_dir)?;
     crate::copy_engine::plan_copy(&sources, &target_dir)
 }
 
@@ -368,6 +417,9 @@ pub fn enqueue_copy(
     app: AppHandle,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
+    for source in &sources {
+        check_read_source(source)?;
+    }
     check_protected_target(&target_dir)?;
     let policy = parse_policy(&policy)?;
     let activity_app = app.clone();
@@ -470,7 +522,9 @@ pub fn enqueue_move(
 ) -> Result<OperationId, FsError> {
     check_protected_target(&target_dir)?;
     for source in &sources {
-        check_protected_source(source)?;
+        let normalised = crate::path_guard::check_str(source)?;
+        check_not_local_unc(&normalised)?;
+        crate::protected_dirs::check_write_source(source)?;
     }
     let policy = parse_policy(&policy)?;
     remember_copy_defaults(&load_prefs(app.clone()));
@@ -2431,7 +2485,7 @@ pub fn set_attributes(
     read_only: Option<bool>,
     hidden: Option<bool>,
 ) -> Result<(), FsError> {
-    check_write_source(&path)?;
+    let path = prepare_source(&path)?;
     crate::properties::set_attributes(&path, read_only, hidden)
 }
 
@@ -3044,7 +3098,7 @@ fn report_failures(outcome: &crate::codecs::CodecReport) -> Result<(), FsError> 
 /// atomic; an empty map removes the sidecar file.
 #[tauri::command]
 pub async fn comment_set(path: String, comment: Option<String>) -> Result<(), FsError> {
-    check_write_target(&path)?;
+    let path = prepare_source(&path)?;
     spawn_blocking(move || crate::comments::set_comment(&path, comment.as_deref()))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
@@ -3423,13 +3477,123 @@ mod fer512_ipc_gate_tests {
         assert!(super::check_write_source(&in_cfg).is_err());
         assert!(super::check_write_source(&s(&base)).is_err(), "ancestor");
         assert!(super::check_write_source(&s(&other.join("a.txt"))).is_ok());
-        assert!(super::check_protected_source(&s(&base)).is_err());
+        assert!(crate::protected_dirs::check_write_source(&s(&base)).is_err());
         assert!(super::check_write_sources(&[s(&other), in_cfg.clone()]).is_err());
         assert!(super::check_write_targets(&[s(&other), s(&base)]).is_ok());
         // The string gate still applies first.
         assert!(super::check_write_target(r"C:\x.txt:ads").is_err());
         crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Rework point 1: pipes, device namespaces, ADS and GLOBALROOT are refused for every source
+    /// and destination of copy / move / archive; ordinary paths still pass.
+    #[test]
+    fn copy_and_move_paths_refuse_pipes_ads_and_device_namespaces() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for bad in [
+            r"\\.\pipe\x",
+            r"\\?\GLOBALROOT\Device\NamedPipe\x",
+            r"C:\x:ads",
+            r"\\?\C:\x",
+            "relative",
+        ] {
+            assert!(super::check_read_source(bad).is_err(), "source {bad}");
+            assert!(super::check_protected_target(bad).is_err(), "target {bad}");
+            assert!(super::prepare_source(bad).is_err(), "move source {bad}");
+        }
+        for good in [r"C:\Users\u\a.txt", r"\\server\share\dir"] {
+            assert!(super::check_read_source(good).is_ok(), "{good}");
+            assert!(super::check_protected_target(good).is_ok(), "{good}");
+        }
+    }
+
+    /// Rework point 3: UNC spellings of this machine and administrative shares are classified.
+    #[test]
+    fn unc_paths_to_this_machine_are_classified() {
+        use crate::path_guard::unc_reaches_local_machine as local;
+        let me = Some("DESKTOP-ABC");
+        for bad in [
+            r"\\localhost\C$\x",
+            r"\\LOCALHOST\share\x",
+            r"\\127.0.0.1\share\x",
+            r"\\127.1.2.3\share",
+            r"\\0.0.0.0\share",
+            r"\\desktop-abc\share\x",
+            r"\\DESKTOP-ABC.corp.example\share\x",
+            r"\\otherhost\C$\x",
+            r"\\otherhost\ADMIN$\x",
+            r"\\server\d$",
+            r"\\localhost.localdomain\share",
+            r"\\.\C:\x",
+        ] {
+            assert!(local(bad, me), "{bad}");
+        }
+        for good in [
+            r"\\server\share\x",
+            r"\\desktop-abcd\share",
+            r"\\10.0.0.5\share\dollar",
+            r"C:\Users\u",
+            r"\\fileserver.corp\data$like\x",
+        ] {
+            // The last one has no trailing `$` on the share: only a share NAMED `...$` counts.
+            assert!(!local(good, me), "{good}");
+        }
+        assert!(
+            !local(r"\\desktop-abc\share", None),
+            "no computer name known"
+        );
+        // Wired into the mutation gate.
+        assert!(check_mutation_path(r"\\localhost\C$\Users\u\a.txt").is_err());
+        assert!(check_mutation_path(r"\\server\share\a.txt").is_ok());
+    }
+
+    /// Rework point 2: an EXISTING plain file or folder with a reserved name (made by WSL/bash)
+    /// can still be renamed and deleted, through its `\\?\` form; the device itself, a missing
+    /// entry and a NEW entry with such a name are refused.
+    #[cfg(windows)]
+    #[test]
+    fn existing_reserved_name_entries_can_be_deleted_and_renamed() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ferrum-ipc-nul-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.to_string_lossy().into_owned();
+        let verbatim_dir = crate::path_guard::verbatim_path(&plain);
+        let make = |name: &str| {
+            let p = format!(r"{verbatim_dir}\{name}");
+            std::fs::write(&p, b"made by bash").unwrap();
+        };
+        make("nul");
+        make("con.txt");
+        make("aux.c");
+
+        // Never created: still refused (it would be the device).
+        assert!(super::prepare_source(&format!(r"{plain}\prn")).is_err());
+        // The device itself is not a plain file: the bare drive-relative NUL is refused too.
+        assert!(super::check_mutation_path(&format!(r"{plain}\nul")).is_err());
+
+        // delete (permanent) through the prepared path
+        let nul = super::prepare_source(&format!(r"{plain}\nul")).expect("existing nul allowed");
+        assert!(nul.starts_with(r"\\?\"), "{nul}");
+        let report = crate::mutations::delete_permanent(&[nul]);
+        assert_eq!(report.deleted, 1, "{:?}", report.failed);
+        assert!(!std::path::Path::new(&format!(r"{verbatim_dir}\nul")).exists());
+
+        // rename source with a reserved name to an ordinary name
+        let con = super::prepare_source(&format!(r"{plain}\con.txt")).unwrap();
+        let entry = crate::mutations::rename_entry(&con, "renamed.txt").expect("rename");
+        assert!(entry.path.ends_with("renamed.txt"), "{}", entry.path);
+        assert!(std::path::Path::new(&format!(r"{plain}\renamed.txt")).exists());
+
+        // the new name may not be reserved; creating `con.txt` fresh is refused
+        assert!(super::check_new_name("con.txt").is_err());
+        assert!(super::check_new_name("aux.c").is_err());
+        let _ = std::fs::remove_dir_all(&verbatim_dir);
     }
 
     /// Info-1: the harness job can never sleep longer than 10 s.

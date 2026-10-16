@@ -18,20 +18,37 @@ use std::sync::RwLock;
 
 static ROOTS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 
-/// Replace the protected set. Called once from `lib.rs` setup.
+/// Replace the protected set. Called once from `lib.rs` setup. A folder that does not exist yet
+/// is still protected (matched by its resolved ancestor plus the remaining names), but it is
+/// logged, because the match is then only lexical until the folder is created.
 pub fn register(dirs: impl IntoIterator<Item = PathBuf>) {
-    let resolved: Vec<PathBuf> = dirs.into_iter().map(|d| resolve(&d)).collect();
-    if let Ok(mut roots) = ROOTS.write() {
-        *roots = resolved;
-    }
+    let resolved: Vec<PathBuf> = dirs
+        .into_iter()
+        .map(|d| {
+            if std::fs::canonicalize(&d).is_err() {
+                log::warn!(
+                    "protected folder {} cannot be resolved yet; matching it by name only",
+                    d.display()
+                );
+            }
+            resolve(&d)
+        })
+        .collect();
+    // A poisoned lock still takes the new value (and is healed by it).
+    let mut roots = ROOTS.write().unwrap_or_else(|e| e.into_inner());
+    *roots = resolved;
+    drop(roots);
+    ROOTS.clear_poison();
 }
 
 /// Tests that register roots share the process-wide set: they serialise on this lock.
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn roots() -> Vec<PathBuf> {
-    ROOTS.read().map(|r| r.clone()).unwrap_or_default()
+/// `None` when the lock is poisoned: the checks then refuse EVERYTHING (fail closed) instead of
+/// treating the protected set as empty.
+fn roots() -> Option<Vec<PathBuf>> {
+    ROOTS.read().ok().map(|r| r.clone())
 }
 
 /// Resolved, case-folded, prefix-normalised form of `path` used for comparison.
@@ -98,7 +115,10 @@ fn refused() -> FsError {
 
 /// A destination / new entry / output file: refused inside a protected folder.
 pub fn check_write_target(path: &str) -> Result<(), FsError> {
-    if touches(Path::new(path), &roots(), false) {
+    let Some(roots) = roots() else {
+        return Err(refused());
+    };
+    if touches(Path::new(path), &roots, false) {
         return Err(refused());
     }
     Ok(())
@@ -107,7 +127,10 @@ pub fn check_write_target(path: &str) -> Result<(), FsError> {
 /// Something that is renamed, moved, deleted or modified in place: refused inside a protected
 /// folder or when it contains one.
 pub fn check_write_source(path: &str) -> Result<(), FsError> {
-    if touches(Path::new(path), &roots(), true) {
+    let Some(roots) = roots() else {
+        return Err(refused());
+    };
+    if touches(Path::new(path), &roots, true) {
         return Err(refused());
     }
     Ok(())
@@ -174,6 +197,23 @@ mod tests {
             assert!(touches(&link.join("fresh.txt"), &roots, false));
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A poisoned lock must refuse every write (not behave like "nothing is protected"), and a
+    /// new `register` heals it.
+    #[test]
+    fn a_poisoned_lock_fails_closed() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        register(Vec::<PathBuf>::new());
+        let poisoner = std::thread::spawn(|| {
+            let _w = ROOTS.write().unwrap();
+            panic!("poison the protected-dirs lock on purpose");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(check_write_target(r"C:\anything\at\all.txt").is_err());
+        assert!(check_write_source(r"C:\anything").is_err());
+        register(Vec::<PathBuf>::new());
+        assert!(check_write_target(r"C:\anything\at\all.txt").is_ok());
     }
 
     #[test]
