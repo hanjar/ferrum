@@ -510,6 +510,10 @@ function injectTauriMock(page: Page) {
       hold(): void {
         state.holdScan = true;
       },
+      isActive(): boolean {
+        const current = state.activeScanId ? state.scans.get(state.activeScanId) : undefined;
+        return !!current && !current.cancelled && !current.completed;
+      },
       async progress(frac: number): Promise<void> {
         const scan = await waitForActiveScan();
         if (!scan.cancelled && !scan.completed) {
@@ -723,18 +727,33 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
     page.evaluate(() => (window as unknown as { __duLog: { starts: string[] } }).__duLog.starts);
   const holdScan = () =>
     page.evaluate(() => (window as unknown as { __duScan: { hold: () => void } }).__duScan.hold());
-  const emitScanProgress = (frac: number) =>
-    page.evaluate(
+  /** Fail fast (5 s, clear message) instead of hanging in the page-side waiter. */
+  const expectScanActive = () =>
+    expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            (window as unknown as { __duScan: { isActive: () => boolean } }).__duScan.isActive(),
+          ),
+        { timeout: 5_000, message: 'scan never started (held scan is not active)' },
+      )
+      .toBe(true);
+  const emitScanProgress = async (frac: number) => {
+    await expectScanActive();
+    await page.evaluate(
       (f) =>
         (
           window as unknown as { __duScan: { progress: (frac: number) => Promise<void> } }
         ).__duScan.progress(f),
       frac,
     );
-  const completeScan = () =>
-    page.evaluate(() =>
+  };
+  const completeScan = async () => {
+    await expectScanActive();
+    await page.evaluate(() =>
       (window as unknown as { __duScan: { complete: () => Promise<void> } }).__duScan.complete(),
     );
+  };
 
   /** Enter the workspace via a pane toolbar button (Alt+Shift+D's same entry). */
   async function openWorkspace(button = 'Scan') {
