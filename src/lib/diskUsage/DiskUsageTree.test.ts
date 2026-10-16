@@ -753,4 +753,49 @@ describe('FER-499 tree navigation: indentation, keyboard model, treemap sync', (
     expect(activeOf(tree)).toBe(note.id);
     expect(note.getAttribute('aria-selected')).toBe('true');
   });
+
+  it('clicking a row and switching metric within the 150 ms debounce keeps selection on that node even when rows reorder', async () => {
+    const DOCS = `${ROOT}\\Documents`;
+    const MUSIC = `${ROOT}\\Music`;
+    const logicalItems = [
+      item(DOCS, { name: 'Documents', logicalBytes: 200, allocatedBytes: null }),
+      item(MUSIC, { name: 'Music', logicalBytes: 150, allocatedBytes: 150 }),
+    ];
+    const allocatedItems = [
+      item(MUSIC, { name: 'Music', logicalBytes: 150, allocatedBytes: 150 }),
+      item(DOCS, { name: 'Documents', logicalBytes: 200, allocatedBytes: null }),
+    ];
+    duMocks.queryChildren.mockImplementation(
+      async (_scan: string, nodeId: string, offset = 0, limit = 50, _sort, filter) => {
+        const all =
+          nodeId === ROOT ? (filter?.metric === 'allocated' ? allocatedItems : logicalItems) : [];
+        return {
+          scanId: 's1',
+          nodeId,
+          version: 3,
+          scannedAtMs: 1,
+          metric: filter?.metric ?? 'logical',
+          coverage: 'complete',
+          offset,
+          limit,
+          total: all.length,
+          items: all.slice(offset, offset + limit),
+        };
+      },
+    );
+    const { tree, rows } = await boot(logicalItems);
+    const docsBefore = rows().find((r) => r.getAttribute('data-row-id') === DOCS)!;
+    fireEvent.click(docsBefore);
+    expect(diskUsage.selectedNodeId).toBe(DOCS);
+
+    // Switch metric before the 150 ms zoomTimer fires; Documents moves from index 1 to index 2.
+    diskUsage.setMetric('allocated');
+    await settle();
+    await tick();
+
+    expect(diskUsage.selectedNodeId).toBe(DOCS);
+    expect(diskUsage.zoomStack).toEqual([DOCS]);
+    const docsAfter = rows().find((r) => r.getAttribute('data-row-id') === DOCS)!;
+    expect(activeOf(tree)).toBe(docsAfter.id);
+  });
 });

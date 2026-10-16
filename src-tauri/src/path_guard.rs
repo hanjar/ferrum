@@ -86,6 +86,168 @@ pub fn check_str(path: &str) -> Result<String, FsError> {
     Ok(p)
 }
 
+/// FER-515 P3-2: true when any file-system component of a path already accepted by `check_str`
+/// is a Windows reserved device name: `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9` (also the
+/// superscript digits), `CONIN$`, `CONOUT$` - with or without an extension, any case, ignoring the
+/// trailing dots/spaces Windows strips. The drive (`X:`) and the UNC host/share are skipped.
+pub fn has_reserved_device_component(normalised: &str) -> bool {
+    let rest = match normalised.strip_prefix(r"\\") {
+        Some(unc) => unc.splitn(3, '\\').nth(2).unwrap_or(""),
+        None => normalised.get(2..).unwrap_or(""),
+    };
+    rest.split('\\')
+        .filter(|c| !c.is_empty())
+        .any(is_reserved_device_name)
+}
+
+/// FER-514 rework (P3-A): UNC spellings that reach THIS machine's own file system, which would
+/// let a path inside a protected folder be written as `\\localhost\C$\...`. Refused:
+/// - a loopback or "this machine" host: `.`, `localhost[.x]`, `::1`, any `127.x` / `0.x` address
+///   (also in decimal, hex and octal spellings such as `2130706433`, `0x7f000001`, `0177.0.0.1`),
+///   `*.ipv6-literal.net`, or one of `local_names` (this computer's NetBIOS name, DNS host name
+///   and fully qualified name, with or without domain suffix);
+/// - an ADMINISTRATIVE share on any host: `C$` (one letter), `ADMIN$`, `IPC$`, `PRINT$`. Other
+///   hidden shares (`home$`, `backup$`) on a remote server are legitimate and stay allowed; on a
+///   local host they are refused through the host rule.
+pub fn unc_reaches_local_machine(normalised: &str, local_names: &[String]) -> bool {
+    let Some(rest) = normalised.strip_prefix(r"\\") else {
+        return false;
+    };
+    let mut parts = rest.split('\\');
+    let host = parts.next().unwrap_or("").to_ascii_lowercase();
+    let share = parts.next().unwrap_or("").to_ascii_lowercase();
+    if is_admin_share(&share) {
+        return true;
+    }
+    let first_label = host.split('.').next().unwrap_or("");
+    host == "."
+        || host == "localhost"
+        || host.starts_with("localhost.")
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("::1")
+        || host.ends_with(".ipv6-literal.net")
+        || numeric_host_is_loopback(&host)
+        || local_names.iter().any(|n| {
+            let n = n.to_ascii_lowercase();
+            !n.is_empty() && (host == n || first_label == n)
+        })
+}
+
+fn is_admin_share(share: &str) -> bool {
+    matches!(share, "admin$" | "ipc$" | "print$")
+        || (share.len() == 2 && share.ends_with('$') && share.as_bytes()[0].is_ascii_alphabetic())
+}
+
+/// One label of a numeric host in `inet_aton` spelling: `0x..` hex, leading `0` octal, else decimal.
+fn numeric_label(label: &str) -> Option<u64> {
+    if label.is_empty() {
+        return None;
+    }
+    if let Some(hex) = label.strip_prefix("0x") {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    if label.len() > 1 && label.starts_with('0') {
+        return u64::from_str_radix(&label[1..], 8).ok();
+    }
+    label.parse::<u64>().ok()
+}
+
+/// A host made only of numeric labels (any radix, 1 to 4 labels) whose first address byte is 127
+/// or 0 (loopback / "this host"). `2130706433` and `0x7f000001` are the single-label forms.
+fn numeric_host_is_loopback(host: &str) -> bool {
+    let labels: Vec<Option<u64>> = host.split('.').map(numeric_label).collect();
+    if labels.is_empty() || labels.len() > 4 || labels.iter().any(Option::is_none) {
+        return false;
+    }
+    let first = if labels.len() == 1 {
+        labels[0].unwrap_or(0) >> 24
+    } else {
+        labels[0].unwrap_or(u64::MAX)
+    };
+    first == 127 || first == 0
+}
+
+/// Names this computer answers to: `%COMPUTERNAME%`, NetBIOS, DNS host name and fully qualified
+/// DNS name (`GetComputerNameExW`), read once.
+pub fn local_machine_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names: Vec<String> = std::env::var("COMPUTERNAME").ok().into_iter().collect();
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::SystemInformation::GetComputerNameExW;
+            // ComputerNameNetBIOS, DnsHostname, DnsFullyQualified, PhysicalDnsHostname,
+            // PhysicalDnsFullyQualified.
+            for kind in [0, 1, 3, 5, 7] {
+                let mut buf = [0u16; 512];
+                let mut len = buf.len() as u32;
+                // SAFETY: `buf` is valid for `len` u16s; `len` is updated to the length written.
+                let ok = unsafe { GetComputerNameExW(kind, buf.as_mut_ptr(), &mut len) } != 0;
+                if ok {
+                    let name = String::from_utf16_lossy(&buf[..len as usize]);
+                    if !name.is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
+    })
+}
+
+/// [`unc_reaches_local_machine`] with the real computer names.
+pub fn is_local_machine_unc(normalised: &str) -> bool {
+    unc_reaches_local_machine(normalised, local_machine_names())
+}
+
+/// FER-515 rework (P3-F): `\\?\` form of a path already accepted by `check_str`, used to touch an
+/// EXISTING entry whose name is reserved (`nul`, `aux.c` made by WSL/bash). The `\\?\` prefix
+/// switches off Win32 name parsing, so `...\nul` names a file, not the NUL device.
+pub fn verbatim_path(normalised: &str) -> String {
+    match normalised.strip_prefix(r"\\") {
+        Some(unc) => format!(r"\\?\UNC\{unc}"),
+        None => format!(r"\\?\{normalised}"),
+    }
+}
+
+/// Inverse of [`verbatim_path`]: `\\?\C:\x` -> `C:\x`, `\\?\UNC\h\s` -> `\\h\s`. Any other
+/// path is returned unchanged. Used before a path that went through the `\\?\` form is shown to
+/// the UI or recorded.
+pub fn strip_verbatim(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+pub fn is_reserved_device_name(comp: &str) -> bool {
+    let trimmed = comp.trim_end_matches(['.', ' ']);
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches(' ')
+        .to_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(
+            chars.next(),
+            Some('1'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}')
+        )
+        && chars.next().is_none()
+}
+
 /// A checked disk file. `meta` describes the checked handle (the symlink TARGET for a link).
 pub struct GuardedFile {
     pub path: String,

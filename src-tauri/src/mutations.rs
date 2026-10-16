@@ -110,6 +110,14 @@ pub fn create_dir(dir: &str, name: &str) -> Result<FileEntry, FsError> {
 /// Rename one entry within its parent directory (new_name is a bare name).
 pub fn rename_entry(path: &str, new_name: &str) -> Result<FileEntry, FsError> {
     validate_name(new_name)?;
+    // FER-514 rework (N2/N3): a source reached through its `\\?\` form (an existing entry with a
+    // reserved name) skips Win32 name normalisation, so the NEW name must already be one Windows
+    // would accept as is: no trailing dot/space, none of `<>"|?*`, no device name. The path that
+    // goes back to the UI is the plain form again.
+    let verbatim = path.starts_with(r"\\?\");
+    if verbatim {
+        validate_portable_name(new_name)?;
+    }
     let old = Path::new(path);
     if !old.exists() {
         return Err(FsError::new(ErrorCode::NotFound, "Entry not found").with_path(path));
@@ -128,7 +136,11 @@ pub fn rename_entry(path: &str, new_name: &str) -> Result<FileEntry, FsError> {
     // F2-27: a file's comment (per-directory sidecar) follows the rename.
     // Best-effort — a comment is decoration and must never fail a rename.
     crate::comments::migrate_on_rename(path, &target.to_string_lossy());
-    entry_of(&target)
+    let mut entry = entry_of(&target)?;
+    if verbatim {
+        entry.path = crate::path_guard::strip_verbatim(&entry.path);
+    }
+    Ok(entry)
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

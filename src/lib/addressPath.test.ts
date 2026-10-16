@@ -4,6 +4,7 @@ import {
   highlightPrefix,
   refineFromCache,
   splitInput,
+  stripVerbatimPrefix,
   stepIndex,
   uncPathsOf,
 } from './addressPath';
@@ -66,5 +67,18 @@ describe('addressPath hardening helpers', () => {
     expect(refineFromCache(cache, 'D:\\', 'C:\\Users\\al')).toBeUndefined();
     expect(refineFromCache({ ...cache, complete: false }, 'C:\\', 'C:\\Users\\al')).toBeUndefined();
     expect(refineFromCache(undefined, 'C:\\', 'C:\\Users\\al')).toBeUndefined();
+  });
+  it('strips a verbatim prefix only for plain drive and UNC locations (FER-515 P3-5)', () => {
+    expect(stripVerbatimPrefix('\\\\?\\C:\\Users\\a')).toBe('C:\\Users\\a');
+    expect(stripVerbatimPrefix('\\\\?\\C:')).toBe('C:');
+    expect(stripVerbatimPrefix('//?/C:/x')).toBe('C:\\x');
+    expect(stripVerbatimPrefix('\\\\?\\UNC\\srv\\share\\f')).toBe('\\\\srv\\share\\f');
+    // Not a plain location: left for the Rust guard to refuse.
+    expect(stripVerbatimPrefix('\\\\?\\GLOBALROOT\\Device\\x')).toBe(
+      '\\\\?\\GLOBALROOT\\Device\\x',
+    );
+    expect(stripVerbatimPrefix('\\\\.\\C:\\x')).toBe('\\\\.\\C:\\x');
+    expect(stripVerbatimPrefix('C:\\plain')).toBe('C:\\plain');
+    expect(stripVerbatimPrefix('\\\\srv\\share')).toBe('\\\\srv\\share');
   });
 });

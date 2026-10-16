@@ -10,6 +10,8 @@ import {
   menuGroups,
   menuSubmenus,
   runAction,
+  shortcutBlockedByFullPage,
+  FULL_PAGE_SHORTCUT_IDS,
   searchActions,
   shortcutFor,
   shortcutLabel,
@@ -622,5 +624,59 @@ describe('FER-431 Files menu grouping', () => {
     for (const query of ['Pack', 'Test archive', 'Properties', 'Create checksum']) {
       expect(searchActions(query).length, query).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('full-page shortcut guard (FER-561)', () => {
+  const key = (k: string, extra: Record<string, boolean> = {}) => ({
+    key: k,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+    ...extra,
+  });
+  const blocked = (e: ReturnType<typeof key>) => {
+    const action = actionForEvent(e);
+    return action ? shortcutBlockedByFullPage(action) : undefined;
+  };
+
+  beforeEach(() => {
+    ui.activityOpen = false;
+  });
+
+  it('blocks nothing while no full page is open', () => {
+    for (const a of actions) expect(shortcutBlockedByFullPage(a)).toBe(false);
+  });
+
+  it('blocks file shortcuts (F2, F5, F6, F7, F8, Shift+F8, Enter) while Activity is open', () => {
+    ui.activityOpen = true;
+    for (const e of [
+      key('F2'),
+      key('F5'),
+      key('F6'),
+      key('F7'),
+      key('F8'),
+      key('F8', { shiftKey: true }),
+      key('Enter'),
+    ]) {
+      expect(blocked(e), e.key).toBe(true);
+    }
+  });
+
+  it('keeps the palette, settings and Activity shortcuts working', () => {
+    ui.activityOpen = true;
+    expect(blocked(key('k', { ctrlKey: true }))).toBe(false);
+    expect(blocked(key(',', { ctrlKey: true }))).toBe(false);
+    expect(shortcutBlockedByFullPage(getAction('activity.open')!)).toBe(false);
+    expect([...FULL_PAGE_SHORTCUT_IDS].sort()).toEqual([
+      'activity.open',
+      'app.settings',
+      'palette.open',
+    ]);
+  });
+
+  it('every allowed id exists in the registry', () => {
+    for (const id of FULL_PAGE_SHORTCUT_IDS) expect(getAction(id)).toBeDefined();
   });
 });

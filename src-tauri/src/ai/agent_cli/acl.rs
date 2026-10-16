@@ -76,6 +76,8 @@ const ANCESTOR_DANGER: u32 = FILE_ADD_SUBDIRECTORY
     | GENERIC_WRITE;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// ACCESS_ALLOWED_CALLBACK_ACE_TYPE (conditional ACE): same mask/SID layout as type 0.
+const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 /// ACCESS_DENIED, ACCESS_DENIED_OBJECT, ACCESS_DENIED_CALLBACK, ACCESS_DENIED_CALLBACK_OBJECT.
 const DENY_TYPES: [u8; 4] = [1, 6, 10, 12];
 const INHERIT_ONLY_ACE: u8 = 0x08;
@@ -111,6 +113,21 @@ fn trusted(sid: &str, me: &str) -> bool {
 
 /// Pure rule check. `Some(reason)` = untrusted.
 pub fn evaluate(sec: &Security, me: &str, role: Role) -> Option<String> {
+    evaluate_with(sec, me, role, false)
+}
+
+/// [`evaluate`] with one switch (FER-514). `callback_as_plain = true` judges a conditional
+/// allow ACE (type 9) by its mask and SID exactly like a plain allow ACE (a condition can only
+/// narrow what it grants, so this stays conservative): a condition that grants no write right to
+/// a foreign account is accepted, one that does is reported. Every other non-plain allow ACE
+/// type (object, compound, callback-object) still fails closed. The default (`false`) is the
+/// FER-490 rule for agent CLIs, unchanged.
+pub fn evaluate_with(
+    sec: &Security,
+    me: &str,
+    role: Role,
+    callback_as_plain: bool,
+) -> Option<String> {
     if !trusted(&sec.owner, me) {
         return Some(format!("pemilik {}", sec.owner));
     }
@@ -121,7 +138,9 @@ pub fn evaluate(sec: &Security, me: &str, role: Role) -> Option<String> {
         if ace.flags & INHERIT_ONLY_ACE != 0 || DENY_TYPES.contains(&ace.kind) {
             continue;
         }
-        if ace.kind != ACCESS_ALLOWED_ACE_TYPE {
+        let plain = ace.kind == ACCESS_ALLOWED_ACE_TYPE
+            || (callback_as_plain && ace.kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE);
+        if !plain {
             // Callback / conditional / object / compound allow ACEs: fail closed.
             return Some(format!(
                 "ACE tipe {} ({})",
@@ -308,6 +327,19 @@ pub fn owner_trusted(path: &Path) -> Result<(), String> {
 /// The file, its folder and every ancestor up to the volume root, by the rules above.
 /// `Err(reason)` is shown in Settings / the chat.
 pub fn trusted_location(file: &Path) -> Result<(), String> {
+    location_check(file, false)
+}
+
+/// FER-514: [`trusted_location`] for a program the user installed themselves (Rar.exe): same
+/// rules, except that a conditional allow ACE is judged by its rights (see [`evaluate_with`]).
+/// The stock `C:\Program Files\WinRAR` folder carries a read-only conditional ACE for Users, which
+/// the strict agent rule would refuse although nobody but TrustedInstaller/Administrators can
+/// write there.
+pub fn trusted_location_callback_aware(file: &Path) -> Result<(), String> {
+    location_check(file, true)
+}
+
+fn location_check(file: &Path, callback_as_plain: bool) -> Result<(), String> {
     let me = current_user_sid().map_err(|_| "ditolak: akun saat ini tidak terbaca".to_owned())?;
     let mut checks: Vec<(&Path, Role)> = vec![(file, Role::Target)];
     if let Some(parent) = file.parent() {
@@ -322,7 +354,7 @@ pub fn trusted_location(file: &Path) -> Result<(), String> {
     for (path, role) in checks {
         let sec = read_security(path)
             .map_err(|_| format!("ditolak: izin {} tidak dapat dibaca", path.display()))?;
-        if let Some(why) = evaluate(&sec, &me, role) {
+        if let Some(why) = evaluate_with(&sec, &me, role, callback_as_plain) {
             return Err(format!(
                 "ditolak: {} bisa diubah akun lain ({why})",
                 path.display()
