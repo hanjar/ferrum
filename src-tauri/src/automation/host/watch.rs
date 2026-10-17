@@ -362,12 +362,6 @@ impl Tracked {
         ]
     }
 
-    fn has_unc_root(&self) -> bool {
-        [&self.left, &self.right]
-            .iter()
-            .any(|r| roots::is_unc(&r.path))
-    }
-
     fn all_roots(&self) -> Vec<String> {
         let mut v = vec![self.left.path.clone(), self.right.path.clone()];
         if let Some(root) = &self.versioning {
@@ -526,6 +520,8 @@ fn make_handles<D: HostDeps>(inner: &Arc<Inner<D>>, t: &mut Tracked) -> (usize, 
 struct Report {
     /// The first root that is not there (or not the approved folder).
     missing: Option<String>,
+    /// That root is there, but is another folder than the approved one.
+    changed: bool,
     /// Every root that was asked is there.
     all_there: bool,
     /// Both roots were asked.
@@ -536,6 +532,7 @@ struct Report {
 /// its identity; it never lists it.
 fn probe_roots<D: HostDeps>(inner: &Arc<Inner<D>>, t: &Tracked, local: bool, unc: bool) -> Report {
     let mut missing = None;
+    let mut changed = false;
     let mut all_there = true;
     let mut probed_all = true;
     for spec in [&t.left, &t.right] {
@@ -544,12 +541,14 @@ fn probe_roots<D: HostDeps>(inner: &Arc<Inner<D>>, t: &Tracked, local: bool, unc
             probed_all = false;
             continue;
         }
-        match inner.deps.root_available(spec) {
+        let avail = inner.deps.root_available(spec);
+        match avail {
             Avail::Yes => {}
-            Avail::No => {
+            Avail::No | Avail::Changed => {
                 all_there = false;
                 if missing.is_none() {
                     missing = Some(spec.path.clone());
+                    changed = matches!(avail, Avail::Changed);
                 }
             }
             Avail::Unknown => all_there = false,
@@ -557,6 +556,7 @@ fn probe_roots<D: HostDeps>(inner: &Arc<Inner<D>>, t: &Tracked, local: bool, unc
     }
     Report {
         missing,
+        changed,
         all_there,
         probed_all,
     }
@@ -579,6 +579,7 @@ fn probe_for_return<D: HostDeps>(
     let rest = probe_roots(inner, t, true, false);
     Report {
         missing: rest.missing,
+        changed: rest.changed,
         all_there: rest.all_there,
         probed_all: true,
     }
@@ -736,6 +737,7 @@ fn create<D: HostDeps>(
         t.initial_probe = true;
         Report {
             missing: None,
+            changed: false,
             all_there: true,
             probed_all: true,
         }
@@ -750,17 +752,21 @@ fn create<D: HostDeps>(
     } else if let Some(path) = &report.missing {
         t.device_seen = true;
         t.missing_path = Some(path.clone());
-        if t.has_unc_root() {
-            t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
-        }
+        t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
         (
             TriggerState::Device,
-            format!("{path} not connected \u{2014} no sync"),
+            lost_text(path, report.changed),
             None,
             EventKind::Warn,
         )
     } else {
-        let (started, failed) = make_handles(inner, &mut t);
+        // When the first look is still to come, no watch is made on a guess: the first step
+        // decides between Device and making the watches.
+        let (started, failed) = if t.initial_probe {
+            (0, 0)
+        } else {
+            make_handles(inner, &mut t)
+        };
         if t.trigger.on_changes && started == 0 && failed > 0 {
             (
                 TriggerState::Unsupported,
@@ -925,7 +931,7 @@ fn step<D: HostDeps>(
     }
     if device_probe {
         want.merge(Want {
-            local: first_look || flags.volume || flags.resumed,
+            local: first_look || timer_probe || flags.volume || flags.resumed,
             unc: first_look || timer_probe,
         });
     }
@@ -1001,6 +1007,7 @@ fn step<D: HostDeps>(
     }
 
     // The probes open the roots; they run before the store is touched.
+    let mut was_initial = false;
     let report = if want.any() {
         let r = if state == TriggerState::Device {
             // A local drive is looked at when Windows says a volume came or went; a share on its
@@ -1011,14 +1018,17 @@ fn step<D: HostDeps>(
         };
         if state == TriggerState::Device {
             t.device_seen = true;
-            if t.has_unc_root() && want.unc {
-                // WA-5.3: a share is looked at again at most every 30 s while the device is missing.
+            if first_look || timer_probe {
+                // WA-5.3: while the device is missing it is looked at again at most every 30 s
+                // (a share, and a local folder that comes back without any volume event, such
+                // as one restored from the Recycle Bin).
                 t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
             }
         }
         if health {
             t.next_health_ms = now.saturating_add(HEALTH_EVERY_MS);
         }
+        was_initial = t.initial_probe;
         t.initial_probe = false;
         Some(r)
     } else {
@@ -1027,7 +1037,7 @@ fn step<D: HostDeps>(
 
     let keys = inner.deps.keys();
     let handles_short = t.handles.len() < t.expected_handles();
-    let result = inner.write(|conn| {
+    let result = inner.write_quiet(|conn| {
         apply(
             conn,
             keys,
@@ -1044,6 +1054,7 @@ fn step<D: HostDeps>(
                 slept,
                 health,
                 handles_short,
+                initial: was_initial,
             },
         )
     });
@@ -1060,16 +1071,23 @@ fn step<D: HostDeps>(
         t.handles.clear();
         let (started, failed) = make_handles(inner, t);
         if t.trigger.on_changes && started == 0 && failed > 0 {
-            // The notifications could not be restarted: a comparison after a pause for trust.
+            // The notifications could not be (re)started. Right after the first look nothing
+            // ever worked: unsupported. Otherwise: a comparison after a pause for trust.
+            let first = was_initial;
             let _ = inner.write(|conn| {
-                runtime::set_trigger_state(conn, id, TriggerState::Recheck, None, None, None, now)?;
-                events::add_event(
-                    conn,
-                    id,
-                    now,
-                    EventKind::Warn,
-                    "Change notifications could not be restarted \u{2014} full comparison when safe",
-                )?;
+                let (state, text) = if first {
+                    (
+                        TriggerState::Unsupported,
+                        "Change notifications could not be started for this folder \u{2014} can't be watched",
+                    )
+                } else {
+                    (
+                        TriggerState::Recheck,
+                        "Change notifications could not be restarted \u{2014} full comparison when safe",
+                    )
+                };
+                runtime::set_trigger_state(conn, id, state, None, None, None, now)?;
+                events::add_event(conn, id, now, EventKind::Warn, text)?;
                 Ok(())
             });
             t.shared
@@ -1096,6 +1114,18 @@ struct Inputs {
     health: bool,
     /// The watcher holds fewer watches than it should.
     handles_short: bool,
+    /// This was the first look at the roots since the watcher was made.
+    initial: bool,
+}
+
+/// The event for a root that is not usable. A folder that was replaced is not "disconnected":
+/// the way out is the profile, not the cable.
+fn lost_text(path: &str, changed: bool) -> String {
+    if changed {
+        format!("{path} is not the approved folder \u{2014} edit the profile to use it")
+    } else {
+        format!("{path} not connected \u{2014} no sync")
+    }
 }
 
 fn plural(n: u64, one: &str, many: &str) -> String {
@@ -1130,16 +1160,14 @@ fn apply(
                 t.burst = None;
                 t.device_seen = true;
                 t.missing_path = Some(path.clone());
-                if t.has_unc_root() {
-                    t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
-                }
+                t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
                 runtime::set_trigger_state(conn, id, TriggerState::Device, None, None, None, now)?;
                 events::add_event(
                     conn,
                     id,
                     now,
                     EventKind::Warn,
-                    &format!("{path} not connected \u{2014} no sync"),
+                    &lost_text(path, report.changed),
                 )?;
                 out.drop_handles = true;
             }
@@ -1193,6 +1221,10 @@ fn apply(
     if state == TriggerState::Device {
         // Still waiting; whatever the watchers said while a folder was missing means nothing.
         return Ok(out);
+    }
+    if i.initial && i.handles_short && i.report.as_ref().is_some_and(|r| r.missing.is_none()) {
+        // The first look found the folders; the watches were not made on a guess (S4): make them.
+        out.rebuild_handles = true;
     }
     if i.health
         && i.handles_short

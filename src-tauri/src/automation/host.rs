@@ -324,6 +324,26 @@ impl<D: HostDeps> Inner<D> {
         write_tx(&self.store, f)
     }
 
+    /// [`Inner::write`] that bumps `change_seq` only when the transaction changed a row: a pass
+    /// that found nothing to do must not make every view re-read the store.
+    pub(crate) fn write_quiet<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.store.with_write(|conn| -> Result<T, StoreError> {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| StoreError::Unavailable)?;
+            let before = tx.total_changes();
+            let out = f(&tx)?;
+            if tx.total_changes() != before {
+                automations::bump_change_seq(&tx)?;
+            }
+            tx.commit().map_err(|_| StoreError::Unavailable)?;
+            Ok(out)
+        })
+    }
+
     pub(crate) fn nudge(&self) {
         let (flag, cv) = &self.wake;
         *flag.lock().unwrap_or_else(|p| p.into_inner()) = true;

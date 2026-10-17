@@ -374,8 +374,10 @@ impl Burst {
 pub enum Avail {
     /// The folder is there and is the one that was approved.
     Yes,
-    /// Missing, unreadable, or a different folder now (drive letter reassigned).
+    /// Missing or unreadable.
     No,
+    /// There, but not the folder that was approved (drive letter reassigned, folder replaced).
+    Changed,
     /// The answer did not come in time: nothing is concluded from it.
     Unknown,
 }
@@ -392,12 +394,12 @@ pub fn probe_root(spec: &RootSpec) -> Avail {
                 if identity == spec.identity {
                     Avail::Yes
                 } else {
-                    Avail::No
+                    Avail::Changed
                 }
             }
             // A share: reachable is what we can say; the gate checks the identity at run time.
             (RootIdentity::Network { .. }, RootIdentity::Network { .. }) => Avail::Yes,
-            _ => Avail::No,
+            _ => Avail::Changed,
         },
         RootProbeOutcome::Checking => Avail::Unknown,
         RootProbeOutcome::Missing | RootProbeOutcome::Invalid | RootProbeOutcome::Unavailable => {

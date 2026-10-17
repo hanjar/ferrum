@@ -311,7 +311,7 @@ fn row_8_watch_trigger_states() {
             TriggerState::Device,
             StatusKind::Device,
             "Waiting for device",
-            sub("A watched folder is not connected \u{2014} no sync"),
+            sub("A watched folder is missing or not the approved one \u{2014} no sync"),
         ),
         (
             TriggerState::Recheck,

@@ -97,6 +97,8 @@ pub struct World {
     pub offline: Mutex<Vec<String>>,
     /// Every root `root_available` was asked about, in order.
     pub probe_log: Mutex<Vec<String>>,
+    /// Roots (lowercase) that `root_available` reports as another folder than the approved one.
+    pub swapped: Mutex<Vec<String>>,
     /// Real milliseconds every `root_available` call takes (a slow share).
     pub probe_delay_ms: std::sync::atomic::AtomicU64,
 }
@@ -119,6 +121,15 @@ impl World {
         let mut v = self.offline.lock().unwrap();
         v.retain(|r| r != &root.to_lowercase());
         if gone {
+            v.push(root.to_lowercase());
+        }
+    }
+
+    /// Mark a root as replaced by another folder (`true`) or the approved one again (`false`).
+    pub fn set_swapped(&self, root: &str, other: bool) {
+        let mut v = self.swapped.lock().unwrap();
+        v.retain(|r| r != &root.to_lowercase());
+        if other {
             v.push(root.to_lowercase());
         }
     }
@@ -290,6 +301,15 @@ impl HostDeps for FakeDeps {
         let delay = self.world.probe_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             std::thread::sleep(Duration::from_millis(delay));
+        }
+        if self
+            .world
+            .swapped
+            .lock()
+            .unwrap()
+            .contains(&root.path.to_lowercase())
+        {
+            return Avail::Changed;
         }
         if self
             .world
@@ -509,6 +529,7 @@ impl Rig {
             factory: Arc::new(FakeFactory::default()),
             offline: Mutex::new(Vec::new()),
             probe_log: Mutex::new(Vec::new()),
+            swapped: Mutex::new(Vec::new()),
             probe_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
         Rig { fx, world }

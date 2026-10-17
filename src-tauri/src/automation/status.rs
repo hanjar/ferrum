@@ -271,7 +271,10 @@ pub fn compute(i: &StatusInput) -> StatusDto {
                 TriggerState::Device => StatusDto::new(
                     StatusKind::Device,
                     "Waiting for device",
-                    Some("A watched folder is not connected \u{2014} no sync".to_string()),
+                    Some(
+                        "A watched folder is missing or not the approved one \u{2014} no sync"
+                            .to_string(),
+                    ),
                 ),
                 TriggerState::Recheck => StatusDto::new(
                     StatusKind::Recheck,

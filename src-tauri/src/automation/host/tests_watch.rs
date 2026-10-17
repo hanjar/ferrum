@@ -550,17 +550,35 @@ fn a_root_that_goes_away_waits_for_the_device_and_comes_back_with_a_comparison()
     // Events that arrive meanwhile mean nothing; no comparison, no run, nothing deleted.
     assert_eq!(dry_calls(&w.rig), dry_before);
     assert_eq!(w.rig.runs().len(), 0);
-    // WA-5.3: a local drive is NOT polled. Ten minutes of ticks ask nobody.
-    let asked = w.rig.world.probes().len();
+    // WA-5.3: while the device is missing the folder is opened (identity only) at most every
+    // 30 s; there is no tighter timer, and nothing is listed.
+    let count = |w: &W| {
+        w.rig
+            .world
+            .probes()
+            .iter()
+            .filter(|p| p.eq_ignore_ascii_case(&w.left))
+            .count()
+    };
+    let mut seen = count(&w);
+    let mut stamps = Vec::new();
     for _ in 0..40 {
         w.advance(15 * SEC);
         w.host.tick();
+        let n = count(&w);
+        if n > seen {
+            stamps.push(w.rig.now());
+            seen = n;
+        }
     }
-    assert_eq!(
-        w.rig.world.probes().len(),
-        asked,
-        "no polling for a local drive"
+    assert!(
+        stamps.len() >= 15 && stamps.len() <= 21,
+        "{} probes",
+        stamps.len()
     );
+    for pair in stamps.windows(2) {
+        assert!(pair[1] - pair[0] >= 30 * SEC, "probed twice within 30 s");
+    }
     assert_eq!(w.state(), TriggerState::Device);
     // It is back (the volume arrival tells the host).
     w.rig.world.set_offline(&w.left, false);
@@ -1102,8 +1120,8 @@ fn an_offline_share_is_probed_at_most_every_thirty_seconds_and_never_listed() {
     };
     let (share0, local0) = (share_probes(&rig), local_probes(&rig));
     assert_eq!(share0, 1);
-    // Five minutes of ticks, one every 5 s: the share is asked at most every 30 s, the local
-    // folder (no volume event came) not at all.
+    // Five minutes of ticks, one every 5 s: the share and the local folder are asked at most
+    // every 30 s.
     let mut stamps = vec![rig.now()];
     let mut seen = share0;
     for _ in 0..60 {
@@ -1119,7 +1137,11 @@ fn an_offline_share_is_probed_at_most_every_thirty_seconds_and_never_listed() {
     for pair in stamps.windows(2) {
         assert!(pair[1] - pair[0] >= 30 * SEC, "probed twice within 30 s");
     }
-    assert_eq!(local_probes(&rig), local0, "a local folder is not polled");
+    // The local folder is opened on the same 30 s cadence, not more often.
+    assert!(
+        local_probes(&rig) - local0 <= 11,
+        "local folder probed too often"
+    );
     // Nothing was compared or run meanwhile, and the engine never saw the share.
     assert_eq!(rig.world.calls().len(), 0);
     assert_eq!(rig.runs().len(), 0);
@@ -1469,4 +1491,120 @@ fn chained_pending_reruns_are_bounded_like_the_engines() {
     );
     let runs = w.rig.runs().len();
     assert!(runs <= 8, "{runs} runs: the chain was not cut");
+}
+
+// ── Review R2 ──
+
+/// R2-1: an automation made after the probe budget ran out is not given watches on a guess, and is
+/// not left Unsupported when its folder turns out to be away (a USB drive that was pulled).
+#[test]
+fn an_automation_made_after_the_probe_budget_ran_out_waits_for_the_device_instead() {
+    let rig = Rig::new();
+    rig.world.set_script(script(|_, call| {
+        if call.dry_run {
+            dry_run(0, 0)
+        } else {
+            completed(3)
+        }
+    }));
+    let mut made = Vec::new();
+    for name in ["X", "Y"] {
+        let (profile, _) = rig.fx.profile(name);
+        let id = rig.fx.new_automation(name, &profile, watch(true, true));
+        made.push((id, rig.fx.profile_policy(&profile).left.path));
+    }
+    // Both USB drives are out, and a watch of a folder that is not there cannot be made.
+    for (_, left) in &made {
+        rig.world.set_offline(left, true);
+    }
+    rig.world.factory.refuse.store(true, Ordering::SeqCst);
+    rig.world.probe_delay_ms.store(1_200, Ordering::SeqCst);
+    let host = rig.host(1, HostClass::App);
+    host.tick(); // the first look of one automation uses the whole budget; the other waits
+    rig.world.probe_delay_ms.store(0, Ordering::SeqCst);
+    let state = |id: &str| {
+        rig.fx
+            .store
+            .with_read(|c| runtime::get(c, id))
+            .expect("read")
+            .expect("row")
+            .trigger_state
+    };
+    for _ in 0..4 {
+        rig.advance(SEC);
+        tick(&host);
+    }
+    for (id, _) in &made {
+        assert_eq!(state(id), Some(TriggerState::Device), "{id}");
+    }
+    assert!(rig.world.factory.asked().is_empty(), "no watch on a guess");
+    // The drives are back: both recover (nothing is stuck Unsupported).
+    rig.world.factory.refuse.store(false, Ordering::SeqCst);
+    for (_, left) in &made {
+        rig.world.set_offline(left, false);
+    }
+    host.volume_changed();
+    for _ in 0..4 {
+        rig.advance(SEC);
+        tick(&host);
+    }
+    for (id, _) in &made {
+        assert_eq!(state(id), Some(TriggerState::Watching), "{id}");
+    }
+    assert_eq!(rig.world.factory.live(), 2);
+}
+
+/// R2-2 and the replaced folder: the 30 s look also applies to a local root that is waiting, so a
+/// folder restored from the Recycle Bin (same identity, no volume event) is found; a folder that
+/// was replaced says so.
+#[test]
+fn a_waiting_local_root_is_found_again_without_a_volume_event_and_a_replaced_one_says_so() {
+    let w = setup();
+    w.started();
+    // Replaced behind the watcher's back: the health look finds it.
+    w.rig.world.set_swapped(&w.left, true);
+    w.advance(31 * SEC);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Device);
+    assert!(
+        w.has_event(&format!(
+            "{} is not the approved folder \u{2014} edit the profile to use it",
+            w.left
+        )),
+        "{:?}",
+        w.events()
+    );
+    assert!(!w.has_event("not connected"));
+    // The approved folder is restored (rename back): no event of any kind arrives.
+    w.rig.world.set_swapped(&w.left, false);
+    w.advance(10 * SEC);
+    w.host.tick();
+    assert_eq!(
+        w.state(),
+        TriggerState::Device,
+        "not within 30 s of the last look"
+    );
+    w.advance(25 * SEC);
+    tick(&w.host);
+    assert_eq!(w.state(), TriggerState::Watching);
+    assert_eq!(w.live(), 1);
+    assert!(w.has_event("available again"));
+}
+
+/// A pass that finds nothing to change writes nothing for the automation: its row and its log
+/// are as they were (the host's own 30 s housekeeping may still bump the counter).
+#[test]
+fn a_health_look_that_finds_nothing_writes_nothing_for_the_automation() {
+    let w = setup();
+    w.started();
+    w.advance(5 * SEC);
+    w.host.tick();
+    let row = w.row();
+    let events = w.events().len();
+    let probes = w.rig.world.probes().len();
+    w.advance(31 * SEC);
+    w.host.tick();
+    assert!(w.rig.world.probes().len() > probes, "the health look ran");
+    assert_eq!(w.row(), row, "the row was not touched");
+    assert_eq!(w.events().len(), events);
 }

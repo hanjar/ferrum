@@ -1167,7 +1167,9 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   event does not say file or folder and the file system is not asked, so a path counts when the profile would show it as
   either (`visible(rel, false) || visible(rel, true)`): renaming a folder is one event for the folder, and with an include
   list such as `*.md` only the folder reading selects it. Excludes apply to every ancestor. The price is an occasional
-  spurious comparison (the excluded folder's own entry, a non-matching file under an include list).
+  spurious comparison (the excluded folder's own entry, a non-matching file under an include list). With an include list this means a burst, then a run that finds nothing, for
+  every change to a file the list does not select; a stricter reading (folder reading only for add, remove and rename) needs
+  the own backend, which knows the action (FER-565, follow-up).
 - **The hook only queues.** A burst that went quiet (idle delay) or reached the maximum wait becomes a `Watch` entry
   through `request::trigger_tx` (approval must VERIFY, no hold, enabled; user kinds refused), merged by the queue rules of
   FER-525 (a merged trigger never changes the kind or `enqueued_ms` of a user's entry). `trigger_tx` also accepts
@@ -1202,6 +1204,12 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   automation to Waiting for device and releases the watch (it is made again, with a comparison, when the folder is back);
   a watch that is missing while the folder is fine is made again and the state is Needs recheck. This is a liveness check,
   not change detection.
+- **Limits of the health look, and its price.** It finds a root that is gone, replaced, or restored (a folder restored
+  from the Recycle Bin keeps its identity and is found by the same look while the automation waits for the device, at
+  most every 30 s, local roots included). It cannot find a `notify` watch that died while the folder is intact, nor a
+  buffer overflow: both stay undetected until the next event or comparison, and are closed by the own backend (FER-565).
+  Opening a folder every 30 s can keep an external HDD from spinning down; this is accepted for now. A replaced folder is
+  reported as "is not the approved folder - edit the profile to use it", a missing one as "not connected".
 - **Probes do not stall the host (S4).** All probes of one pass share a budget of 1 s; the rest waits for the next passes
   (automations with a look left over go first), so the host's heartbeat is never held up by offline shares.
 - **Known limits.** `notify` 7 on Windows does not report a buffer overflow of `ReadDirectoryChangesW` (no rescan flag)
