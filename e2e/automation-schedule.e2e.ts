@@ -344,7 +344,7 @@ test.describe('FER-526 Automation page (mock IPC)', () => {
     expect(sent[0].id).toBeNull();
     expect(sent[0].testId).toBe('c0ffee00-1234-4abc-8def-0123456789ab');
     expect(JSON.stringify(sent[0])).not.toMatch(/approved|confirmed/i);
-    // Run now is never wired.
+    // Approving runs nothing by itself.
     expect(await calls(page, 'automation_run_now')).toHaveLength(0);
   });
 

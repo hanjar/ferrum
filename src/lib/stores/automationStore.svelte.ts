@@ -350,9 +350,10 @@ export class AutomationStore {
   // ── Run now, Recheck, Retry, Review in Sync (RQ-4, RQ-10, RQ-6) ──
 
   /** Run now: the backend queues it (or refuses); the answer is the toast of RQ-4. */
-  async runNow(row: { id: string }): Promise<void> {
+  async runNow(row: { id: string; canRunNow?: boolean }): Promise<void> {
     const key = `run:${row.id}`;
-    if (this.pending[key]) return;
+    // A dimmed button stays dimmed: the reason is shown instead of asking (the backend checks again).
+    if (row.canRunNow === false || this.pending[key]) return;
     this.pending[key] = true;
     this.notice = null;
     try {
