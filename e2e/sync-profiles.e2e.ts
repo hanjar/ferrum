@@ -326,7 +326,8 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
   test('the sidebar section opens the page with an empty state (SP-1.1, SP-9.1)', async () => {
     await boot(page);
     const section = page.getByRole('group', { name: 'Sync & Backup' });
-    await expect(section.getByRole('button', { name: 'Automation' })).toBeDisabled();
+    // The Automation entry is live because playwright.config.ts turns the (default-off) UI flag on.
+    await expect(section.getByRole('button', { name: 'Automation' })).toBeEnabled();
     await openPage(page);
     await expect(page.getByTestId('sync-empty')).toContainText('No sync profiles yet');
     await expect(page.getByRole('button', { name: 'New sync profile' })).toBeVisible();

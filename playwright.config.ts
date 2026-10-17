@@ -12,6 +12,8 @@ export default defineConfig({
   webServer: {
     command: 'npx vite --port 5173',
     port: 5173,
+    // The Automation UI is behind a default-off flag (src/lib/featureFlags.ts); e2e turns it on.
+    env: { VITE_FERRUM_AUTOMATION_UI: '1' },
     reuseExistingServer: true,
     timeout: 15_000,
   },
