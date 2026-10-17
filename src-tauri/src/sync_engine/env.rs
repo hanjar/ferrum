@@ -387,6 +387,8 @@ pub struct EngineEnv {
     pub clock: Arc<dyn Clock>,
     pub liveness: Arc<dyn Liveness>,
     pub hooks: Arc<dyn Hooks>,
+    /// FER-562: protected folders and Startup (production), or a test policy.
+    pub guard: Arc<dyn crate::sync_engine::write_guard::WriteGuard>,
     /// The FerrumIndexer journal (IX-1); tests answer `complete` / `rescan` here.
     pub changes: Mutex<Box<dyn ChangesSource + Send>>,
 }
@@ -403,6 +405,7 @@ impl EngineEnv {
             clock: Arc::new(SystemClock),
             liveness: Arc::new(FsLiveness),
             hooks: Arc::new(NoHooks),
+            guard: Arc::new(crate::sync_engine::write_guard::FerrumGuard),
             changes: Mutex::new(Box::new(ServiceChanges)),
         }
     }

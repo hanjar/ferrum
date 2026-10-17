@@ -106,6 +106,9 @@ pub struct VersionStore {
     root: DirHandle,
     root_path: String,
     stamp_dir: String,
+    /// FER-562: final path of the opened root, looked up once; every move is then checked
+    /// against it by string work.
+    base: Result<std::path::PathBuf, Classified>,
 }
 
 fn per_item(reason: Reason) -> Classified {
@@ -120,7 +123,9 @@ impl VersionStore {
     /// is refused.
     pub fn open(root_path: &str, stamp: &str, run_id: i64) -> Result<VersionStore, Classified> {
         let root = nofollow::open_root_folder(root_path, true).map_err(|e| e.classify())?;
+        let base = crate::sync_engine::write_guard::final_base(&root);
         Ok(VersionStore {
+            base,
             root,
             root_path: root_path.to_string(),
             stamp_dir: stamp_dir_name(stamp, run_id),
@@ -165,6 +170,11 @@ impl VersionStore {
         cancel: &CancelToken,
     ) -> Result<Moved, Classified> {
         let comps = self.components(side, rel_parent);
+        // FER-562: before the versions folders are created (the chain never follows a link, so
+        // the root's final path plus the names is where the file lands).
+        let mut planned = comps.clone();
+        planned.push(name);
+        crate::sync_engine::write_guard::check_under(&*env.guard, &self.base.clone()?, &planned)?;
         let dest = nofollow::open_chain_owned(&self.root, &comps, true)
             .map_err(|e: ChainError| e.classify())?;
         let os = OsStr::new(name);

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::hotlist::model::is_format_char;
 use crate::sync_engine::roots::{RootError, RootProbe, overlap};
+use crate::sync_engine::write_guard::{FerrumGuard, WriteGuard};
 
 /// Control characters and Unicode format (bidi, zero-width) characters can reorder or hide text
 /// in a native dialog (SE-2, threat T4): they are refused in names, filters and paths.
@@ -352,6 +353,30 @@ impl Draft {
             }
         };
 
+        // FER-562: no root in Ferrum's own folders or a Windows Startup folder; a root that holds
+        // one is refused when the profile writes to it.
+        // No file system access here (roots are already canonical), so a slow share cannot
+        // hold the editor.
+        {
+            let writable = written_sides(&mode);
+            let mut asked: Vec<(&'static str, String, bool)> = Vec::new();
+            for (side, facts) in [(Side::Left, &left), (Side::Right, &right)] {
+                if let Some(f) = facts {
+                    asked.push((side.field(), f.canonical.clone(), writable.contains(&side)));
+                }
+            }
+            if let DeletePolicy::Versioning { root } = &delete_policy
+                && !root.is_empty()
+            {
+                asked.push(("versioningRoot", root.clone(), true));
+            }
+            for (field, path, w) in &asked {
+                if let Some(v) = FerrumGuard.root_violation(path, *w) {
+                    errors.push(fe(field, v.field_code()));
+                }
+            }
+        }
+
         // SP-4.2 filter limits.
         for (field, list) in [
             ("include", &self.policy.include),
@@ -524,6 +549,15 @@ fn reject_versioning_root(value: &Option<String>, errors: &mut Vec<FieldError>) 
         .is_some_and(|v| !v.is_empty())
     {
         errors.push(fe("versioningRoot", "versioning_root_not_allowed"));
+    }
+}
+
+/// Sides a run can write to (copy, overwrite or delete), given the mode (FER-562): the target of
+/// a one-way or mirror profile, both sides of a two-way one.
+pub fn written_sides(mode: &SyncMode) -> Vec<Side> {
+    match mode {
+        SyncMode::OneWay { from } | SyncMode::Mirror { from } => vec![from.opposite()],
+        SyncMode::TwoWay { .. } => vec![Side::Left, Side::Right],
     }
 }
 
@@ -1227,5 +1261,108 @@ mod tests {
         let mut sneaky = serde_json::from_slice::<serde_json::Value>(&json).unwrap();
         sneaky["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<ProfilePolicy>(sneaky).is_err());
+    }
+
+    /// FER-562: a root inside (or equal to) Ferrum's state folder is refused on any side; a root
+    /// that contains it is refused only where the profile writes.
+    #[test]
+    fn fer_562_roots_in_or_above_a_protected_folder_are_refused() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::protected_dirs::register([std::path::PathBuf::from(r"C:\Ferrum\State")]);
+        let probe = FakeProbe::default();
+        let check = |d: &Draft| d.validate(&probe).err().unwrap_or_default();
+
+        // One-way left -> right: right is written, left is only read.
+        for inside in [
+            r"C:\Ferrum\State",
+            r"C:\Ferrum\State\sync",
+            r"c:\ferrum\STATE\x",
+        ] {
+            let e = check(&draft("n", r"D:\From", inside));
+            assert_eq!(codes(&e, "right"), ["root_protected_folder"], "{inside}");
+            let e = check(&draft("n", inside, r"D:\To"));
+            assert_eq!(
+                codes(&e, "left"),
+                ["root_protected_folder"],
+                "read {inside}"
+            );
+        }
+        // A share that reaches this very machine can alias a protected folder: refused with
+        // its own code, on a read-only side too.
+        let e = check(&draft("n", r"D:\From", r"\\localhost\c$\Users\x"));
+        assert_eq!(codes(&e, "right"), ["root_local_share"]);
+        let e = check(&draft("n", r"\\127.0.0.1\share", r"D:\To"));
+        assert_eq!(codes(&e, "left"), ["root_local_share"]);
+        let e = check(&draft("n", r"D:\From", r"C:\Ferrum"));
+        assert_eq!(codes(&e, "right"), ["root_contains_protected_folder"]);
+        assert!(
+            check(&draft("n", r"C:\Ferrum", r"D:\To")).is_empty(),
+            "read-only ancestor"
+        );
+        assert!(check(&draft("n", r"C:\Data", r"D:\To")).is_empty());
+
+        // Two-way writes both sides.
+        let mut two = draft("n", r"C:\Ferrum", r"D:\Other");
+        two.policy.mode = WireMode::TwoWay;
+        two.policy.from = None;
+        two.policy.propagate_deletes = Some(false);
+        two.policy.delete_policy = WireDeletePolicy::Permanent;
+        assert_eq!(
+            codes(&check(&two), "left"),
+            ["root_contains_protected_folder"]
+        );
+
+        // The versioning root is always written.
+        let mut v = draft("n", r"D:\From", r"D:\To");
+        v.policy.delete_policy = WireDeletePolicy::Versioning;
+        v.policy.versioning_root = Some(r"C:\Ferrum\State\versions".into());
+        assert_eq!(
+            codes(&check(&v), "versioningRoot"),
+            ["root_protected_folder"]
+        );
+        v.policy.versioning_root = Some(r"C:\Ferrum".into());
+        assert_eq!(
+            codes(&check(&v), "versioningRoot"),
+            ["root_contains_protected_folder"]
+        );
+        v.policy.versioning_root = Some(r"D:\Versions".into());
+        assert!(check(&v).is_empty());
+        crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
+    }
+
+    /// FER-562: the Windows Startup folder is refused the same way.
+    #[cfg(windows)]
+    #[test]
+    fn fer_562_roots_in_or_above_startup_are_refused() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let probe = FakeProbe::default();
+        let startup =
+            std::env::var("APPDATA").unwrap() + r"\Microsoft\Windows\Start Menu\Programs\Startup";
+        let programs = std::path::Path::new(&startup)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let e = draft("n", r"D:\From", &startup)
+            .validate(&probe)
+            .unwrap_err();
+        assert_eq!(codes(&e, "right"), ["root_startup_folder"]);
+        let e = draft("n", r"D:\From", &format!(r"{startup}\sync"))
+            .validate(&probe)
+            .unwrap_err();
+        assert_eq!(codes(&e, "right"), ["root_startup_folder"]);
+        let e = draft("n", r"D:\From", &programs)
+            .validate(&probe)
+            .unwrap_err();
+        assert_eq!(codes(&e, "right"), ["root_contains_startup_folder"]);
+        let home = std::env::var("USERPROFILE").unwrap();
+        let e = draft("n", r"D:\From", &home).validate(&probe).unwrap_err();
+        assert_eq!(codes(&e, "right"), ["root_contains_startup_folder"]);
+        // Reading from a profile that holds Startup stays possible.
+        assert!(draft("n", &home, r"D:\To").validate(&probe).is_ok());
     }
 }

@@ -3563,6 +3563,43 @@ mod fer512_ipc_gate_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// FER-562: the manual "Synchronize Directories" flow writes through `enqueue_copy` (one call per
+    /// destination folder of the plan) and the delete dialog (`delete_entries`). Both start with the gates
+    /// below, so a plan whose destination folder lands in the app's state or in Startup, however
+    /// deep below the chosen root, is refused before anything is queued.
+    #[test]
+    fn manual_synchronize_destinations_go_through_the_same_gates() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("ferrum-ipc-sync-{}", std::process::id()));
+        let cfg = base.join("state");
+        std::fs::create_dir_all(cfg.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("right")).unwrap();
+        crate::protected_dirs::register([cfg.clone()]);
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        // `right` is the sync root; the plan has batches for `right\...` folders and, when the root
+        // is the common parent, for the protected folder below it.
+        assert!(super::check_protected_target(&s(&base.join("right").join("a"))).is_ok());
+        for dest in [
+            s(&cfg),
+            s(&cfg.join("sub")),
+            s(&cfg.join("new").join("deep")),
+        ] {
+            assert!(super::check_protected_target(&dest).is_err(), "{dest}");
+        }
+        assert!(super::check_write_sources(&[s(&cfg.join("sub").join("f.txt"))]).is_err());
+        #[cfg(windows)]
+        {
+            let startup = std::env::var("APPDATA").unwrap()
+                + r"\Microsoft\Windows\Start Menu\Programs\Startup";
+            assert!(super::check_protected_target(&startup).is_err());
+            assert!(super::check_protected_target(&format!(r"{startup}\sub")).is_err());
+        }
+        crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Rework point 1: pipes, device namespaces, ADS and GLOBALROOT are refused for every source
     /// and destination of copy / move / archive; ordinary paths still pass.
     #[test]

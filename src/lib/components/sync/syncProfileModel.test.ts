@@ -3,6 +3,7 @@ import {
   emptyForm,
   excludeExample,
   fieldMessage,
+  readinessReason,
   fromPolicy,
   ipcErrorMessage,
   modeSentence,
@@ -111,6 +112,22 @@ describe('wording', () => {
       ),
     ).toBe(
       "Recycle Bin isn't available on \\\\nas\\b — choose a versioning folder or permanent delete",
+    );
+  });
+
+  it('explains the protected-folder and Startup refusals (FER-562)', () => {
+    for (const code of [
+      'root_protected_folder',
+      'root_contains_protected_folder',
+      'root_startup_folder',
+      'root_contains_startup_folder',
+      'root_local_share',
+    ]) {
+      expect(fieldMessage({ field: 'right', code })).not.toContain('was refused');
+    }
+    expect(readinessReason({ status: 'notReady', reason: 'rootProtected' })).toContain('Startup');
+    expect(readinessReason({ status: 'notReady', reason: 'rootLocalShare' })).toContain(
+      'local path',
     );
   });
 

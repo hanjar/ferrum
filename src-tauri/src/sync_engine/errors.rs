@@ -57,6 +57,8 @@ pub enum Reason {
     TargetAppeared,
     /// A file sent to the Recycle Bin did not end up there (the shell deleted it for good).
     RecycleBypassed,
+    /// FER-562: the path is inside one of Ferrum's own state folders or a Windows Startup folder.
+    ProtectedFolder,
     Unknown,
 }
 
@@ -95,6 +97,7 @@ impl Reason {
             Reason::VerifyFailed => "verify_failed",
             Reason::TargetAppeared => "target_appeared",
             Reason::RecycleBypassed => "recycle_bypassed",
+            Reason::ProtectedFolder => "protected_folder",
             Reason::Unknown => "unknown",
         }
     }
@@ -124,6 +127,9 @@ impl Reason {
             Reason::VerifyFailed => "the copy could not be verified",
             Reason::TargetAppeared => "the destination appeared during the run",
             Reason::RecycleBypassed => "a file was removed without going to the Recycle Bin",
+            Reason::ProtectedFolder => {
+                "the destination is a folder Ferrum protects (its own settings or Windows Startup)"
+            }
             Reason::Unknown => "an unexpected error occurred",
         }
     }
@@ -322,6 +328,7 @@ mod tests {
             Reason::SharingViolation,
             Reason::AccessDenied,
             Reason::LinkInPath,
+            Reason::ProtectedFolder,
             Reason::Unknown,
         ] {
             assert!(!r.code().contains('\\') && !r.text().contains('\\'));

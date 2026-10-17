@@ -46,6 +46,7 @@ use crate::sync_engine::plan::{
 };
 use crate::sync_engine::settle::{ItemOutcome, reconcile_baseline};
 use crate::sync_engine::versioning::{Expect, VersionStore};
+use crate::sync_engine::write_guard::{check_under, final_base};
 use crate::sync_incremental::{IncrementalInfo, prepare};
 
 /// Operations per copy batch and the bytes after which a batch is closed (the just-in-time check
@@ -1051,6 +1052,8 @@ struct Runner<'a> {
     last_counts: Instant,
     /// Fired by the run's watcher on user cancel or lost lease.
     child: CancelToken,
+    /// FER-562: final path of each pinned root folder, looked up once per run.
+    bases: [Option<PathBuf>; 2],
 }
 
 impl<'a> Runner<'a> {
@@ -1089,7 +1092,22 @@ impl<'a> Runner<'a> {
             first_failure: None,
             last_counts: Instant::now() - COUNTS_EVERY,
             child: CancelToken::default(),
+            bases: [None, None],
         }
+    }
+
+    /// FER-562: the final path the OS reports for the opened root of `side`, cached: every
+    /// operation is then checked against it by string work only (the chain below a root never
+    /// follows a reparse point, so root + relative name is where an operation lands).
+    fn base(&mut self, side: Side) -> Result<PathBuf, Classified> {
+        let i = usize::from(side == Side::Right);
+        if let Some(b) = &self.bases[i] {
+            return Ok(b.clone());
+        }
+        let root = self.handles.root(side).ok_or_else(no_root)?;
+        let b = final_base(root)?;
+        self.bases[i] = Some(b.clone());
+        Ok(b)
     }
 
     fn root_path(&self, side: Side) -> &str {
@@ -1440,6 +1458,16 @@ impl<'a> Runner<'a> {
             Ok(Jit::Match) => {}
         }
         let (last, parents) = comps.split_last().expect("validated, non-empty");
+        // FER-562: the folder being created (and the parents made on the way) must not land in
+        // a protected or Startup folder. Checked before anything is created, then again against
+        // the final path of the folder that was really opened.
+        let base = match self.base(op.target) {
+            Ok(b) => b,
+            Err(c) => return OpResult::Failed(c),
+        };
+        if let Err(c) = check_under(&*self.req.env.guard, &base, comps) {
+            return OpResult::Failed(c);
+        }
         let Some(root) = self.handles.root(op.target) else {
             return OpResult::Failed(no_root());
         };
@@ -1447,6 +1475,13 @@ impl<'a> Runner<'a> {
             Ok(h) => h,
             Err(e) => return OpResult::Failed(e.classify()),
         };
+        let held_base = match final_base(held.dir()) {
+            Ok(b) => b,
+            Err(c) => return OpResult::Failed(c),
+        };
+        if let Err(c) = check_under(&*self.req.env.guard, &held_base, &[last]) {
+            return OpResult::Failed(c);
+        }
         let name = std::ffi::OsStr::new(last);
         match publish::create_dir_new(held.dir(), name) {
             Ok(_) => OpResult::Done,
@@ -1475,6 +1510,14 @@ impl<'a> Runner<'a> {
             return OpResult::Changed;
         }
         let (last, parents) = comps.split_last().expect("validated, non-empty");
+        // FER-562: checked against the root's final path before the chain is opened.
+        let base = match self.base(op.target) {
+            Ok(b) => b,
+            Err(c) => return OpResult::Failed(c),
+        };
+        if let Err(c) = check_under(&*self.req.env.guard, &base, comps) {
+            return OpResult::Failed(c);
+        }
         let Some(root) = self.handles.root(op.target) else {
             return OpResult::Failed(no_root());
         };
@@ -1518,6 +1561,15 @@ impl<'a> Runner<'a> {
             Ok(Jit::Match) => {}
         }
         let (last, parents) = comps.split_last().expect("validated, non-empty");
+        // FER-562: a delete (or the move into the versions tree) inside a protected or Startup
+        // folder is refused before the file is touched.
+        let base = match self.base(op.target) {
+            Ok(b) => b,
+            Err(c) => return OpResult::Failed(c),
+        };
+        if let Err(c) = check_under(&*self.req.env.guard, &base, comps) {
+            return OpResult::Failed(c);
+        }
         let Some(root) = self.handles.root(op.target) else {
             return OpResult::Failed(no_root());
         };
@@ -1651,6 +1703,25 @@ impl<'a> Runner<'a> {
         // Parent folders of the destination: created no-follow, and held open for the copy.
         let sample: Vec<&str> = comps_of[&ready[0].0].iter().map(String::as_str).collect();
         let (_, parents) = sample.split_last().expect("validated, non-empty");
+        // FER-562: before any parent folder is created (string work against the cached root).
+        let base = match self.base(target) {
+            Ok(b) => b,
+            Err(c) => {
+                for (idx, _) in ready {
+                    out.push((idx, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        };
+        for (idx, _) in &ready {
+            let refs: Vec<&str> = comps_of[idx].iter().map(String::as_str).collect();
+            if let Err(c) = check_under(&*self.req.env.guard, &base, &refs) {
+                for (i, _) in &ready {
+                    out.push((*i, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        }
         let Some(target_root) = self.handles.root(target) else {
             for (idx, _) in ready {
                 out.push((idx, OpResult::Failed(no_root())));
@@ -1667,6 +1738,31 @@ impl<'a> Runner<'a> {
                 return out;
             }
         };
+
+        // FER-562: the final path of the destination folder, looked up once for the batch, and
+        // every entry of the batch below it.
+        let held_base = match final_base(held.dir()) {
+            Ok(b) => b,
+            Err(c) => {
+                for (idx, _) in &ready {
+                    out.push((*idx, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        };
+        for (idx, _) in &ready {
+            let name: Vec<&str> = comps_of[idx]
+                .last()
+                .map(String::as_str)
+                .into_iter()
+                .collect();
+            if let Err(c) = check_under(&*self.req.env.guard, &held_base, &name) {
+                for (i, _) in &ready {
+                    out.push((*i, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        }
 
         // Versioning keeps the previous version of an overwritten file: move it aside first.
         if overwrite && versioning {
@@ -1833,3 +1929,7 @@ mod tests2;
 #[cfg(test)]
 #[path = "execute_tests3.rs"]
 mod tests3;
+
+#[cfg(test)]
+#[path = "execute_tests4.rs"]
+mod tests4;

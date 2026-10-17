@@ -118,6 +118,20 @@ pub(crate) fn touches(path: &Path, roots: &[PathBuf], ancestors: bool) -> bool {
         .any(|r| p.starts_with(r) || (ancestors && r.starts_with(&p)))
 }
 
+/// FER-562: like [`touches`] for a path that is ALREADY a resolved final path (for example the
+/// answer of `GetFinalPathNameByHandleW` plus an entry name): compared without touching the file
+/// system, so a caller that checks many entries of one folder pays for the resolution once.
+/// A poisoned lock counts as touching (fail closed).
+pub fn touches_resolved(path: &Path, ancestors: bool) -> bool {
+    let Some(roots) = roots() else {
+        return true;
+    };
+    let p = fold(path);
+    roots
+        .iter()
+        .any(|r| p.starts_with(r) || (ancestors && r.starts_with(&p)))
+}
+
 fn refused() -> FsError {
     FsError::new(
         ErrorCode::InvalidPath,

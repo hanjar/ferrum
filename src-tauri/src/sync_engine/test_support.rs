@@ -478,3 +478,23 @@ pub fn test_env() -> EngineEnv {
     env.bin = Arc::new(FixedBin(crate::sync_engine::env::BinState::Usable));
     env
 }
+
+/// FER-562: a write policy that refuses everything inside the listed folders (resolved), so a
+/// test can protect a folder of its own without the process-wide registry.
+pub struct DenyList(pub Vec<std::path::PathBuf>);
+
+impl crate::sync_engine::write_guard::WriteGuard for DenyList {
+    fn refuses(&self, path: &std::path::Path) -> bool {
+        let p = crate::protected_dirs::resolve(path);
+        self.0
+            .iter()
+            .any(|d| p.starts_with(crate::protected_dirs::resolve(d)))
+    }
+    fn root_violation(
+        &self,
+        _path: &str,
+        _writable: bool,
+    ) -> Option<crate::sync_engine::write_guard::RootViolation> {
+        None
+    }
+}

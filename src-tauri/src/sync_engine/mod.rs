@@ -7,6 +7,8 @@
 //!   operations with just-in-time checks, retries, cancel, lease-guarded settle.
 //!   [`delete_policy`], [`versioning`], [`nofollow`], [`errors`], [`opset`] and [`env`] are its
 //!   parts; `env` holds every injection point.
+//!   [`write_guard`] (FER-562) applies the protected-folder and Startup policy to roots and to
+//!   every write.
 
 pub mod delete_policy;
 pub mod env;
@@ -19,6 +21,7 @@ pub mod plan;
 pub mod roots;
 pub mod settle;
 pub mod versioning;
+pub mod write_guard;
 
 pub use execute::{
     Counts, EngineError, EngineOutcome, EngineReport, EngineRequest, EngineSink, GuardAck,
