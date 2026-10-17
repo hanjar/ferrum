@@ -35,7 +35,8 @@ fn refused(code: &'static str, text: &str) -> EngineReport {
 }
 
 /// Run the engine for a run the gate cleared. `call.dry_run` must match the proof: only a
-/// recheck proof is read-only, and a run proof can never be turned into a dry run or vice versa.
+/// recheck or watch-comparison proof is read-only, and a run proof can never be turned into a
+/// dry run or vice versa.
 pub fn run_gated(
     proof: &GateOk,
     call: &EngineCall<'_>,
@@ -48,7 +49,7 @@ pub fn run_gated(
             "The run could not start from inside a store transaction. Nothing was changed.",
         );
     }
-    let read_only = matches!(proof.mode(), RunMode::Recheck { .. });
+    let read_only = matches!(proof.mode(), RunMode::Recheck { .. } | RunMode::Compare);
     if read_only != call.dry_run {
         return refused(
             "internal",

@@ -176,6 +176,22 @@ impl Fixture {
         new_revision
     }
 
+    /// [`Fixture::bump_profile`] for an include pattern.
+    pub fn bump_profile_include(&self, id: &str, revision: i64, pattern: &str) -> i64 {
+        let current = commands::get_in(&self.store, id, &Self::probe()).unwrap();
+        let mut policy = current.policy.clone();
+        policy.include.push(pattern.into());
+        let (_, new_revision) = self.save_profile(SaveRequest {
+            id: Some(id.into()),
+            expected_revision: Some(revision),
+            draft: Draft {
+                name: current.name,
+                policy,
+            },
+        });
+        new_revision
+    }
+
     pub fn profile_policy(&self, id: &str) -> ProfilePolicy {
         self.store
             .with_read(|c| -> Result<_, crate::automation::store::StoreError> {

@@ -45,13 +45,23 @@ pub enum GateKind {
     },
     /// A read-only fresh comparison of the run an attention hold names (RQ-10.1).
     Recheck { run_id: i64 },
+    /// A read-only fresh comparison for a watch trigger (WA-3.2, WA-5.2, WA-6, WA-7: "compare
+    /// first, run only if needed"). Unlike a recheck it needs an enabled automation without a
+    /// hold, and it is NOT a way past a hold: it takes no lease and can change nothing.
+    Compare,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     Run,
-    Retry { of: i64 },
-    Recheck { of: i64 },
+    Retry {
+        of: i64,
+    },
+    Recheck {
+        of: i64,
+    },
+    /// The watch trigger's read-only comparison ([`GateKind::Compare`]).
+    Compare,
 }
 
 /// Everything the gate reads or calls outside the store.
@@ -282,6 +292,8 @@ pub fn gate(ctx: &GateCtx<'_>, automation_id: &str, kind: GateKind) -> Result<Ga
     // 1. Load the rows and verify the approval, in one read transaction.
     let first = snapshot(ctx.store, ctx.keys, automation_id)?;
     let recheck = matches!(kind, GateKind::Recheck { .. });
+    // Both read-only kinds compare without a lease and without the optional conditions.
+    let read_only = recheck || matches!(kind, GateKind::Compare);
     // 2. Enabled. A recheck is a read-only comparison and may look at a paused automation.
     if !first.automation.enabled && !recheck {
         return Err(GateRefusal::Disabled);
@@ -305,25 +317,27 @@ pub fn gate(ctx: &GateCtx<'_>, automation_id: &str, kind: GateKind) -> Result<Ga
         } => RunMode::Retry { of },
         GateKind::Run { .. } => RunMode::Run,
         GateKind::Recheck { run_id } => RunMode::Recheck { of: run_id },
+        GateKind::Compare => RunMode::Compare,
     };
     if let Some(attention) = &first.attention {
         let resolves = match mode {
             RunMode::Retry { of } | RunMode::Recheck { of } => of == attention.run_id,
-            RunMode::Run => false,
+            // A watch comparison never resolves a hold: a held automation compares nothing.
+            RunMode::Run | RunMode::Compare => false,
         };
         if !resolves {
             return Err(GateRefusal::Held);
         }
     }
     // 6. Optional conditions (OP-1) keep a run queued; they do not apply to a read-only recheck.
-    if !recheck && let Some(why) = (ctx.unmet_condition)(&first.policy.conditions) {
+    if !read_only && let Some(why) = (ctx.unmet_condition)(&first.policy.conditions) {
         return Err(GateRefusal::Conditions(why));
     }
     // 7 + 8. Roots exist with the approved identity; Recycle Bin / versioning prerequisites and
     // the protected-folder rules. Probes run here, after the store closure has ended.
     let roots = check_gate(&profile, ctx.env).map_err(classify)?;
-    // 9. The lease (a recheck compares read-only and needs none).
-    let lease = if recheck {
+    // 9. The lease (a read-only comparison needs none).
+    let lease = if read_only {
         None
     } else {
         let holder = match ctx.class {

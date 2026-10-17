@@ -466,6 +466,7 @@ fn build(world: &World, rec: &AutomationRecord, now_ms: i64) -> Built {
         overlap_run_active,
         quiet_secs,
         idle_secs,
+        check_reason: rt.as_ref().and_then(|r| r.check_reason.clone()),
         next_label: match kind {
             AutoKind::Schedule => rt
                 .as_ref()

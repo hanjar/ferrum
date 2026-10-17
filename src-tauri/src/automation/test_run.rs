@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::automation::commands::{ReadinessDto, readiness_dto};
 use crate::automation::dto::{StepDto, StepStatus};
 use crate::automation::model::{
-    AutomationPolicy, ProfilePolicy, RootIdentity, Runtime, Side, SyncMode, Trigger, shorten_middle,
+    AutomationPolicy, ProfilePolicy, Runtime, Side, SyncMode, Trigger, shorten_middle,
 };
 use crate::sync_engine::opset::GuardVerdict;
 use crate::sync_engine::plan::PlanSummary;
@@ -349,7 +349,7 @@ pub fn run_steps(
             if !watched {
                 continue;
             }
-            if matches!(spec.identity, RootIdentity::Network { .. }) {
+            if !crate::automation::watcher::supports_notifications(spec) {
                 push!(step(
                     "watch",
                     StepStatus::Fail,

@@ -1541,11 +1541,17 @@ pub fn start_host<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if state.host.set(host.clone()).is_ok() {
         // Detached on purpose: the loop ends with `stop_host` or with the process.
         let _ = host.start();
-        // Resume, clock and time zone changes make the host look at the schedules again (SC-3.3).
+        // Resume, clock and time zone changes make the host look at the schedules again (SC-3.3);
+        // a local volume that arrives or goes makes it look at the watched folders (WA-5.3).
         let target = host.clone();
         let on_event: crate::automation::power::OnEvent =
             Arc::new(move |why| target.recompute_schedules(why));
-        if let Some(watcher) = crate::automation::power::PowerWatcher::start(on_event) {
+        let volume_target = host.clone();
+        let on_volume: crate::automation::power::OnVolume =
+            Arc::new(move |_change| volume_target.volume_changed());
+        if let Some(watcher) =
+            crate::automation::power::PowerWatcher::start_with_volume(on_event, on_volume)
+        {
             let _ = state.power.set(watcher);
         }
     }

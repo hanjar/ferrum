@@ -12,6 +12,7 @@ use crate::automation::model::Conditions;
 use crate::automation::profile_baseline::ProfileBaselineStore;
 use crate::automation::store::Store;
 use crate::automation::store::queue::HostClass;
+use crate::automation::watcher::{NotifyFactory, WatchFactory};
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::execute::EngineReport;
 
@@ -110,6 +111,11 @@ impl HostDeps for ProdDeps {
 
     fn incremental(&self) -> bool {
         (self.incremental)()
+    }
+
+    /// Operating-system change notifications: the only source of change events (no polling).
+    fn watch_factory(&self) -> &dyn WatchFactory {
+        &NotifyFactory
     }
 }
 

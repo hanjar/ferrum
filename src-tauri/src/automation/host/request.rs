@@ -300,7 +300,8 @@ fn run_now_tx(
     answer_for(conn, enq, &checked.id)
 }
 
-/// A trigger source (the schedule hook: an on-time occurrence or a catch-up) asks for a run, host
+/// A trigger source (the schedule hook: an on-time occurrence or a catch-up; the watch hook: a burst
+/// of changes that went quiet, or a fresh comparison that found differences) asks for a run, host
 /// side. The same checks as Run now - the approval VERIFIES (the `enabled` flag is not an
 /// authorization), no attention hold, not paused - and then only a queue entry is written. The
 /// gate asks all of it again, and more, before any file is touched. A user kind is refused: a
@@ -313,7 +314,15 @@ pub(super) fn trigger_tx(
     text: &str,
     now_ms: i64,
 ) -> Answer {
-    if !matches!(kind, TriggerKind::Schedule | TriggerKind::CatchUp) {
+    if !matches!(
+        kind,
+        TriggerKind::Schedule
+            | TriggerKind::CatchUp
+            | TriggerKind::Watch
+            | TriggerKind::PendingRerun
+            | TriggerKind::Available
+            | TriggerKind::Startup
+    ) {
         return Err(RequestError::Invalid);
     }
     let checked = check(conn, keys, automation_id)?;
