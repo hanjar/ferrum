@@ -128,11 +128,12 @@ mod imp {
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
         FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME,
         FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW,
+        OPEN_EXISTING, ReadDirectoryChangesW,
     };
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+        CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
     };
 
     use super::{Parsed, parse};
@@ -186,20 +187,25 @@ mod imp {
     }
 
     /// One armed directory watch: the handle, the I/O event, the `OVERLAPPED` and the buffer the
-    /// kernel writes into. The last two are heap boxes so their addresses do not change when this
-    /// struct moves to the worker thread.
+    /// kernel writes into. The last two are raw pointers from `Box::into_raw`: while a read is
+    /// pending the kernel owns that memory, and no Rust reference or `Box` to it exists. They are
+    /// freed in `Drop`, after the completion.
     struct Watch {
         dir: HANDLE,
         io: Event,
-        ov: Box<OVERLAPPED>,
+        ov: *mut OVERLAPPED,
         /// `u32` elements: the buffer is DWORD aligned, as `FILE_NOTIFY_INFORMATION` requires.
-        buf: Box<[u32]>,
+        buf: *mut u32,
+        words: usize,
         /// A read is in flight: `ov` and `buf` belong to the kernel until it completes.
         pending: bool,
+        /// Where the handle pointed when the watch began (lower case, no `\\?\`), to see a root
+        /// that was renamed away: the handle follows the folder, the path does not.
+        base_path: Option<String>,
     }
 
-    // SAFETY: the raw handle and the boxes are owned by this struct alone and are used from one
-    // thread at a time (it is created on the caller's thread, then moved to the worker).
+    // SAFETY: the raw handle and the allocations are owned by this struct alone and are used from
+    // one thread at a time (it is created on the caller's thread, then moved to the worker).
     unsafe impl Send for Watch {}
 
     /// What a finished read told the worker.
@@ -225,6 +231,25 @@ mod imp {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    /// The path the handle points at now, lower case without the `\\?\` prefix.
+    fn final_path(dir: HANDLE) -> Option<String> {
+        let mut buf = vec![0u16; 1024];
+        loop {
+            // SAFETY: `dir` is an open handle; `buf` is a live writable buffer of `len` units.
+            let n = unsafe { GetFinalPathNameByHandleW(dir, buf.as_mut_ptr(), buf.len() as u32, 0) }
+                as usize;
+            if n == 0 {
+                return None;
+            }
+            if n < buf.len() {
+                let text = String::from_utf16_lossy(&buf[..n]).to_lowercase();
+                return Some(text.strip_prefix(r"\\?\").unwrap_or(&text).to_string());
+            }
+            // Too small: `n` is the size needed (with the NUL).
+            buf.resize(n + 1, 0);
+        }
     }
 
     impl Watch {
@@ -253,36 +278,44 @@ mod imp {
                 return None;
             };
             let words = buf_bytes.div_ceil(4).max(64);
-            // SAFETY: `OVERLAPPED` is plain data for which all-zero is the documented initial state.
-            let ov: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });
+            let ov = Box::into_raw(Box::new(unsafe_zero_overlapped()));
+            let buf = Box::into_raw(vec![0u32; words].into_boxed_slice()).cast::<u32>();
             Some(Watch {
                 dir,
                 io,
                 ov,
-                buf: vec![0u32; words].into_boxed_slice(),
+                buf,
+                words,
                 pending: false,
+                base_path: final_path(dir),
             })
         }
 
         /// Start a read. `false` = the watch cannot go on.
         fn arm(&mut self) -> bool {
-            debug_assert!(!self.pending);
-            *self.ov = unsafe_zero_overlapped();
-            self.ov.hEvent = self.io.0;
-            let bytes = (self.buf.len() * 4) as u32;
+            if self.pending {
+                return true;
+            }
+            // SAFETY: `ov` is the live allocation made in `open`; no read is in flight (`pending`
+            // is false), so the kernel is not using it.
+            unsafe {
+                self.ov.write(unsafe_zero_overlapped());
+                (*self.ov).hEvent = self.io.0;
+            }
+            let bytes = (self.words * 4) as u32;
             // SAFETY: `dir` is an open overlapped directory handle. `buf` is a live, DWORD-aligned
-            // allocation of `bytes` bytes and `ov` a live OVERLAPPED; both are heap boxes owned by
-            // `self`, and `Drop` waits for the completion before they are freed, so the kernel
-            // never writes into freed memory. `bytes_returned` may be null for overlapped use.
+            // allocation of `bytes` bytes and `ov` a live OVERLAPPED; both are owned by `self` and
+            // freed only in `Drop` after the completion, so the kernel never writes into freed
+            // memory. `bytes_returned` may be null for overlapped use.
             let ok = unsafe {
                 ReadDirectoryChangesW(
                     self.dir,
-                    self.buf.as_mut_ptr().cast::<c_void>(),
+                    self.buf.cast::<c_void>(),
                     bytes,
                     1, // bWatchSubtree
                     FILTER,
                     null_mut(),
-                    &mut *self.ov,
+                    self.ov,
                     None,
                 )
             };
@@ -298,14 +331,32 @@ mod imp {
             let mut n: u32 = 0;
             // SAFETY: `dir` and `ov` are the pair the read was started with; `n` is a live u32.
             // `bWait` is FALSE: the event said the read completed, this only collects the result.
-            let ok = unsafe { GetOverlappedResult(self.dir, &*self.ov, &mut n, FALSE) };
-            if ok == 0 {
-                // SAFETY: reads the calling thread's last error, set by the call above.
-                let err = unsafe { GetLastError() };
-                if err == ERROR_IO_INCOMPLETE {
+            let mut ok = unsafe { GetOverlappedResult(self.dir, self.ov, &mut n, FALSE) };
+            // SAFETY: reads the calling thread's last error, set by the call above.
+            let mut err = if ok == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            if ok == 0 && err == ERROR_IO_INCOMPLETE {
+                // Signalled but not complete: put the event down so the wait does not spin, and
+                // look once more (a completion in between would have signalled it again).
+                // SAFETY: `io` is a live event owned by `self`.
+                unsafe { ResetEvent(self.io.0) };
+                // SAFETY: as above.
+                ok = unsafe { GetOverlappedResult(self.dir, self.ov, &mut n, FALSE) };
+                // SAFETY: as above.
+                err = if ok == 0 {
+                    unsafe { GetLastError() }
+                } else {
+                    0
+                };
+                if ok == 0 && err == ERROR_IO_INCOMPLETE {
                     return Done::Still;
                 }
-                self.pending = false;
+            }
+            self.pending = false;
+            if ok == 0 {
                 return if err == ERROR_NOTIFY_ENUM_DIR {
                     Done::Overflow
                 } else {
@@ -313,21 +364,27 @@ mod imp {
                     Done::Died
                 };
             }
-            self.pending = false;
+            // The folder was renamed or moved away from the path that was approved: the handle
+            // follows it, so what it reports is not about the watched path any more.
+            if let (Some(base), Some(now)) = (&self.base_path, final_path(self.dir))
+                && *base != now
+            {
+                return Done::Died;
+            }
             if n == 0 {
                 Done::Overflow
             } else {
-                Done::Bytes((n as usize).min(self.buf.len() * 4))
+                Done::Bytes((n as usize).min(self.words * 4))
             }
         }
 
         /// The first `n` bytes of the buffer, copied out so the next read can start at once.
         fn take(&self, n: usize) -> Vec<u8> {
-            // SAFETY: `buf` holds `len * 4` initialised bytes and `n` is at most that (clamped in
+            debug_assert!(!self.pending);
+            // SAFETY: `buf` holds `words * 4` initialised bytes and `n` is at most that (clamped in
             // `finish`); no read is in flight (`pending` is false), so the kernel is not writing.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(self.buf.as_ptr().cast::<u8>(), self.buf.len() * 4)
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(self.buf.cast::<u8>(), self.words * 4) };
             bytes[..n].to_vec()
         }
     }
@@ -339,27 +396,36 @@ mod imp {
 
     impl Drop for Watch {
         fn drop(&mut self) {
+            let mut leak = false;
             if self.pending {
                 // SAFETY: `dir`/`ov` are the pair the pending read uses. Cancelling a read that
                 // already completed returns ERROR_NOT_FOUND, which is harmless.
-                unsafe { CancelIoEx(self.dir, &*self.ov) };
+                unsafe { CancelIoEx(self.dir, self.ov) };
                 // The completion (cancelled or not) signals the I/O event. Only after it is the
                 // buffer free to go; if it never comes, the memory is leaked on purpose.
                 // SAFETY: waits on an event handle owned by `self.io`.
                 let waited = unsafe { WaitForSingleObject(self.io.0, CANCEL_WAIT_MS) };
-                if waited != WAIT_OBJECT_0 {
-                    let buf = std::mem::take(&mut self.buf);
-                    let ov = std::mem::replace(&mut self.ov, Box::new(unsafe_zero_overlapped()));
-                    std::mem::forget(buf);
-                    std::mem::forget(ov);
-                    // Closing the directory handle makes the kernel drop the request; the leaked
-                    // memory stays valid regardless.
-                }
+                leak = waited != WAIT_OBJECT_0;
             }
             // SAFETY: `dir` is owned here and closed once; the I/O event closes in its own Drop.
+            // Closing it also makes the kernel drop a request that is still pending.
             unsafe { CloseHandle(self.dir) };
+            if !leak {
+                // SAFETY: both pointers come from `Box::into_raw` in `open` with these exact
+                // types and lengths, are freed only here, and no read is pending any more.
+                unsafe {
+                    drop(Box::from_raw(self.ov));
+                    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                        self.buf, self.words,
+                    )));
+                }
+            }
         }
     }
+
+    /// Test seam: called after every successful wake-up of the worker; `true` makes the worker
+    /// behave as if the wait had failed (it may also panic to test the unwind path).
+    pub(crate) type Fault = Arc<dyn Fn() -> bool + Send + Sync>;
 
     /// A running recursive watch of one root. Dropping it stops the worker, cancels the read,
     /// waits for the completion and frees every handle.
@@ -377,27 +443,43 @@ mod imp {
 
     impl RdcwHandle {
         /// Open `root` and start the first read before returning, so a root that cannot be
-        /// watched is an error here and not a silent worker. `buf_bytes` is the kernel buffer
-        /// (tests make it small to provoke an overflow).
+        /// watched is an error here and not a silent worker. The read is armed ON the worker
+        /// thread (a read belongs to the thread that issued it when the handle has no completion
+        /// port, and is cancelled when that thread ends), and the result is awaited here.
+        /// `buf_bytes` is the kernel buffer (tests make it small to provoke an overflow).
         pub(crate) fn start(root: &str, sink: Sink, buf_bytes: usize) -> Result<Self, WatchError> {
-            let mut watch = Watch::open(root, buf_bytes).ok_or(WatchError::Failed)?;
-            if !watch.arm() {
-                return Err(WatchError::Failed);
-            }
+            Self::start_with(root, sink, buf_bytes, None)
+        }
+
+        pub(crate) fn start_with(
+            root: &str,
+            sink: Sink,
+            buf_bytes: usize,
+            fault: Option<Fault>,
+        ) -> Result<Self, WatchError> {
+            let watch = Watch::open(root, buf_bytes).ok_or(WatchError::Failed)?;
             let stop = Arc::new(Event::new().ok_or(WatchError::Failed)?);
             let dead = Arc::new(AtomicBool::new(false));
             let root = root.to_string();
             let (stop2, dead2) = (stop.clone(), dead.clone());
+            let (armed_tx, armed_rx) = std::sync::mpsc::channel::<bool>();
             let thread = std::thread::Builder::new()
                 .name("ferrum-rdcw".into())
-                .spawn(move || work(watch, &root, &sink, &stop2, &dead2))
+                // The worker only waits and parses: a small stack is plenty.
+                .stack_size(256 * 1024)
+                .spawn(move || work(watch, &root, &sink, &stop2, &dead2, &armed_tx, fault))
                 // The closure (and with it the Watch) is dropped on failure: Drop cancels the read.
                 .map_err(|_| WatchError::Failed)?;
-            Ok(RdcwHandle {
+            let handle = RdcwHandle {
                 stop,
                 dead,
                 thread: Some(thread),
-            })
+            };
+            match armed_rx.recv() {
+                Ok(true) => Ok(handle),
+                // Dropping the handle ends the worker (it has already left).
+                _ => Err(WatchError::Failed),
+            }
         }
     }
 
@@ -420,27 +502,65 @@ mod imp {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(event)));
     }
 
-    /// The worker: wait for the read or for stop; report; read again. Leaves (and thereby closes
+    /// Says the watch is lost on every way out of the worker except a real stop: an error, a
+    /// failed wait or a panic. The flag goes first, so whoever sees `Failed` sees `!alive()`.
+    struct Exit<'a> {
+        sink: &'a Sink,
+        dead: &'a AtomicBool,
+        stopped: bool,
+    }
+
+    impl Drop for Exit<'_> {
+        fn drop(&mut self) {
+            if !self.stopped {
+                self.dead.store(true, Ordering::SeqCst);
+                deliver(self.sink, RawEvent::Failed);
+            }
+        }
+    }
+
+    /// The worker: wait for stop or for the read; report; read again. Leaves (and thereby closes
     /// everything) on stop or when the watch is gone.
-    fn work(mut watch: Watch, root: &str, sink: &Sink, stop: &Event, dead: &AtomicBool) {
-        let handles = [watch.io.0, stop.0];
-        let die = |dead: &AtomicBool| {
-            dead.store(true, Ordering::SeqCst);
-            deliver(sink, RawEvent::Failed);
+    fn work(
+        mut watch: Watch,
+        root: &str,
+        sink: &Sink,
+        stop: &Event,
+        dead: &AtomicBool,
+        armed: &std::sync::mpsc::Sender<bool>,
+        fault: Option<Fault>,
+    ) {
+        let first = watch.arm();
+        let _ = armed.send(first);
+        if !first {
+            return;
+        }
+        let mut exit = Exit {
+            sink,
+            dead,
+            stopped: false,
         };
+        // `stop` comes first: when both are signalled, the lowest index wins, so a flood of
+        // changes can never hide the stop.
+        let handles = [stop.0, watch.io.0];
         loop {
             // SAFETY: `handles` holds two live event handles that outlive the call.
             let signalled = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, INFINITE) };
-            if signalled != WAIT_OBJECT_0 {
-                // Stop (index 1), or a failed wait: either way this watch ends. Dropping `watch`
-                // cancels the read and waits for it.
+            if signalled == WAIT_OBJECT_0 {
+                // The real stop. Dropping `watch` cancels the read and waits for it.
+                exit.stopped = true;
                 return;
+            }
+            let failed_wait = signalled != WAIT_OBJECT_0 + 1;
+            let injected = fault.as_ref().is_some_and(|f| f());
+            if failed_wait || injected {
+                return; // `exit` reports the loss.
             }
             match watch.finish() {
                 Done::Still => {}
                 Done::Overflow => {
                     if !watch.arm() {
-                        return die(dead);
+                        return;
                     }
                     deliver(sink, RawEvent::Overflow);
                 }
@@ -448,14 +568,14 @@ mod imp {
                     let bytes = watch.take(n);
                     // Re-arm before the (possibly slow) sink: events that happen meanwhile wait in
                     // the kernel's buffer.
-                    if !watch.arm() {
-                        // The batch in hand still counts; then the watch is declared lost.
-                        report(sink, &bytes, root);
-                        return die(dead);
-                    }
+                    let armed_again = watch.arm();
+                    // The batch in hand counts either way.
                     report(sink, &bytes, root);
+                    if !armed_again {
+                        return;
+                    }
                 }
-                Done::Died => return die(dead),
+                Done::Died => return,
             }
         }
     }
@@ -684,7 +804,8 @@ mod real_tests {
         // The folder is really gone (our handle does not keep it as delete-pending).
         let gone = Instant::now() + WAIT;
         while root.exists() && Instant::now() < gone {
-            std::thread::yield_now();
+            // Waits on the channel (nothing more is sent) instead of spinning.
+            let _ = rx.recv_timeout(Duration::from_millis(20));
         }
         assert!(!root.exists());
         drop(handle);
@@ -728,6 +849,116 @@ mod real_tests {
             }
         }
         assert!(overflow, "the overflow was not reported");
+        drop(handle);
+    }
+
+    /// S1: a flood of changes cannot hide the stop. Another thread writes files without a pause
+    /// while the handle is dropped; the drop must come back (checked through a channel with a
+    /// generous timeout, so a hung drop fails the test instead of hanging it).
+    #[test]
+    fn dropping_the_handle_during_a_flood_of_changes_returns() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = canonical_root(&tmp);
+        let (sink, _rx) = channel_sink();
+        let handle = RdcwHandle::start(&root.to_string_lossy(), sink, 64 * 1024).expect("starts");
+        let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let w2 = writing.clone();
+        let dir = root.clone();
+        let writer = std::thread::spawn(move || {
+            let mut i = 0u64;
+            while w2.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::fs::write(dir.join(format!("f{}.txt", i % 50)), i.to_string());
+                i += 1;
+            }
+        });
+        // Let the flood run until the first events have gone through.
+        std::thread::sleep(Duration::from_millis(200));
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let dropper = std::thread::spawn(move || {
+            drop(handle);
+            let _ = done_tx.send(());
+        });
+        let returned = done_rx.recv_timeout(Duration::from_secs(20)).is_ok();
+        writing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = writer.join();
+        assert!(
+            returned,
+            "the drop did not return during a flood of changes"
+        );
+        let _ = dropper.join();
+    }
+
+    /// S2: a worker that leaves for any reason but a real stop says the watch is lost and is not
+    /// alive: a failed wait and a panic outside the sink (the test seam injects both).
+    #[test]
+    fn a_worker_that_leaves_without_a_stop_reports_the_loss() {
+        for panic_it in [false, true] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let root = canonical_root(&tmp);
+            let (sink, rx) = channel_sink();
+            let fault: super::imp::Fault = Arc::new(move || {
+                if panic_it {
+                    panic!("injected fault in the worker");
+                }
+                true
+            });
+            let handle =
+                RdcwHandle::start_with(&root.to_string_lossy(), sink, 64 * 1024, Some(fault))
+                    .expect("starts");
+            std::fs::write(root.join("x.txt"), "1").expect("write");
+            let deadline = Instant::now() + WAIT;
+            let mut failed = false;
+            while !failed && Instant::now() < deadline {
+                if let Ok(RawEvent::Failed) = rx.recv_timeout(Duration::from_millis(500)) {
+                    failed = true;
+                }
+            }
+            assert!(failed, "no Failed (panic = {panic_it})");
+            assert!(
+                !crate::automation::watcher::WatchHandle::alive(&handle),
+                "still alive (panic = {panic_it})"
+            );
+            drop(handle);
+        }
+    }
+
+    /// A real stop is silent: no Failed, and the handle was alive until dropped.
+    #[test]
+    fn a_real_stop_reports_nothing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = canonical_root(&tmp);
+        let (sink, rx) = channel_sink();
+        let handle = RdcwHandle::start(&root.to_string_lossy(), sink, 64 * 1024).expect("starts");
+        drop(handle);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    }
+
+    /// The watched folder is renamed away: the handle follows it, so the next completion is
+    /// reported as a lost watch (the path that was approved is not the folder any more).
+    #[test]
+    fn renaming_the_root_away_reports_the_watch_as_lost() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let base = canonical_root(&tmp);
+        let root = base.join("watched");
+        std::fs::create_dir(&root).expect("root");
+        let (sink, rx) = channel_sink();
+        let handle = RdcwHandle::start(&root.to_string_lossy(), sink, 64 * 1024).expect("starts");
+        let moved = base.join("moved");
+        if std::fs::rename(&root, &moved).is_err() {
+            // Windows refuses a rename while the folder is open in some configurations: then the
+            // folder cannot move away either, and there is nothing to detect.
+            drop(handle);
+            return;
+        }
+        std::fs::write(moved.join("x.txt"), "1").expect("write in the moved folder");
+        let deadline = Instant::now() + WAIT;
+        let mut failed = false;
+        while !failed && Instant::now() < deadline {
+            if let Ok(RawEvent::Failed) = rx.recv_timeout(Duration::from_millis(500)) {
+                failed = true;
+            }
+        }
+        assert!(failed, "the renamed root was not reported");
         drop(handle);
     }
 

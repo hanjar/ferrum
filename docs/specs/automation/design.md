@@ -1224,6 +1224,14 @@ FILE_FLAG_OVERLAPPED`, so the folder stays usable by everyone else. A 64 KiB buf
   before it reads and has no `unsafe`. Releasing a watch cancels the read (`CancelIoEx`) and WAITS for the completion
   before the buffer, the `OVERLAPPED` and the handles are freed (if the completion never comes the memory is leaked, never
   freed under the kernel); the host never joins the worker from the worker itself. UNC roots stay Unsupported.
+- **Backend hardening (FER-565 review R1).** The stop event is first in the wait list, so a flood of changes cannot
+  hide it. Every way out of the worker except a real stop (a failed wait, a panic, an error) marks the handle not alive
+  and reports `Failed` (an `Exit` guard). The first read is armed on the worker thread, the buffer and `OVERLAPPED` are
+  raw `Box::into_raw` allocations while a read can be pending, and after each completion the handle's final path is
+  compared with the one it had at the start: a root renamed away is reported as lost. In the host, a watch that dies
+  less than 10 s after it was made is a quick death: the first is replaced at once, the second waits for the 30 s look
+  (and the 60 s recheck backoff), the third makes the folder Unsupported ("keep stopping"); a watch that lived longer
+  resets the count. Follow-up: a soft cap on the number of watcher threads (each has a 256 KiB stack).
 - **Probes do not stall the host (S4).** All probes of one pass share a budget of 1 s; the rest waits for the next passes
   (automations with a look left over go first), so the host's heartbeat is never held up by offline shares.
 - **Known limits.** The gap of `notify` 7 (no overflow report, a silently dead watch) is closed by the own backend.

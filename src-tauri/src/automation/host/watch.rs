@@ -78,6 +78,10 @@ const RECHECK_BACKOFF_MS: i64 = 60_000;
 /// A watching automation's local roots are opened (identity only, never listed) this often to see
 /// that they are still the approved folders (S3a). A liveness check, not change detection.
 const HEALTH_EVERY_MS: i64 = 30_000;
+/// A watch that dies sooner than this after it was made counts as a failed start (S3), and
+/// after `MAX_QUICK_DEATHS` in a row the folder is Unsupported.
+const QUICK_DEATH_MS: i64 = 10_000;
+const MAX_QUICK_DEATHS: u32 = 3;
 /// All the probes of ONE pass together take at most this long (plus the one in flight): a pass
 /// must not hold up the host's heartbeat, however many shares are offline (S4). What is left over
 /// is done in the next passes.
@@ -300,6 +304,9 @@ struct Tracked {
     /// The roots have not been looked at since this watcher was made.
     initial_probe: bool,
     next_health_ms: i64,
+    /// When the watches were last made, and how many in a row died soon after (S3).
+    made_ms: i64,
+    quick_deaths: u32,
     /// The queue entry the "merged into the queued run" event was written for.
     merge_logged: Option<i64>,
 }
@@ -491,6 +498,7 @@ fn make_handles<D: HostDeps>(inner: &Arc<Inner<D>>, t: &mut Tracked) -> (usize, 
         }
     });
     let skip: Vec<String> = t.versioning.iter().cloned().collect();
+    t.made_ms = inner.deps.now_ms();
     let mut started = 0;
     let mut failed = 0;
     let wanted: Vec<RootSpec> = t
@@ -721,6 +729,8 @@ fn create<D: HostDeps>(
         want: Want::default(),
         initial_probe: false,
         next_health_ms: now.saturating_add(HEALTH_EVERY_MS),
+        made_ms: now,
+        quick_deaths: 0,
         merge_logged: None,
     };
     // Which watched roots can be watched at all (WA-2.3).
@@ -879,6 +889,8 @@ struct Out {
     drop_handles: bool,
     /// The roots are back: make the watchers again.
     rebuild_handles: bool,
+    /// The next comparison waits (a watch that keeps dying).
+    backoff: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1068,6 +1080,11 @@ fn step<D: HostDeps>(
     if out.drop_handles {
         t.handles.clear();
     }
+    if out.backoff {
+        t.shared
+            .retry_at_ms
+            .store(now.saturating_add(RECHECK_BACKOFF_MS), Ordering::SeqCst);
+    }
     if out.rebuild_handles {
         t.handles.clear();
         let (started, failed) = make_handles(inner, t);
@@ -1225,9 +1242,43 @@ fn apply(
     }
     if i.drained.failed && i.report.as_ref().is_some_and(|r| r.missing.is_none()) {
         // A watch reported that it is gone while the folders are there and are the approved ones
-        // (FER-565: the own backend says so; `notify` could not): put it back now. The events it
-        // may have missed are compared below (section 2), or by the comparison that is running.
-        out.rebuild_handles = true;
+        // (FER-565: the own backend says so; `notify` could not). One that lived a while is put
+        // back now; one that dies right after it was made is treated like a start that failed
+        // (S3): no rebuild loop, the health look tries again after the backoff, and a folder
+        // whose watch keeps dying at once is Unsupported. The events it may have missed are
+        // compared below (section 2), or by the comparison that is running.
+        if now.saturating_sub(t.made_ms) < QUICK_DEATH_MS {
+            t.quick_deaths += 1;
+            if t.quick_deaths >= MAX_QUICK_DEATHS {
+                out.drop_handles = true;
+                runtime::set_trigger_state(
+                    conn,
+                    id,
+                    TriggerState::Unsupported,
+                    None,
+                    None,
+                    None,
+                    now,
+                )?;
+                events::add_event(
+                    conn,
+                    id,
+                    now,
+                    EventKind::Warn,
+                    "Change notifications keep stopping for this folder \u{2014} can't be watched",
+                )?;
+                return Ok(out);
+            } else if t.quick_deaths >= 2 {
+                // The second quick death in a row: wait (the 30 s look makes the next watch).
+                out.drop_handles = true;
+                out.backoff = true;
+            } else {
+                out.rebuild_handles = true;
+            }
+        } else {
+            t.quick_deaths = 0;
+            out.rebuild_handles = true;
+        }
     }
     if i.initial && i.handles_short && i.report.as_ref().is_some_and(|r| r.missing.is_none()) {
         // The first look found the folders; the watches were not made on a guess (S4): make them.

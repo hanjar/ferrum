@@ -601,6 +601,53 @@ fn a_watch_that_dies_with_its_folder_waits_for_the_device() {
     assert_eq!(w.live(), 1);
 }
 
+/// S3: a watch that dies soon after it was made is not put back in a loop. The first quick death
+/// is replaced at once, the second waits for the backoff and the 30 s look, the third makes the
+/// folder Unsupported. A watch that lived long enough starts the count again.
+#[test]
+fn a_watch_that_keeps_dying_at_once_is_not_rebuilt_in_a_loop() {
+    let w = setup();
+    w.started();
+    w.advance(20 * SEC);
+    // Dies after a while: replaced at once, and it is not counted as quick.
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 1);
+    // First quick death: replaced at once.
+    let asked = w.rig.world.factory.asked().len();
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 1, "the first quick death is replaced");
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1);
+    // Second quick death: no new watch now.
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 0, "the second one waits");
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1);
+    w.advance(2 * SEC);
+    w.host.tick();
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1, "no loop");
+    // After the backoff the comparison runs, and the 30 s look makes the watch again.
+    let mut rebuilt = false;
+    for _ in 0..12 {
+        w.advance(10 * SEC);
+        tick(&w.host);
+        if w.live() == 1 {
+            rebuilt = true;
+            break;
+        }
+    }
+    assert!(rebuilt, "the look put the watch back");
+    // Third quick death in a row: Unsupported, with a plain text.
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Unsupported);
+    assert!(w.has_event("keep stopping"));
+    assert_eq!(w.live(), 0);
+}
+
 // ── WA-5: offline roots ──
 
 #[test]
