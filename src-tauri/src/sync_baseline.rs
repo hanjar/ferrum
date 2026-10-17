@@ -95,6 +95,11 @@ struct StoredFile {
     baseline: BaselineDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mac: Option<String>,
+    /// Authenticated store only: the save counter of this pair at the time of writing (covered
+    /// by the MAC, compared with the store's current counter on load, so a replayed older file is
+    /// refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
 }
 
 /// Pembuktian keaslian baseline untuk penyimpanan profil/automation (Automation FER-522): tulis
@@ -106,6 +111,10 @@ pub trait BaselineAuth: Send + Sync {
     fn sign(&self, payload: &[u8]) -> Option<String>;
     /// Cocokkan MAC (waktu konstan). Kunci hilang/rusak = `false`.
     fn verify(&self, payload: &[u8], mac: &str) -> bool;
+    /// The pair's current save counter (`None` = unknown or never saved).
+    fn generation(&self, pair_key: &str) -> Option<u64>;
+    /// Spend the next counter value for a save of this pair and return it (`None` = cannot).
+    fn advance_generation(&self, pair_key: &str) -> Option<u64>;
 }
 
 /// Domain MAC baseline (versi 1).
@@ -114,7 +123,12 @@ const MAC_DOMAIN: &str = "ferrum.automation.baseline.v1";
 /// Byte yang ditandatangani: domain, kunci pasangan, waktu simpan, dan isi baseline (serde JSON,
 /// urutan kunci deterministik karena `BTreeMap`). Dibangun ulang saat memuat, jadi isi yang
 /// diubah satu byte pun tidak lagi cocok.
-fn mac_payload(key: &str, saved_at_ms: u64, baseline: &BaselineDto) -> Option<Vec<u8>> {
+fn mac_payload(
+    key: &str,
+    saved_at_ms: u64,
+    generation: u64,
+    baseline: &BaselineDto,
+) -> Option<Vec<u8>> {
     let body = serde_json::to_vec(baseline).ok()?;
     let mut out = Vec::with_capacity(body.len() + key.len() + 64);
     for part in [MAC_DOMAIN.as_bytes(), key.as_bytes()] {
@@ -122,6 +136,7 @@ fn mac_payload(key: &str, saved_at_ms: u64, baseline: &BaselineDto) -> Option<Ve
         out.extend_from_slice(part);
     }
     out.extend_from_slice(&saved_at_ms.to_le_bytes());
+    out.extend_from_slice(&generation.to_le_bytes());
     out.extend_from_slice(&(body.len() as u64).to_le_bytes());
     out.extend_from_slice(&body);
     Some(out)
@@ -353,10 +368,18 @@ impl SyncBaselineStore {
         }
         // Penyimpanan terautentikasi: tanpa MAC yang valid isi file tidak dipercaya sama sekali.
         if let Some(auth) = &self.inner.auth {
-            let authentic = stored.mac.as_deref().is_some_and(|mac| {
-                mac_payload(&stored.key, stored.saved_at_ms, &stored.baseline)
+            let current = auth.generation(&stored.key);
+            let authentic = stored.generation.is_some()
+                && stored.generation == current
+                && stored.mac.as_deref().is_some_and(|mac| {
+                    mac_payload(
+                        &stored.key,
+                        stored.saved_at_ms,
+                        stored.generation.unwrap_or(0),
+                        &stored.baseline,
+                    )
                     .is_some_and(|payload| auth.verify(&payload, mac))
-            });
+                });
             if !authentic {
                 return first(FirstRunReason::Untrusted);
             }
@@ -400,24 +423,18 @@ impl SyncBaselineStore {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let mac = match &self.inner.auth {
-            Some(auth) => Some(
-                mac_payload(&key, saved_at_ms, baseline)
-                    .and_then(|payload| auth.sign(&payload))
-                    .ok_or(err("unavailable", "Baseline storage is not available"))?,
-            ),
-            None => None,
-        };
-        let stored = StoredFile {
+        let mut stored = StoredFile {
             version: BASELINE_VERSION,
             key,
             saved_at_ms,
             baseline: baseline.clone(),
-            mac,
+            mac: None,
+            generation: None,
         };
-        let bytes =
+        // Size check BEFORE a generation is spent (slack for the mac and generation fields).
+        let unsigned =
             serde_json::to_vec(&stored).map_err(|_| err("io", "Could not encode baseline"))?;
-        if bytes.len() as u64 > MAX_FILE_BYTES {
+        if unsigned.len() as u64 + 1024 > MAX_FILE_BYTES {
             return Err(err("limit_exceeded", "Baseline is too large to store"));
         }
         let _guard = self.inner.lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -426,6 +443,24 @@ impl SyncBaselineStore {
                 "limit_exceeded",
                 "Too many stored folder pairs; clear some first",
             ));
+        }
+        if let Some(auth) = &self.inner.auth {
+            // A new generation per save: an older signed file (a replay) no longer matches it.
+            let unavailable = || err("unavailable", "Baseline storage is not available");
+            let generation = auth
+                .advance_generation(&stored.key)
+                .ok_or_else(unavailable)?;
+            stored.generation = Some(generation);
+            stored.mac = Some(
+                mac_payload(&stored.key, saved_at_ms, generation, &stored.baseline)
+                    .and_then(|payload| auth.sign(&payload))
+                    .ok_or_else(unavailable)?,
+            );
+        }
+        let bytes =
+            serde_json::to_vec(&stored).map_err(|_| err("io", "Could not encode baseline"))?;
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(err("limit_exceeded", "Baseline is too large to store"));
         }
         write_atomic(dir, &target, &bytes).map_err(|_| err("io", "Could not write baseline"))
     }

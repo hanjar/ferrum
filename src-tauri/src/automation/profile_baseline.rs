@@ -14,8 +14,10 @@
 //! - [`verify_profile_baseline`] lets the runner (P1.3) ask "is there a baseline I may trust"
 //!   before it plans.
 //!
-//! Known limit: an older AUTHENTIC baseline file replayed over a newer one still verifies (a
-//! store-side counter would be needed to detect rollback); it holds only facts that were once true.
+//! - each pair has a save COUNTER in the automation store (`baseline_gen`); the file holds the
+//!   counter it was written under (covered by the MAC) and loads only when it equals the current
+//!   one, so an older authentic file put back over a newer one is refused (replay);
+//! - signing never creates or replaces the approval key; only an approval does.
 //!
 //! Tauri-free.
 
@@ -24,6 +26,7 @@ use std::sync::Arc;
 
 use crate::automation::dpapi::{ApprovalKeys, KeyLoad};
 use crate::automation::policy;
+use crate::automation::store::{Store, baseline_gen};
 use crate::sync_baseline::{
     BaselineAuth, BaselineError, FirstRunReason, LoadResult, RootPair, SyncBaselineStore,
 };
@@ -33,21 +36,26 @@ pub const BASELINES_DIR: &str = "baselines";
 /// Purpose string of the baseline subkey (domain separation from approvals).
 const SUBKEY_PURPOSE: &str = "ferrum.automation.baseline.key.v1";
 
-/// MACs baseline files with a subkey of the approval key.
+/// MACs baseline files with a subkey of the approval key and keeps the save counters in the
+/// automation store.
 pub struct KeyedAuth {
     keys: Arc<dyn ApprovalKeys>,
+    store: Arc<Store>,
 }
 
 impl KeyedAuth {
-    pub fn new(keys: Arc<dyn ApprovalKeys>) -> Self {
-        Self { keys }
+    pub fn new(keys: Arc<dyn ApprovalKeys>, store: Arc<Store>) -> Self {
+        Self { keys, store }
     }
 }
 
 impl BaselineAuth for KeyedAuth {
     fn sign(&self, payload: &[u8]) -> Option<String> {
-        // Signing may create the key (first sync on a fresh profile); verification never does.
-        let key = self.keys.load_or_create().ok()?;
+        // Signing NEVER creates or replaces the approval key (FER-522 rework 1): only an approval
+        // does. Without a usable key a baseline simply cannot be signed, so it is not saved.
+        let KeyLoad::Key(key) = self.keys.load() else {
+            return None;
+        };
         let sub = policy::derive_subkey(&key, SUBKEY_PURPOSE)?;
         policy::hmac_hex(&sub, payload)
     }
@@ -59,6 +67,19 @@ impl BaselineAuth for KeyedAuth {
         policy::derive_subkey(&key, SUBKEY_PURPOSE)
             .is_some_and(|sub| policy::hmac_matches(&sub, payload, mac))
     }
+
+    fn generation(&self, pair_key: &str) -> Option<u64> {
+        self.store
+            .with_read(|conn| baseline_gen::current(conn, pair_key))
+            .ok()
+            .flatten()
+    }
+
+    fn advance_generation(&self, pair_key: &str) -> Option<u64> {
+        self.store
+            .with_write(|conn| baseline_gen::advance(conn, pair_key))
+            .ok()
+    }
 }
 
 /// The authenticated baseline store of profile and automation runs. Cheap to clone.
@@ -69,14 +90,18 @@ pub struct ProfileBaselineStore {
 
 impl ProfileBaselineStore {
     /// `store_dir` is the automation store directory (already proven plain by the store); the
-    /// baselines folder inside it must not be a reparse point either.
-    pub fn open(store_dir: &Path, keys: Arc<dyn ApprovalKeys>) -> Self {
+    /// baselines folder inside it must not be a reparse point either, which is checked through an
+    /// open handle of the folder itself (not a separate path lookup).
+    pub fn open(store_dir: &Path, keys: Arc<dyn ApprovalKeys>, store: Arc<Store>) -> Self {
         let dir = store_dir.join(BASELINES_DIR);
-        if is_reparse(&dir) {
+        if std::fs::create_dir_all(&dir).is_err() || !is_plain_dir(&dir) {
             return Self::unavailable();
         }
         Self {
-            inner: SyncBaselineStore::open_authenticated(&dir, Arc::new(KeyedAuth::new(keys))),
+            inner: SyncBaselineStore::open_authenticated(
+                &dir,
+                Arc::new(KeyedAuth::new(keys, store)),
+            ),
         }
     }
 
@@ -94,19 +119,25 @@ impl ProfileBaselineStore {
     }
 }
 
-fn is_reparse(path: &Path) -> bool {
+/// True when `path` is a real directory that is not a reparse point, judged on one handle opened
+/// WITHOUT following links (`FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`).
+fn is_plain_dir(path: &Path) -> bool {
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        std::fs::symlink_metadata(path)
-            .map(|m| m.file_attributes() & 0x0400 != 0)
-            .unwrap_or(false)
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(0x0020_0000 | 0x0200_0000)
+            .share_mode(7);
+        match options.open(path).and_then(|f| f.metadata()) {
+            Ok(meta) => meta.is_dir() && meta.file_attributes() & 0x0400 == 0,
+            Err(_) => false,
+        }
     }
     #[cfg(not(windows))]
     {
-        std::fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
     }
 }
 

@@ -354,6 +354,12 @@ CREATE TABLE controls(
   handled_ms INTEGER,
   result TEXT);
 
+-- Save counter per baseline pair (FER-522 rework 1): a signed baseline file carries the counter
+-- it was written under, so an older authentic file replayed over a newer one no longer matches.
+CREATE TABLE baseline_gen(
+  pair_key TEXT PRIMARY KEY,
+  gen INTEGER NOT NULL);
+
 CREATE INDEX events_by_auto ON events(automation_id, at_ms DESC);
 CREATE INDEX runs_by_auto ON runs(automation_id, started_ms DESC);
 ";

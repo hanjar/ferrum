@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
+use crate::automation::dpapi::ApprovalKeys;
 use crate::automation::dpapi::{ApprovalKey, MemoryKeys};
 use crate::automation::model::{DeletePolicy, SyncMode};
 use crate::sync_baseline::{BASELINE_VERSION, BaselineDto, EntryDto, FactsDto};
@@ -54,7 +55,8 @@ fn baseline_for(pair: &RootPair, names: &[&str]) -> BaselineDto {
 }
 
 fn store_in(dir: &Path, keys: Arc<MemoryKeys>) -> ProfileBaselineStore {
-    ProfileBaselineStore::open(dir, keys)
+    let db = Arc::new(crate::automation::store::Store::open(dir, "0.2.0"));
+    ProfileBaselineStore::open(dir, keys, db)
 }
 
 fn only_file(dir: &Path) -> std::path::PathBuf {
@@ -260,7 +262,7 @@ fn a_junction_as_the_baselines_folder_is_unavailable() {
         .output()
         .is_ok_and(|o| o.status.success());
     assert!(linked);
-    let store = ProfileBaselineStore::open(&store_dir, Arc::new(MemoryKeys::with_key(3)));
+    let store = store_in(&store_dir, Arc::new(MemoryKeys::with_key(3)));
     let p = pair(&left, &right);
     assert!(
         store
@@ -346,7 +348,7 @@ fn a_forged_baseline_deletes_through_the_plain_store_but_not_through_the_profile
     let keys = Arc::new(MemoryKeys::with_key(3));
     let store_dir = rig.base().join("store");
     std::fs::create_dir_all(&store_dir).unwrap();
-    let store = ProfileBaselineStore::open(&store_dir, keys);
+    let store = store_in(&store_dir, keys);
     let forger = SyncBaselineStore::open(&store_dir.join(BASELINES_DIR));
     forger
         .save_unguarded_for_tests(&p, &baseline_for(&p, FORGED_NAMES))
@@ -386,7 +388,7 @@ fn a_run_settles_a_signed_baseline_and_later_deletes_propagate() {
     );
     let store_dir = rig.base().join("store");
     std::fs::create_dir_all(&store_dir).unwrap();
-    let store = ProfileBaselineStore::open(&store_dir, Arc::new(MemoryKeys::with_key(3)));
+    let store = store_in(&store_dir, Arc::new(MemoryKeys::with_key(3)));
     run_engine(&rig, &profile, store.engine_store());
     assert_eq!(
         verify_profile_baseline(&store, &p).unwrap(),
@@ -396,4 +398,98 @@ fn a_run_settles_a_signed_baseline_and_later_deletes_propagate() {
     run_engine(&rig, &profile, store.engine_store());
     assert!(!rig.left.join("gone.txt").exists(), "propagated");
     assert!(rig.left.join("keep.txt").exists());
+}
+
+/// FER-522 rework 1: an older AUTHENTIC file put back over a newer one is refused (replay).
+#[test]
+fn a_replayed_older_baseline_is_untrusted() {
+    let (tmp, left, right) = dirs();
+    let store = store_in(tmp.path(), Arc::new(MemoryKeys::with_key(3)));
+    let p = pair(&left, &right);
+    store
+        .engine_store()
+        .save_unguarded_for_tests(&p, &baseline_for(&p, &["old.txt"]))
+        .unwrap();
+    let file = only_file(&tmp.path().join(BASELINES_DIR));
+    let old = std::fs::read(&file).unwrap();
+    store
+        .engine_store()
+        .save_unguarded_for_tests(&p, &baseline_for(&p, &["new.txt"]))
+        .unwrap();
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Trusted
+    );
+    // Roll the file back to the first (genuinely signed) version.
+    std::fs::write(&file, &old).unwrap();
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Untrusted,
+        "the generation moved on"
+    );
+    // The next real save replaces it and is trusted again.
+    store
+        .engine_store()
+        .save_unguarded_for_tests(&p, &baseline_for(&p, &["newer.txt"]))
+        .unwrap();
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Trusted
+    );
+}
+
+/// The generation is per pair and is part of the file: editing it in the file fails the MAC.
+#[test]
+fn the_generation_counts_per_pair_and_is_signed() {
+    let (tmp, left, right) = dirs();
+    let store = store_in(tmp.path(), Arc::new(MemoryKeys::with_key(3)));
+    let p = pair(&left, &right);
+    for _ in 0..3 {
+        store
+            .engine_store()
+            .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
+            .unwrap();
+    }
+    let file = only_file(&tmp.path().join(BASELINES_DIR));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(value["generation"], 3);
+    // Forge the counter to the store's current value on an older file: the MAC covers it.
+    value["generation"] = serde_json::json!(2);
+    std::fs::write(&file, value.to_string()).unwrap();
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Untrusted
+    );
+}
+
+/// Signing never makes or replaces the approval key: with no key the save fails and no key appears.
+#[test]
+fn signing_never_creates_the_key() {
+    let (tmp, left, right) = dirs();
+    let keys = Arc::new(MemoryKeys::missing());
+    let store = store_in(tmp.path(), keys.clone());
+    let p = pair(&left, &right);
+    assert!(
+        store
+            .engine_store()
+            .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
+            .is_err()
+    );
+    assert_eq!(keys.load(), KeyLoad::Missing);
+    assert!(!keys.take_rotation_notice());
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Absent
+    );
+    for state in [KeyLoad::Unusable, KeyLoad::Unreadable] {
+        keys.set(state.clone());
+        assert!(
+            store
+                .engine_store()
+                .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
+                .is_err()
+        );
+        assert_eq!(keys.load(), state);
+    }
 }

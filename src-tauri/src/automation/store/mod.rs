@@ -8,6 +8,7 @@
 
 pub mod approvals;
 pub mod automations;
+pub mod baseline_gen;
 pub mod hosts;
 pub mod leases;
 pub mod migrate;
@@ -346,6 +347,7 @@ mod tests {
                     "run_ops",
                     "events",
                     "controls",
+                    "baseline_gen",
                 ] {
                     let n: i64 = conn
                         .query_row(
