@@ -1,0 +1,20 @@
+{
+  "errors": [
+    {
+      "field": "trigger.time",
+      "code": "time_invalid"
+    },
+    {
+      "field": "retries",
+      "code": "retries_out_of_range"
+    }
+  ],
+  "checks": [
+    {
+      "id": "runtime",
+      "status": "fail",
+      "text": "The background runner is not set up yet."
+    }
+  ],
+  "next": []
+}

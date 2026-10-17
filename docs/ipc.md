@@ -255,3 +255,71 @@ unknown` and `holder.runId` is present for runs. The backend heartbeats the leas
   reload or the 12 h limit. The
   Synchronize Dirs lease also covers the delete phase (confirmation dialog and deletes) and is
   released only when both the baseline settle and that phase have ended.
+
+## Automations: approval, test run, pause and delete (automation P1.1)
+
+Source of truth: `src-tauri/src/automation/{approval,policy,dpapi,test_run,dto,profile_baseline}.rs`
+(Tauri-free cores) + `automation/commands.rs` (wrappers) + `src/lib/ipc/automation.ts`; fixtures
+`contract-fixtures/automation/automation-*.json`, read by both test suites. Requests are flat
+top-level arguments like the sync profile commands. **No command takes a "confirmed", "approved" or
+dialog-text argument (SE-1):** approving and resuming show a native Windows confirmation from the
+backend, built from stored data (design §10.3), and its outcome comes back as the `status` of the
+result.
+
+| Command                  | Payload                                      | Result                                                                                     | Notes                                                                                                                                |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `automation_validate`    | `{ draft }`                                  | `{ errors: FieldError[], checks: Step[], next: [] }`                                       | no side effects; `next` (schedule occurrences) stays empty until the scheduler (P1.4)                                                |
+| `automation_test`        | `{ id?, draft }`                             | `{ testId, automationId, policyHash, steps: Step[], passed }`                              | read-only (engine dry run); records `(policyHash, passed, at)` in the in-memory test ledger; `id` = automation being edited          |
+| `automation_approve`     | `{ id?, expectedConfigRev?, draft, testId }` | `{ status: 'approved', automation } \| { status: 'canceled' } \| { status: 'stale' }`      | needs a passed test of the same hash from this app session within 15 min; native confirmation; one transaction                       |
+| `automation_set_enabled` | `{ id, enabled }`                            | `{ status: 'enabled' \| 'paused' \| 'canceled' \| 'needsChoice' }` or error `needs_review` | enable = resume: approval verified before AND after the native confirmation; disable = no dialog, `needsChoice` while a run is going |
+| `automation_pause`       | `{ id, mode: 'finish' \| 'stop' }`           | `{ status: 'paused' }`                                                                     | configuration part only (the running run joins in with the host, P1.3); safe direction, no dialog                                    |
+| `automation_delete`      | `{ id }`                                     | `{ status: 'deleted' }`                                                                    | removes approval, runtime row, queued entries and events; the webview confirms in its own dialog; frees the profile (`in_use` ends)  |
+
+`draft` = `{ name, profileId, policy }` with `policy` = `{ trigger, runtime: 'app' | 'background',
+retries: 0..3, conditions: { skipOnBattery, skipOnMetered } }`. `trigger` is `{ kind: 'schedule',
+freq: { kind: 'once', date } | { kind: 'daily' } | { kind: 'weekly', days }, time: 'HH:MM', tz, missed:
+'skip' | 'runOnce' }` or `{ kind: 'watch', watchLeft, watchRight, onChanges, onAvailable, idleSecs,
+maxWaitSecs }`. The wire type is the stored type: unknown fields anywhere are refused. Only the
+profile **id** crosses; the backend loads the profile and its policy.
+
+- **Policy hash and MAC** (`HASH_VERSION` 1, design §8.3/§8.4): `H = SHA-256(lp("ferrum.automation.policy.v1")
+‖ lp(automationId) ‖ lp(profileId) ‖ u64le(profileRevision) ‖ lp(json({profile, automation})))`;
+  the automation name is not part of `H`. `mac = HMAC-SHA256(key, lp("ferrum.automation.approval.v1") ‖
+u64le(hashVersion) ‖ lp(H) ‖ lp(automationId) ‖ lp(profileId) ‖ u64le(profileRevision) ‖
+u64le(configRev) ‖ u64le(approvedMs))`, compared in constant time. The key is 32 random bytes
+  protected with Windows DPAPI (current user, entropy `ferrum.automation.approval.v1`,
+  `CRYPTPROTECT_UI_FORBIDDEN`) in `automation\approval.key`. A missing or undecryptable key makes
+  every approval `keyUnavailable` (fail closed); the next approval creates a new key, which does not
+  revive old approvals.
+- **Needs review** (`AutomationDto.review`, closed reasons): `profileChanged { from, to }`,
+  `policyChanged`, `notApproved` (no approval, or a MAC that does not verify), `keyUnavailable`,
+  `unsupportedVersion`. A policy-changing profile save marks every dependant in the SAME
+  transaction (queued entries removed, watch state reset to `watching`, one `warn` event each).
+- **Test ledger** (SE-3.2): a `testId` is single-use, lives in this process only, and expires after
+  15 minutes (re-checked after the dialog). A new automation gets its id in the test answer
+  (`automationId`; the hash covers the id) and `automation_approve` sends no id for it.
+- **Errors:** `invalid_input` (shape, ranges, unknown fields), `not_found`, `needs_review`
+  (resume of an automation whose approval no longer verifies, no dialog shown), `stale` (edit
+  raced), `busy` (another native dialog is open: nothing shown, nothing saved), `in_use` (a
+  profile still referenced), `store_unavailable` / `store_untrusted` / `store_read_only`.
+- **Profile and automation baselines** are a separate store: `<store dir>\baselines\`, one file per
+  folder pair, each with a MAC (HMAC under a subkey of the approval key). The manual
+  `sync_baseline_*` commands cannot reach it; a file without a valid MAC loads as a first run
+  (`untrusted`), so a forged baseline can never propagate a deletion. `sync_profile_preview`,
+  `sync_profile_run` and `automation_test` use this store, so manual profile runs start from a
+  first run once after this change.
+  Each pair also has a save counter (`baseline_gen`) inside the signed file, so a replayed older
+  file is `untrusted` too. Signing may create the approval key only when no key file exists at all
+  (a first manual profile run before any approval); it never replaces an existing, unusable or
+  unreadable key.
+- **Delete guard:** `maxPercent` is 1..99 (100 could never stop a run; `guard_percent_range`). A
+  guard that cannot trip counts as off for the native confirmation of a profile save, and every
+  approval dialog states the guard thresholds (or "off").
+- **Approval key:** replaced only by an approval (and only when DPAPI refused a
+  blob that was read in full; never after an I/O error), under a cross-process file lock, with the
+  old blob kept as `approval.key.bak`; every automation then logs a `warn` event.
+- **Schema v2** adds `automations`, `approvals`, `automation_runtime`, `queue`, `runs`, `run_ops`,
+  `events`, `controls`, `baseline_gen`; the v1 -> v2 migration backs the store up first (`automation.db.bak-v1`,
+  removed on success). `usedBy` in `sync_profile_list` now counts automations.
+- A lease id never appears in any automation DTO (only `sync_lease_acquire` hands one to its
+  requester); a source test and a fixture scan hold that.

@@ -215,7 +215,7 @@ pub fn update(conn: &mut Connection, up: &UpdateProfile) -> Result<i64, StoreErr
     // SP-6.4: everything that runs this profile becomes Needs review, in this same transaction -
     // only for a policy change; a rename alone must not disturb the automations using it.
     if up.policy_changed {
-        mark_dependants_needs_review(&tx, &up.id, new_revision, &up.changes)?;
+        mark_dependants_needs_review(&tx, &up.id, new_revision, &up.changes, up.now_ms)?;
     }
     tx.commit().map_err(unavailable)?;
     Ok(new_revision)
@@ -246,37 +246,80 @@ pub fn delete(conn: &mut Connection, id: &str, expected_revision: i64) -> Result
     tx.commit().map_err(unavailable)
 }
 
-/// SP-9.5: a profile an automation still uses cannot be deleted. The `automations` table arrives
-/// in P1.1 — the check is the single place that check will land.
-pub fn profile_in_use(conn: &Connection, _id: &str) -> Result<bool, StoreError> {
-    let _ = conn;
-    // P1.1: SELECT EXISTS (SELECT 1 FROM automations WHERE profile_id = ?1)
-    Ok(false)
+/// SP-9.5: a profile an automation still uses cannot be deleted (the foreign key refuses it as
+/// well, but this check gives the closed `in_use` answer first).
+pub fn profile_in_use(conn: &Connection, id: &str) -> Result<bool, StoreError> {
+    Ok(super::automations::count_for_profile(conn, id)? > 0)
 }
 
-/// How many automations use this profile (list DTO `usedBy`); again a P1.1 call site.
-pub fn used_by(conn: &Connection, _profile_id: &str) -> Result<i64, StoreError> {
-    let _ = conn;
-    Ok(0)
+/// How many automations use this profile (list DTO `usedBy`).
+pub fn used_by(conn: &Connection, profile_id: &str) -> Result<i64, StoreError> {
+    super::automations::count_for_profile(conn, profile_id)
 }
 
-/// SP-6.4 hook, invoked inside the save transaction right after a policy-changing revision:
-/// every automation using this profile becomes Needs review, its queued runs are removed, its
-/// watch state resets, and one event is logged per automation. The `automations` table arrives
-/// in P1.1 — the call site above and this signature are fixed so the effect lands in exactly one
-/// place and is tested there against the real tables.
+/// SP-6.4, invoked inside the save transaction right after a policy-changing revision: every
+/// automation using this profile becomes Needs review, its queued runs are removed, its watch
+/// state resets, and one event is logged per automation. "Needs review" itself is not a flag:
+/// `automation::policy::verify` reads the new profile revision against each approval, so the
+/// automation reports `profileChanged{from, to}` the moment this transaction commits. A run that
+/// is already in progress finishes under the revision it started with (it is not touched).
+/// Returns how many automations were affected.
 pub fn mark_dependants_needs_review(
     conn: &Connection,
-    _profile_id: &str,
-    _new_revision: i64,
-    _changes: &str,
+    profile_id: &str,
+    new_revision: i64,
+    changes: &str,
+    now_ms: i64,
 ) -> Result<usize, StoreError> {
-    let _ = conn;
+    use super::automations::{self, EventKind};
     #[cfg(test)]
     DEPENDANTS_HOOK_CALLS.with(|c| c.set(c.get() + 1));
-    // P1.1: UPDATE automation_runtime ... , DELETE queue entries, INSERT events (one per
-    // automation), all in this transaction.
-    Ok(0)
+    let mut stmt = conn
+        .prepare("SELECT id FROM automations WHERE profile_id = ?1 ORDER BY id")
+        .map_err(unavailable)?;
+    let ids: Vec<String> = stmt
+        .query_map([profile_id], |row| row.get(0))
+        .map_err(unavailable)?
+        .collect::<Result<_, _>>()
+        .map_err(unavailable)?;
+    drop(stmt);
+    // Which fields changed, for the event line ("Profile changed to rev 4 (delete policy)").
+    let fields = changed_field_labels(changes);
+    for id in &ids {
+        automations::clear_queue(conn, id)?;
+        automations::reset_watch_state(conn, id, now_ms)?;
+        let what = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(" ({fields})")
+        };
+        automations::add_event(
+            conn,
+            id,
+            now_ms,
+            EventKind::Warn,
+            &format!("Profile changed to rev {new_revision}{what} \u{2014} held until you review"),
+        )?;
+    }
+    if !ids.is_empty() {
+        automations::bump_change_seq(conn)?;
+    }
+    Ok(ids.len())
+}
+
+/// `deletePolicy, mode` -> "delete policy, direction" (at most 4 labels).
+fn changed_field_labels(changes: &str) -> String {
+    let parsed: Vec<crate::automation::model::FieldChange> =
+        serde_json::from_str(changes).unwrap_or_default();
+    let mut labels: Vec<&str> = Vec::new();
+    for change in &parsed {
+        let label = crate::automation::model::field_label(&change.field);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels.truncate(4);
+    labels.join(", ")
 }
 
 #[cfg(test)]
@@ -554,7 +597,7 @@ mod tests {
         store
             .with_read(|conn| -> Result<(), StoreError> {
                 assert_eq!(
-                    mark_dependants_needs_review(conn, "id-1", 2, "[]").unwrap(),
+                    mark_dependants_needs_review(conn, "id-1", 2, "[]", 1).unwrap(),
                     0
                 );
                 Ok(())
