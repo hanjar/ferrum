@@ -289,6 +289,8 @@ mod reasons {
     pub const RECYCLE_BIN_UNAVAILABLE: &str = "recycleBinUnavailable";
     pub const VERSIONING_ROOT_INVALID: &str = "versioningRootInvalid";
     pub const PROFILE_INVALID: &str = "profileInvalid";
+    /// FER-562: a folder is, or (when written) contains, Ferrum's own state folder or Startup.
+    pub const ROOT_PROTECTED: &str = "rootProtected";
 }
 
 fn kind_of(identity: &RootIdentity) -> String {
@@ -366,6 +368,27 @@ pub fn readiness_dto(
             Err(reason) => {
                 first_problem.get_or_insert(reason);
             }
+        }
+    }
+    // FER-562: a profile saved before the guard existed (or whose folders were protected since)
+    // stays "not ready" instead of writing into Ferrum's state or Startup.
+    if first_problem.is_none() && !checking {
+        use crate::sync_engine::write_guard::{FerrumGuard, WriteGuard};
+        let writable = model::written_sides(&policy.mode);
+        let sides = [
+            (model::Side::Left, &policy.left.path),
+            (model::Side::Right, &policy.right.path),
+        ];
+        let mut bad = sides.iter().any(|(s, p)| {
+            FerrumGuard
+                .root_violation(p, writable.contains(s))
+                .is_some()
+        });
+        if let model::DeletePolicy::Versioning { root } = &policy.delete_policy {
+            bad |= !root.is_empty() && FerrumGuard.root_violation(root, true).is_some();
+        }
+        if bad {
+            first_problem = Some(reasons::ROOT_PROTECTED.into());
         }
     }
     // SP-3.1 stays visible after saving: a Recycle Bin policy on a side that is not a local
@@ -1873,13 +1896,13 @@ mod tests {
         let d = draft(
             "Remote",
             &left.to_string_lossy(),
-            r"\\localhost\no-such-share-ferrum-p03\data",
+            r"\\ferrum-no-such-host\no-such-share-ferrum-p03\data",
         );
         let profile = saved(save_in(&store, create_request(d), &probe(), |_| true, 1_000).unwrap());
         assert_eq!(
             profile.identities.right,
             Some(RootIdentity::Network {
-                unc_prefix: r"\\localhost\no-such-share-ferrum-p03".into(),
+                unc_prefix: r"\\ferrum-no-such-host\no-such-share-ferrum-p03".into(),
                 volume_serial: None,
                 file_id: None,
             })
@@ -2287,6 +2310,43 @@ mod tests {
             let err = save_in(&store, req, &probe(), |_| true, 2_000).unwrap_err();
             assert_eq!(err.code, "not_found");
         }
+    }
+
+    /// FER-562: a stored profile whose folder is (or, when written, holds) a protected folder is
+    /// "not ready", whatever the probes say.
+    #[test]
+    fn fer_562_readiness_refuses_protected_roots() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        let right = dir.path().join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(right.join("state")).unwrap();
+        let d = permanent(draft(
+            "n",
+            &left.to_string_lossy(),
+            &right.to_string_lossy(),
+        ));
+        let policy = d.validate(&FsProbe).unwrap().policy;
+        let p = probe();
+        let ready = |policy: &ProfilePolicy| readiness_dto(policy, &p, Duration::from_secs(5));
+        assert_eq!(ready(&policy), ReadinessDto::Ready);
+        let not_ready = ReadinessDto::NotReady {
+            reason: "rootProtected".into(),
+        };
+        // The written root contains a protected folder.
+        crate::protected_dirs::register([right.join("state")]);
+        assert_eq!(ready(&policy), not_ready);
+        // The read-only left root contains one: still ready.
+        crate::protected_dirs::register([left.join("anything")]);
+        assert_eq!(ready(&policy), ReadinessDto::Ready);
+        // The root is the protected folder.
+        crate::protected_dirs::register([left.clone()]);
+        assert_eq!(ready(&policy), not_ready);
+        crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
+        assert_eq!(ready(&policy), ReadinessDto::Ready);
     }
 }
 

@@ -21,6 +21,7 @@ use crate::sync_engine::errors::{Classified, ErrorClass, Reason, classify_fs, cl
 use crate::sync_engine::nofollow::{classify_publish, open_chain};
 use crate::sync_engine::roots::{self, RootError, RootProbe};
 use crate::sync_engine::versioning::{Expect, Moved, VersionStore};
+use crate::sync_engine::write_guard::check_entry;
 
 /// Why a run could not start (before any operation). Codes are the closed vocabulary shown to
 /// the user; no variant carries a path.
@@ -36,6 +37,11 @@ pub enum GateError {
     RecycleBinUnavailable(Side),
     /// The versioning root is invalid, a file, nested in a sync root or contains one (SP-3.2).
     VersioningRootInvalid,
+    /// FER-562: a root is (or contains, on a written side) one of Ferrum's state folders or a
+    /// Windows Startup folder.
+    RootProtected(Side),
+    /// FER-562: the versioning root is such a folder.
+    VersioningRootProtected,
 }
 
 impl GateError {
@@ -46,6 +52,7 @@ impl GateError {
             GateError::IdentityMismatch(_) => "identity_mismatch",
             GateError::RecycleBinUnavailable(_) => "recycle_bin_unavailable",
             GateError::VersioningRootInvalid => "versioning_root_invalid",
+            GateError::RootProtected(_) | GateError::VersioningRootProtected => "root_protected",
         }
     }
 
@@ -70,6 +77,14 @@ impl GateError {
             ),
             GateError::VersioningRootInvalid => {
                 "The versioning folder is not usable. Nothing was deleted or overwritten."
+                    .to_string()
+            }
+            GateError::RootProtected(s) => format!(
+                "{} is, or contains, a folder Ferrum protects (its own settings or the Windows Startup folder). Nothing was changed.",
+                root(s)
+            ),
+            GateError::VersioningRootProtected => {
+                "The versioning folder is, or contains, a folder Ferrum protects. Nothing was deleted or overwritten."
                     .to_string()
             }
         }
@@ -123,6 +138,18 @@ pub fn check_gate(profile: &ProfilePolicy, env: &EngineEnv) -> Result<RunRoots, 
         fresh.push((side, canonical, identity));
     }
 
+    // FER-562: a root in (or, when written, above) a protected or Startup folder never runs.
+    let writable = crate::automation::model::written_sides(&profile.mode);
+    for (side, canonical, _) in &fresh {
+        if env
+            .guard
+            .root_violation(canonical, writable.contains(side))
+            .is_some()
+        {
+            return Err(GateError::RootProtected(*side));
+        }
+    }
+
     if matches!(profile.delete_policy, DeletePolicy::RecycleBin) {
         for side in receiving_sides(&profile.mode) {
             let identity = fresh
@@ -154,7 +181,13 @@ pub fn check_gate(profile: &ProfilePolicy, env: &EngineEnv) -> Result<RunRoots, 
     }
 
     let versioning = match &profile.delete_policy {
-        DeletePolicy::Versioning { root } => Some(check_versioning_root(root, &fresh, probe)?),
+        DeletePolicy::Versioning { root } => {
+            let canonical = check_versioning_root(root, &fresh, probe)?;
+            if env.guard.root_violation(&canonical, true).is_some() {
+                return Err(GateError::VersioningRootProtected);
+            }
+            Some(canonical)
+        }
         _ => None,
     };
     Ok(RunRoots {
@@ -237,6 +270,8 @@ impl Deleter<'_> {
     ) -> Result<Removal, Classified> {
         let held = open_chain(root, rel_parent, false).map_err(|e| e.classify())?;
         let parent = held.dir();
+        // FER-562: the final path of the folder being deleted from.
+        check_entry(&*self.env.guard, parent, Some(name))?;
         let mut path = PathBuf::from(root_path);
         for comp in rel_parent {
             path.push(comp);

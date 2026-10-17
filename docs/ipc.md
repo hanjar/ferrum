@@ -200,7 +200,12 @@ status, reason? }`; `reason` is a closed code such as `sharing_violation`, `acce
   permanent-delete prompt); `canceled` / `busy` as above. `emptySource` is refused with the error `held` before any
   dialog. A profile that is already running, or a third concurrent preview, is `in_use`. Run error codes
   (`errorCode`) added: `guard_tripped`, `empty_source`, `plan_changed`, `identity_mismatch`, `recycle_bypassed` (the
-  shell removed a file without moving it to the Recycle Bin; the run stops, at most that file is affected).
+  shell removed a file without moving it to the Recycle Bin; the run stops, at most that file is affected),
+  `root_protected` (a root, or the versioning root, is inside Ferrum's own state folders or a Windows Startup
+  folder, or contains one while the profile writes to it; nothing is changed). Profile validation reports the
+  same as field errors `root_protected_folder`, `root_contains_protected_folder`, `root_startup_folder`,
+  `root_contains_startup_folder`; readiness reports `rootProtected`. Per item, an operation whose final path is
+  in such a folder ends `failed` with reason `protected_folder`.
   Links (symlink/junction entries) end `skipped` with reason `link_unsupported`.
 - Safety properties tested in the engine (design §5.4-§5.7): folders only get a non-recursive
   `mkdir` or an empty-folder `remove_dir`, parents are created and walked without following

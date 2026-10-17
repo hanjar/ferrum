@@ -91,6 +91,11 @@ pub fn is_inside(path: &Path) -> bool {
     dir_is_in(path, startup_dirs())
 }
 
+/// True when `path` is a Startup folder or one of its ancestors (a folder that contains Startup).
+pub fn is_startup_or_ancestor_path(path: &Path) -> bool {
+    is_startup_or_ancestor(path, startup_dirs())
+}
+
 /// A destination / new entry / output path: refused inside Startup.
 pub fn check_into(path: &str) -> Result<(), FsError> {
     if is_inside(Path::new(path)) {

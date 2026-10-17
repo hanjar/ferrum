@@ -206,6 +206,12 @@ const FIELD_MESSAGES: Record<string, string> = {
     'Use a full drive path such as D:\\Photos, or a network path such as \\\\nas\\photos.',
   root_unavailable: "This folder can't be reached right now.",
   root_missing: "This folder doesn't exist.",
+  root_protected_folder: "This folder holds Ferrum's own settings and can't be synchronized.",
+  root_contains_protected_folder:
+    "This folder contains Ferrum's own settings, and the profile writes to it. Choose a narrower folder.",
+  root_startup_folder: "This is a Windows Startup folder; Ferrum doesn't write there.",
+  root_contains_startup_folder:
+    'This folder contains the Windows Startup folder, and the profile writes to it. Choose a narrower folder.',
   side_required: 'Choose a direction.',
   side_not_allowed: 'Two-way profiles have no direction.',
   propagate_not_allowed: 'Deletion propagation applies to two-way profiles only.',
@@ -255,6 +261,8 @@ const READINESS_REASONS: Record<string, string> = {
   recycleBinUnavailable:
     "Recycle Bin isn't available on a folder — choose a versioning folder or permanent delete.",
   versioningRootInvalid: "The versioning folder isn't usable.",
+  rootProtected:
+    "A folder is, or contains, Ferrum's own settings or the Windows Startup folder. Open the profile and choose another folder.",
   profileInvalid: 'The saved profile is invalid. Open it to review.',
 };
 
