@@ -390,6 +390,7 @@ fn a_change_between_the_two_verifications_stops_the_run() {
     tick(&host);
     assert!(fired.load(Ordering::SeqCst));
     assert!(rig.world.calls().is_empty(), "the second look refused it");
+    // (The profile save itself removed the entry, SP-6.4; nothing was started either way.)
     // The next try judges the new state: needs review, entry removed.
     *rig.world.between.lock().unwrap() = None;
     rig.advance(6_000);

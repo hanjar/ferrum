@@ -121,11 +121,6 @@ impl GateOk {
     pub fn mode(&self) -> RunMode {
         self.mode
     }
-
-    /// Release the lease early (the run is over, the history is written).
-    pub fn into_lease(mut self) -> Option<LeaseGuard> {
-        self.lease.take()
-    }
 }
 
 /// Why the gate said no. Each variant is one refusal reason of design §10.4.
@@ -163,6 +158,7 @@ impl GateRefusal {
             GateRefusal::Conditions(_)
                 | GateRefusal::Device(_)
                 | GateRefusal::LeaseBusy(_)
+                | GateRefusal::Changed
                 | GateRefusal::Store(_)
         )
     }
