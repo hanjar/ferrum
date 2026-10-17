@@ -2,8 +2,9 @@
   /**
    * The automation list (MH-2, MH-3, MH-4): attention banner, queue strip and one row per
    * automation. Everything shown (status, last result, runtime note, button flags) is computed by
-   * the backend; this component only displays it. "Run now" is shown dimmed and is NOT wired in
-   * this release (the backend control path is still being built, FER-564).
+   * the backend; this component only displays it. "Run now" only asks the backend to queue a run
+   * (the answer is a toast); it is dimmed, with the reason as its tooltip, when the backend says
+   * the automation cannot run now.
    */
   import type { AutomationStore } from '../../stores/automationStore.svelte';
   import type { AutomationRow } from '../../ipc/automation';
@@ -80,7 +81,14 @@
       </label>
 
       <div class="main">
-        <div class="name">{r.name}</div>
+        <div class="name">
+          <button
+            type="button"
+            class="namelink"
+            title="Open details"
+            onclick={() => void store.openDetail(r.id)}>{r.name}</button
+          >
+        </div>
         <div class="meta">
           {r.profileName}{r.approvedRevision !== undefined ? ` · rev ${r.approvedRevision}` : ''}
         </div>
@@ -104,9 +112,10 @@
       <div class="actions">
         <button
           type="button"
-          disabled
-          title={r.runNowReason ?? "Run now isn't available yet"}
+          disabled={!r.canRunNow || !!store.pending[`run:${r.id}`]}
+          title={r.canRunNow ? undefined : r.runNowReason}
           aria-label="Run now: {r.name}"
+          onclick={() => void store.runNow(r)}
         >
           Run now
         </button>
@@ -125,11 +134,7 @@
             Review changes
           </button>
         {:else if r.attention}
-          <button
-            type="button"
-            disabled
-            title="Resolving a held run is available in the run history view"
-          >
+          <button type="button" class="primary" onclick={() => void store.openDetail(r.id)}>
             Resolve
           </button>
         {/if}
@@ -224,6 +229,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .namelink {
+    height: auto;
+    max-width: 100%;
+    padding: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+  .namelink:hover:not(:disabled) {
+    text-decoration: underline;
   }
   .meta,
   .note,

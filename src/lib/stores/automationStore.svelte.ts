@@ -8,19 +8,30 @@
  *   as `status` (`approved`, `canceled`, `stale`).
  * - Every outcome is rendered as the backend reported it: `canceled` keeps the user on the review
  *   screen, `stale` shows one fixed text and drops the test.
- * - Run now / Retry are NOT wired here (blocked by FER-564): this store never calls `runNow`.
+ * - Run now / Retry / Stop / Recheck (P1.6) are REQUESTS: the buttons only call the backend, which
+ *   decides at its gate; the answer is rendered as the backend reported it. A pending set stops
+ *   double submits and an answer for a screen that has since changed is dropped (stale response).
+ * - Pause with a run in progress shows the three-way dialog; its choice is sent as
+ *   `automation_pause{mode}` and nothing else.
  */
 import { toast } from './toastStore.svelte';
+import { ui } from '../uiState.svelte';
 import {
   AutomationError,
   defaultBackend,
+  queueToast,
   type AutomationBackend,
+  type AutomationDetail,
   type AutomationDraft,
+  type AutomationEvent,
+  type AutomationProgress,
   type AutomationRow,
   type AutomationRun,
   type AutomationTestResult,
   type HistoryFilter,
   type NextRun,
+  type PauseMode,
+  type RunOpsPage,
   type Step,
 } from '../ipc/automation';
 import {
@@ -39,11 +50,12 @@ import {
   localErrors,
   mergeErrors,
   newScheduleForm,
+  OPS_PAGE,
   toDraft,
   type ScheduleForm,
 } from '../components/automation/automationModel';
 
-export type AutomationView = 'list' | 'editor' | 'review';
+export type AutomationView = 'list' | 'editor' | 'review' | 'detail';
 export type AutomationTab = 'automations' | 'history';
 /** How the review ends: a new automation, a saved edit, or a re-review after a change. */
 export type ReviewMode = 'new' | 'edit' | 'resume';
@@ -98,12 +110,52 @@ export interface HistoryState {
   error: string | null;
 }
 
+/** The detail page of one automation (MH-5). */
+export interface DetailState {
+  id: string;
+  data: AutomationDetail | null;
+  loading: boolean;
+  error: string | null;
+  /** Events paged in after the first screen ("Show earlier events"), newest first. */
+  moreEvents: AutomationEvent[];
+  eventsNext?: number;
+  eventsLoading: boolean;
+}
+
+/** One page of a run's operation list (RQ-5; pages of 200). */
+export interface OpsState {
+  runId: number;
+  offset: number;
+  page: RunOpsPage | null;
+  loading: boolean;
+  error: string | null;
+}
+
+/** The Pause / Stop dialogs (RQ-8). Their buttons are the only way a pause mode or a stop is sent. */
+export type DialogState =
+  { kind: 'pause'; id: string; name: string } | { kind: 'stop'; runId: number; name: string };
+
+/** Folders for "Review in Sync" - always read from the backend (profile roots), never typed. */
+export interface SyncRootsArg {
+  left: string;
+  right: string;
+}
+
 export interface StoreDeps {
   backend: AutomationBackend;
   profiles: SyncProfilesBackend;
+  /** Opens Synchronize Dirs pinned to these folders (and leaves the Automation page). */
+  openSync: (roots: SyncRootsArg) => Promise<void>;
   /** Delay before an editor change is validated; 0 = immediately (tests). */
   validateDelayMs: number;
   now: () => number;
+}
+
+/** Default: leave the Automation page and open Synchronize Dirs for the profile's two folders. */
+async function openSyncDefault(roots: SyncRootsArg): Promise<void> {
+  const { compareStore } = await import('./compareStore.svelte');
+  ui.automationOpen = false;
+  await compareStore.openSync(roots);
 }
 
 const codeOf = (e: unknown): string =>
@@ -130,11 +182,23 @@ export class AutomationStore {
   highlightId = $state<string | null>(null);
   /** Set while the user is asked whether to throw away unsaved editor changes. */
   discardPending = $state(false);
+  detail = $state<DetailState | null>(null);
+  /** Pause / Stop dialog, when one is open. */
+  dialog = $state<DialogState | null>(null);
+  /** Requests in flight (`run:<id>`, `stop:<runId>`, `recheck:<runId>`, `retry:<runId>`, `pause:<id>`, `sync:<runId>`). */
+  pending = $state<Record<string, boolean>>({});
+  /** Run ids whose rows are expanded (history and recent runs). */
+  expanded = $state<Record<number, boolean>>({});
+  /** Operation pages by run id. */
+  opsByRun = $state<Record<number, OpsState>>({});
 
   #deps: StoreDeps;
   #loadSeq = 0;
   #reviewSeq = 0;
   #historySeq = 0;
+  #detailSeq = 0;
+  #opsSeq: Record<number, number> = {};
+  #opsTimer: ReturnType<typeof setTimeout> | null = null;
   #validateSeq = 0;
   #validateTimer: ReturnType<typeof setTimeout> | null = null;
   #highlightTimer: ReturnType<typeof setTimeout> | null = null;
@@ -143,6 +207,7 @@ export class AutomationStore {
     this.#deps = {
       backend: deps?.backend ?? defaultBackend(),
       profiles: deps?.profiles ?? defaultProfilesBackend(),
+      openSync: deps?.openSync ?? openSyncDefault,
       validateDelayMs: deps?.validateDelayMs ?? 200,
       now: deps?.now ?? Date.now,
     };
@@ -166,7 +231,10 @@ export class AutomationStore {
     if (this.#highlightTimer) clearTimeout(this.#highlightTimer);
     this.#validateTimer = null;
     this.#highlightTimer = null;
+    if (this.#opsTimer) clearTimeout(this.#opsTimer);
+    this.#opsTimer = null;
     this.#validateSeq++;
+    this.#detailSeq++;
   }
 
   // ── List ──
@@ -191,15 +259,16 @@ export class AutomationStore {
     if (profiles.status === 'fulfilled') this.profiles = profiles.value;
   }
 
-  async toggleEnabled(row: AutomationRow): Promise<void> {
+  async toggleEnabled(row: { id: string; name: string; enabled: boolean }): Promise<void> {
+    const key = `pause:${row.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
     this.notice = null;
     try {
       const res = await this.#deps.backend.setEnabled(row.id, !row.enabled);
       if (res.status === 'needsChoice') {
-        this.notice = {
-          kind: 'info',
-          text: 'A run is in progress. Wait for it to finish, then pause the automation.',
-        };
+        // A run is in progress: ask how to pause (RQ-8.2). The choice is sent by `pauseWith`.
+        this.dialog = { kind: 'pause', id: row.id, name: row.name };
       } else if (res.status === 'canceled') {
         this.notice = {
           kind: 'info',
@@ -208,8 +277,303 @@ export class AutomationStore {
       }
     } catch (e) {
       this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
     }
+    await this.#refreshShown();
+  }
+
+  /** Reload the list and whatever else is on screen. */
+  async #refreshShown(): Promise<void> {
     await this.load();
+    if (this.view === 'detail') await this.refreshDetail();
+    if (this.tab === 'history' && this.view === 'list') await this.loadHistory();
+  }
+
+  // ── Pause / Stop dialogs (RQ-8) ──
+
+  /** Stop the current run: ask first (RQ-8.1); the dialog's button sends the request. */
+  askStop(run: AutomationRun): void {
+    this.dialog = { kind: 'stop', runId: run.id, name: run.automationName ?? 'this automation' };
+  }
+
+  closeDialog(): void {
+    const d = this.dialog;
+    // While the request runs the dialog stays, so a second click cannot send it twice.
+    if (d && this.pending[d.kind === 'pause' ? `pause:${d.id}` : `stop:${d.runId}`]) return;
+    this.dialog = null;
+  }
+
+  /** "Pause & let it finish" / "Pause & stop current run": sends `automation_pause{mode}` (RQ-8.2). */
+  async pauseWith(mode: PauseMode): Promise<void> {
+    const d = this.dialog;
+    if (!d || d.kind !== 'pause') return;
+    const key = `pause:${d.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    try {
+      await this.#deps.backend.pause(d.id, mode);
+      toast.show(
+        mode === 'stop'
+          ? `${d.name} paused — stopping the current run`
+          : `${d.name} paused — the current run will finish`,
+        4000,
+      );
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+      if (this.dialog === d) this.dialog = null;
+    }
+    await this.#refreshShown();
+  }
+
+  /** Confirmed Stop: a request; the host stops after the current file (RQ-8.1). */
+  async confirmStop(): Promise<void> {
+    const d = this.dialog;
+    if (!d || d.kind !== 'stop') return;
+    const key = `stop:${d.runId}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    try {
+      await this.#deps.backend.stopRun(d.runId);
+      toast.show('Stop requested — stopping after the current file', 4000);
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+      if (this.dialog === d) this.dialog = null;
+    }
+    await this.#refreshShown();
+  }
+
+  // ── Run now, Recheck, Retry, Review in Sync (RQ-4, RQ-10, RQ-6) ──
+
+  /** Run now: the backend queues it (or refuses); the answer is the toast of RQ-4. */
+  async runNow(row: { id: string }): Promise<void> {
+    const key = `run:${row.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    this.notice = null;
+    try {
+      const res = await this.#deps.backend.runNow(row.id);
+      toast.show(queueToast(res), 4000);
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+    }
+    await this.#refreshShown();
+  }
+
+  /** Recheck: a fresh read-only comparison; the result arrives on the run (change event). */
+  async recheck(run: AutomationRun): Promise<void> {
+    const key = `recheck:${run.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    this.notice = null;
+    try {
+      await this.#deps.backend.recheck(run.id);
+      toast.show('Recheck requested — comparing the folders (read-only)', 4000);
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+    }
+    await this.#refreshShown();
+  }
+
+  /** Retry what the recheck found remaining: a fresh plan, nothing is repeated (RQ-10.2). */
+  async retry(run: AutomationRun): Promise<void> {
+    const key = `retry:${run.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    this.notice = null;
+    try {
+      const res = await this.#deps.backend.retry(run.id);
+      toast.show(queueToast(res), 4000);
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+    }
+    await this.#refreshShown();
+  }
+
+  /**
+   * "Review in Sync": opens Synchronize Dirs for the profile's two folders. The folders come from
+   * the backend (the automation detail or the profile list), never from free input.
+   */
+  async reviewInSync(run: AutomationRun): Promise<void> {
+    const key = `sync:${run.id}`;
+    if (this.pending[key]) return;
+    this.pending[key] = true;
+    try {
+      let roots: SyncRootsArg | null = null;
+      const shown = this.detail?.data?.profile;
+      if (shown && shown.id === run.profileId) roots = { left: shown.left, right: shown.right };
+      if (!roots) {
+        const p = this.profile(run.profileId);
+        if (p) roots = { left: p.left, right: p.right };
+      }
+      if (!roots && run.automationId) {
+        const d = await this.#deps.backend.get(run.automationId);
+        if (d.profile.id === run.profileId) {
+          roots = { left: d.profile.left, right: d.profile.right };
+        }
+      }
+      if (!roots) {
+        this.notice = { kind: 'error', text: automationErrorMessage('not_found') };
+        return;
+      }
+      await this.#deps.openSync(roots);
+    } catch (e) {
+      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    } finally {
+      delete this.pending[key];
+    }
+  }
+
+  // ── Detail page (MH-5) ──
+
+  async openDetail(id: string): Promise<void> {
+    this.notice = null;
+    this.expanded = {};
+    this.opsByRun = {};
+    this.detail = {
+      id,
+      data: null,
+      loading: true,
+      error: null,
+      moreEvents: [],
+      eventsLoading: false,
+    };
+    this.view = 'detail';
+    await this.refreshDetail();
+  }
+
+  closeDetail(): void {
+    this.#detailSeq++;
+    this.detail = null;
+    this.expanded = {};
+    this.opsByRun = {};
+    this.dialog = null;
+    this.view = 'list';
+    void this.load();
+  }
+
+  /** Re-read the detail. A slower answer for an older request, or another automation, is dropped. */
+  async refreshDetail(): Promise<void> {
+    const d = this.detail;
+    if (!d) return;
+    const seq = ++this.#detailSeq;
+    try {
+      const data = await this.#deps.backend.get(d.id);
+      if (seq !== this.#detailSeq || this.detail !== d) return;
+      d.data = data;
+      d.error = null;
+      if (d.eventsNext === undefined && d.moreEvents.length === 0) d.eventsNext = data.events.next;
+    } catch (e) {
+      if (seq !== this.#detailSeq || this.detail !== d) return;
+      d.error = automationErrorMessage(codeOf(e));
+    } finally {
+      if (seq === this.#detailSeq && this.detail === d) d.loading = false;
+    }
+    this.#reloadExpandedOps();
+  }
+
+  /** Keep the expanded operation lists current. */
+  #reloadExpandedOps(): void {
+    for (const key of Object.keys(this.expanded)) {
+      const runId = Number(key);
+      if (this.expanded[runId]) void this.loadOps(runId, this.opsByRun[runId]?.offset ?? 0);
+    }
+  }
+
+  /** "Show earlier events": pages the log by the `next` cursor (50 per page). */
+  async moreEvents(): Promise<void> {
+    const d = this.detail;
+    if (!d || d.eventsLoading || d.eventsNext === undefined) return;
+    d.eventsLoading = true;
+    try {
+      const page = await this.#deps.backend.events(d.id, d.eventsNext, 50);
+      if (this.detail !== d) return;
+      const seen = new Set([...(d.data?.events.events ?? []), ...d.moreEvents].map((e) => e.id));
+      d.moreEvents = [...d.moreEvents, ...page.events.filter((e) => !seen.has(e.id))];
+      d.eventsNext = page.next;
+    } catch (e) {
+      if (this.detail === d) {
+        this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      }
+    } finally {
+      if (this.detail === d) d.eventsLoading = false;
+    }
+  }
+
+  /** `automation://progress`: update the shown run in place; ids, phase and counts only. */
+  applyProgress(p: AutomationProgress): void {
+    const data = this.detail?.data;
+    if (!data || data.automation.id !== p.automationId) return;
+    const cur = data.currentRun;
+    if (!cur || cur.id !== p.runId) {
+      // A run we do not know yet (it just started): re-read once.
+      void this.refreshDetail();
+      return;
+    }
+    cur.phase = p.phase;
+    cur.opsTotal = p.opsTotal;
+    cur.counts = p.counts;
+    const recent = data.recentRuns.find((r) => r.id === p.runId);
+    if (recent) {
+      recent.phase = p.phase;
+      recent.opsTotal = p.opsTotal;
+      recent.counts = p.counts;
+    }
+    if (this.expanded[p.runId] && !this.#opsTimer) {
+      this.#opsTimer = setTimeout(() => {
+        this.#opsTimer = null;
+        void this.loadOps(p.runId, this.opsByRun[p.runId]?.offset ?? 0);
+      }, 1000);
+    }
+  }
+
+  /** Another process (or the host) changed the store: re-read what is shown (MH-10). */
+  async onChanged(): Promise<void> {
+    await this.load();
+    if (this.tab === 'history' && this.view === 'list') {
+      await this.loadHistory();
+      this.#reloadExpandedOps();
+    }
+    if (this.view === 'detail') await this.refreshDetail();
+  }
+
+  // ── Expanded runs and operation pages ──
+
+  toggleRun(run: AutomationRun): void {
+    const open = !this.expanded[run.id];
+    this.expanded[run.id] = open;
+    if (open && run.opsTotal > 0) void this.loadOps(run.id, 0);
+  }
+
+  /** One page (200) of a run's stored operations. */
+  async loadOps(runId: number, offset: number): Promise<void> {
+    const seq = (this.#opsSeq[runId] = (this.#opsSeq[runId] ?? 0) + 1);
+    const prev = this.opsByRun[runId];
+    this.opsByRun[runId] = { runId, offset, page: prev?.page ?? null, loading: true, error: null };
+    try {
+      const page = await this.#deps.backend.runOps(runId, offset, OPS_PAGE);
+      if (seq !== this.#opsSeq[runId]) return;
+      this.opsByRun[runId] = { runId, offset, page, loading: false, error: null };
+    } catch (e) {
+      if (seq !== this.#opsSeq[runId]) return;
+      this.opsByRun[runId] = {
+        runId,
+        offset,
+        page: prev?.page ?? null,
+        loading: false,
+        error: automationErrorMessage(codeOf(e)),
+      };
+    }
   }
 
   // ── Editor ──
