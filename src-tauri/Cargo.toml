@@ -34,6 +34,8 @@ trash = "5"
 sha2 = "0.10"
 # Automation P1.1 (design §8.4): approval and profile-baseline MACs (already in the lock).
 hmac = "0.12"
+# Automation FER-522 rework 1: wipe key material (already in the lock).
+zeroize = "1"
 sha1 = "0.10"
 md-5 = "0.10"
 crc32fast = "1"

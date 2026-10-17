@@ -8,34 +8,65 @@
 //! "Needs review" (fail closed, threat T3/T7). It is NOT a defence against malware running as the
 //! same user (out of scope, §10.1).
 //!
-//! Missing, unreadable or undecryptable key = [`KeyLoad::Missing`] / [`KeyLoad::Unusable`]: no MAC
-//! can be computed or verified. Only [`ApprovalKeys::load_or_create`] ever makes a key, and only
-//! when approving (or when a profile baseline is signed); a corrupt key is replaced then.
+//! ## When a key may be made or replaced (FER-522 rework 1)
+//!
+//! Reading never creates anything. [`ApprovalKeys::load_or_create`] is called by an APPROVAL only
+//! (never by baseline signing) and:
+//!
+//! - creates a key when there is none (`Missing`);
+//! - replaces a key ONLY when the blob was read completely and DPAPI then refused it or it has the
+//!   wrong size (`Unusable`: another user, machine or entropy, or a corrupt blob). The old blob is
+//!   copied to `approval.key.bak` first; without that backup nothing is replaced;
+//! - never touches the key after an I/O problem (`Unreadable`: sharing violation, access denied,
+//!   a reparse point, an oversized file). A transient error must not rotate the key, which would
+//!   invalidate every approval; the approval simply fails and can be retried;
+//! - takes a cross-process lock (`approval.key.lock`, exclusive, held while it decides and writes)
+//!   so the app and the runner cannot create or replace the key at the same time.
+//!
+//! The first creation or any replacement raises a notice ([`ApprovalKeys::take_rotation_notice`])
+//! that the approval turns into an event on every automation, because earlier approvals no longer
+//! verify. Secrets are wiped: the DPAPI output buffer is zeroed before it is freed, temporary
+//! copies are `Zeroizing`, and [`ApprovalKey`] zeroes itself on drop.
 //!
 //! Tauri-free: the runner links this module.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use zeroize::{Zeroize, Zeroizing};
 
 /// Fixed DPAPI entropy (design §8.4). A different entropy simulates "another DPAPI scope" in tests.
 pub const ENTROPY: &[u8] = b"ferrum.automation.approval.v1";
 /// File name of the protected key blob inside the store directory.
 pub const KEY_FILE: &str = "approval.key";
+/// Backup of a blob that was replaced.
+pub const KEY_BACKUP_FILE: &str = "approval.key.bak";
+/// Cross-process lock around creating or replacing the key.
+pub const KEY_LOCK_FILE: &str = "approval.key.lock";
 /// Key length in bytes.
 pub const KEY_LEN: usize = 32;
 /// A blob larger than this is not ours (a DPAPI blob for 32 bytes is a few hundred bytes).
 const MAX_BLOB_BYTES: u64 = 16 * 1024;
+/// How long creating the key waits for another process holding the lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// The secret. Never printed (Debug is redacted) and not serializable.
+/// The secret. Never printed (Debug is redacted), not serializable, wiped when dropped.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ApprovalKey(pub(crate) [u8; KEY_LEN]);
 
 impl std::fmt::Debug for ApprovalKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ApprovalKey(<redacted>)")
+    }
+}
+
+impl Drop for ApprovalKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -57,22 +88,32 @@ pub enum KeyLoad {
     Key(ApprovalKey),
     /// No key file (first use, or it was deleted).
     Missing,
-    /// A key file exists but cannot be used: other user/machine/entropy, corrupt, a reparse point.
+    /// The blob was read in full but cannot be used: another user, machine or entropy, corrupt,
+    /// wrong size. The only state an approval may replace.
     Unusable,
+    /// The file could not be read reliably (I/O error, sharing violation, reparse point,
+    /// oversized): possibly transient, NEVER replaced.
+    Unreadable,
 }
 
-/// Creating a key failed (no entropy, DPAPI refused, the file could not be written). The caller
-/// fails closed: nothing is approved.
+/// Creating a key failed (no entropy, DPAPI refused, an unreadable existing file, the lock was
+/// busy, the file could not be written). The caller fails closed: nothing is approved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyError;
 
-/// Source of the approval key. Production uses [`DpapiKeyFile`]; tests use [`MemoryKeys`] where
+/// Source of the approval key. Production uses [`DpapiKeyFile`]; tests use `MemoryKeys` where
 /// DPAPI is not the subject.
 pub trait ApprovalKeys: Send + Sync {
-    /// Read the key without ever creating one (verification, gate).
+    /// Read the key without ever creating one (verification, gate, baseline signing).
     fn load(&self) -> KeyLoad;
-    /// The key, creating it when there is none or the stored one is unusable (approval).
+    /// The key, creating it when there is none and replacing it when it is `Unusable`. For an
+    /// approval only.
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError>;
+    /// True once after a key was created or replaced: earlier approvals no longer verify and the
+    /// approval records an event for them.
+    fn take_rotation_notice(&self) -> bool {
+        false
+    }
 }
 
 /// The DPAPI-protected key file.
@@ -81,6 +122,15 @@ pub struct DpapiKeyFile {
     entropy: Vec<u8>,
     /// One creator at a time inside this process.
     create_lock: Mutex<()>,
+    rotated: AtomicBool,
+}
+
+/// What looking at the key file found, with the raw blob when it was read in full.
+enum Inspect {
+    Key(ApprovalKey),
+    Missing,
+    Unusable(Vec<u8>),
+    Unreadable,
 }
 
 impl DpapiKeyFile {
@@ -95,6 +145,7 @@ impl DpapiKeyFile {
             path: dir.join(KEY_FILE),
             entropy: entropy.to_vec(),
             create_lock: Mutex::new(()),
+            rotated: AtomicBool::new(false),
         }
     }
 
@@ -102,33 +153,60 @@ impl DpapiKeyFile {
         &self.path
     }
 
+    fn backup_path(&self) -> PathBuf {
+        self.path.with_file_name(KEY_BACKUP_FILE)
+    }
+
+    /// Open the file WITHOUT following a reparse point and read it through that one handle, so
+    /// there is no gap between "is it a link?" and "read it" (SE-5).
     fn read_blob(&self) -> Result<Option<Vec<u8>>, ()> {
-        match std::fs::symlink_metadata(&self.path) {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself, never its target.
+            options.custom_flags(0x0020_0000);
+        }
+        let file = match options.open(&self.path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(()),
-            Ok(meta) => {
-                // SE-5: a junction/symlink at the key path is never followed.
-                if is_reparse_meta(&meta) || !meta.is_file() || meta.len() > MAX_BLOB_BYTES {
-                    return Err(());
+        };
+        let meta = file.metadata().map_err(|_| ())?;
+        if is_reparse_meta(&meta) || !meta.is_file() || meta.len() > MAX_BLOB_BYTES {
+            return Err(());
+        }
+        let mut blob = Vec::with_capacity(meta.len() as usize);
+        file.take(MAX_BLOB_BYTES + 1)
+            .read_to_end(&mut blob)
+            .map_err(|_| ())?;
+        if blob.len() as u64 > MAX_BLOB_BYTES {
+            return Err(());
+        }
+        Ok(Some(blob))
+    }
+
+    fn inspect(&self) -> Inspect {
+        match self.read_blob() {
+            Ok(None) => Inspect::Missing,
+            Err(()) => Inspect::Unreadable,
+            Ok(Some(blob)) => match unprotect(&blob, &self.entropy) {
+                Some(plain) if plain.len() == KEY_LEN => {
+                    let mut bytes = [0u8; KEY_LEN];
+                    bytes.copy_from_slice(&plain);
+                    let key = ApprovalKey(bytes);
+                    bytes.zeroize();
+                    Inspect::Key(key)
                 }
-            }
-        }
-        std::fs::read(&self.path).map(Some).map_err(|_| ())
-    }
-
-    fn decode(&self, blob: &[u8]) -> KeyLoad {
-        match unprotect(blob, &self.entropy) {
-            Some(plain) if plain.len() == KEY_LEN => {
-                let mut key = [0u8; KEY_LEN];
-                key.copy_from_slice(&plain);
-                KeyLoad::Key(ApprovalKey(key))
-            }
-            _ => KeyLoad::Unusable,
+                _ => Inspect::Unusable(blob),
+            },
         }
     }
 
-    /// Write `blob` as a new key file. `replace` = overwrite an existing unusable file;
-    /// otherwise the file is created only if nobody else created it first (`Ok(false)`).
+    /// Write `blob` as the key file. `replace` = overwrite an existing unusable file (its old
+    /// content was backed up by the caller); otherwise the file is created only if nobody else
+    /// created it first (`Ok(false)`).
     fn publish(&self, blob: &[u8], replace: bool) -> Result<bool, KeyError> {
         use std::io::Write;
         let dir = self.path.parent().ok_or(KeyError)?;
@@ -152,8 +230,7 @@ impl DpapiKeyFile {
         let outcome = if replace {
             std::fs::rename(&tmp, &self.path).map(|()| true)
         } else {
-            // Atomic "create if absent": the loser of a race (the runner and the app creating
-            // the first key at once) keeps the winner's key instead of replacing it.
+            // Atomic "create if absent".
             match std::fs::hard_link(&tmp, &self.path) {
                 Ok(()) => Ok(true),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -163,34 +240,120 @@ impl DpapiKeyFile {
         let _ = std::fs::remove_file(&tmp);
         outcome.map_err(|_| KeyError)
     }
+
+    /// Keep the blob that is about to be replaced. No backup, no replacement.
+    fn back_up(&self, old: &[u8]) -> Result<(), KeyError> {
+        use std::io::Write;
+        let backup = self.backup_path();
+        let _ = std::fs::remove_file(&backup);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+            .map_err(|_| KeyError)?;
+        f.write_all(old).map_err(|_| KeyError)?;
+        f.sync_all().map_err(|_| KeyError)
+    }
 }
 
 impl ApprovalKeys for DpapiKeyFile {
     fn load(&self) -> KeyLoad {
-        match self.read_blob() {
-            Ok(Some(blob)) => self.decode(&blob),
-            Ok(None) => KeyLoad::Missing,
-            Err(()) => KeyLoad::Unusable,
+        match self.inspect() {
+            Inspect::Key(k) => KeyLoad::Key(k),
+            Inspect::Missing => KeyLoad::Missing,
+            Inspect::Unusable(_) => KeyLoad::Unusable,
+            Inspect::Unreadable => KeyLoad::Unreadable,
         }
     }
 
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError> {
         let _one = self.create_lock.lock().unwrap_or_else(|p| p.into_inner());
-        // At most two rounds: a lost creation race re-reads the winner's key.
-        for _ in 0..2 {
-            let replace = match self.load() {
-                KeyLoad::Key(key) => return Ok(key),
-                KeyLoad::Missing => false,
-                KeyLoad::Unusable => true,
+        // Across processes: nobody else creates or replaces the key while we decide.
+        let dir = self.path.parent().ok_or(KeyError)?;
+        let _lock = KeyLock::acquire(dir)?;
+        // The state is judged under the lock, so a key another process just made is simply used.
+        let replace_old = match self.inspect() {
+            Inspect::Key(key) => return Ok(key),
+            // Possibly transient: never rotate on it.
+            Inspect::Unreadable => return Err(KeyError),
+            Inspect::Missing => None,
+            Inspect::Unusable(old) => Some(old),
+        };
+        let mut bytes = [0u8; KEY_LEN];
+        getrandom::fill(&mut bytes).map_err(|_| KeyError)?;
+        let made = ApprovalKey(bytes);
+        bytes.zeroize();
+        let blob = protect(made.as_bytes(), &self.entropy).ok_or(KeyError)?;
+        if let Some(old) = &replace_old {
+            self.back_up(old)?;
+        }
+        if !self.publish(&blob, replace_old.is_some())? {
+            // Lost a race that the lock should have prevented (a process without the lock): keep
+            // the winner's key rather than overwrite it.
+            return match self.inspect() {
+                Inspect::Key(key) => Ok(key),
+                _ => Err(KeyError),
             };
-            let mut bytes = [0u8; KEY_LEN];
-            getrandom::fill(&mut bytes).map_err(|_| KeyError)?;
-            let blob = protect(&bytes, &self.entropy).ok_or(KeyError)?;
-            if self.publish(&blob, replace)? {
-                return Ok(ApprovalKey(bytes));
+        }
+        log::warn!(
+            "approval key {}; earlier approvals must be reviewed",
+            if replace_old.is_some() {
+                "replaced"
+            } else {
+                "created"
+            }
+        );
+        self.rotated.store(true, Ordering::SeqCst);
+        Ok(made)
+    }
+
+    fn take_rotation_notice(&self) -> bool {
+        self.rotated.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// Exclusive cross-process lock file (`approval.key.lock`), deleted when released. A holder that
+/// dies releases it with its handle.
+struct KeyLock {
+    _file: Option<std::fs::File>,
+}
+
+impl KeyLock {
+    #[cfg(windows)]
+    fn acquire(dir: &Path) -> Result<Self, KeyError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let path = dir.join(KEY_LOCK_FILE);
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            // share_mode(0): while one process holds the handle no other can open the file.
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .share_mode(0)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)
+            {
+                Ok(file) => return Ok(Self { _file: Some(file) }),
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_ACCESS_DENIED)
+                    ) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => return Err(KeyError),
             }
         }
-        Err(KeyError)
+    }
+
+    #[cfg(not(windows))]
+    fn acquire(_dir: &Path) -> Result<Self, KeyError> {
+        Ok(Self { _file: None })
     }
 }
 
@@ -225,6 +388,7 @@ impl ApprovalKeys for NoKeys {
 #[cfg(test)]
 pub struct MemoryKeys {
     key: Mutex<KeyLoad>,
+    rotated: AtomicBool,
 }
 
 #[cfg(test)]
@@ -232,12 +396,14 @@ impl MemoryKeys {
     pub fn with_key(byte: u8) -> Self {
         Self {
             key: Mutex::new(KeyLoad::Key(ApprovalKey::for_tests(byte))),
+            rotated: AtomicBool::new(false),
         }
     }
 
     pub fn missing() -> Self {
         Self {
             key: Mutex::new(KeyLoad::Missing),
+            rotated: AtomicBool::new(false),
         }
     }
 
@@ -256,12 +422,18 @@ impl ApprovalKeys for MemoryKeys {
         let mut guard = self.key.lock().unwrap();
         match &*guard {
             KeyLoad::Key(key) => Ok(key.clone()),
+            KeyLoad::Unreadable => Err(KeyError),
             _ => {
                 let key = ApprovalKey::for_tests(7);
                 *guard = KeyLoad::Key(key.clone());
+                self.rotated.store(true, Ordering::SeqCst);
                 Ok(key)
             }
         }
+    }
+
+    fn take_rotation_notice(&self) -> bool {
+        self.rotated.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -279,7 +451,7 @@ fn protect(plain: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
     };
     // SAFETY: `input` and `entropy_blob` point at live slices for the whole call; the optional
     // pointers that are unused are null; `out` is a valid out-parameter. On success the system
-    // allocated `out.pbData`, which `take_output` copies and frees with `LocalFree`.
+    // allocated `out.pbData`, which `take_output` copies, zeroes and frees with `LocalFree`.
     let ok = unsafe {
         CryptProtectData(
             &input,
@@ -294,12 +466,13 @@ fn protect(plain: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
     if ok == 0 {
         return None;
     }
-    take_output(out)
+    take_output(out).map(|z| z.to_vec())
 }
 
-/// Decrypt a blob made by [`protect`]. `None` = other user/machine/entropy or corrupt.
+/// Decrypt a blob made by [`protect`]. `None` = other user/machine/entropy or corrupt. The
+/// plaintext is wiped when the returned value drops.
 #[cfg(windows)]
-fn unprotect(blob: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
+fn unprotect(blob: &[u8], entropy: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
     let input = blob_of(blob)?;
     let entropy_blob = blob_of(entropy)?;
@@ -308,7 +481,7 @@ fn unprotect(blob: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
         pbData: std::ptr::null_mut(),
     };
     // SAFETY: same contract as `protect`: live input slices, null for the unused optional
-    // parameters, a valid out-parameter that `take_output` copies and frees.
+    // parameters, a valid out-parameter that `take_output` copies, zeroes and frees.
     let ok = unsafe {
         CryptUnprotectData(
             &input,
@@ -340,17 +513,22 @@ fn blob_of(bytes: &[u8]) -> Option<windows_sys::Win32::Security::Cryptography::C
     )
 }
 
-/// Copy the system-allocated output and free it.
+/// Copy the system-allocated output, WIPE the system buffer (it may hold the plaintext key) and
+/// free it. The copy wipes itself on drop.
 #[cfg(windows)]
 fn take_output(
     out: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB,
-) -> Option<Vec<u8>> {
+) -> Option<Zeroizing<Vec<u8>>> {
     use windows_sys::Win32::Foundation::LocalFree;
     if out.pbData.is_null() {
         return None;
     }
-    // SAFETY: on success DPAPI returns a buffer of `cbData` bytes at `pbData`, valid until freed.
-    let copy = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
+    // SAFETY: on success DPAPI returns a buffer of `cbData` bytes at `pbData`, valid, writable and
+    // exclusively ours until freed.
+    let buffer = unsafe { std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize) };
+    let copy = Zeroizing::new(buffer.to_vec());
+    // `zeroize` writes volatilely, so the compiler cannot drop the wipe before the free.
+    buffer.zeroize();
     // SAFETY: `pbData` was allocated by the system with LocalAlloc and is freed exactly once.
     unsafe {
         LocalFree(out.pbData as _);
@@ -365,92 +543,9 @@ fn protect(_plain: &[u8], _entropy: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn unprotect(_blob: &[u8], _entropy: &[u8]) -> Option<Vec<u8>> {
+fn unprotect(_blob: &[u8], _entropy: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     None
 }
 
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_key_is_created_once_and_read_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = DpapiKeyFile::new(dir.path());
-        assert_eq!(keys.load(), KeyLoad::Missing);
-        let made = keys.load_or_create().unwrap();
-        assert_eq!(keys.load(), KeyLoad::Key(made.clone()));
-        // Creating again returns the same key (no silent rotation).
-        assert_eq!(keys.load_or_create().unwrap(), made);
-        // The file holds a DPAPI blob, not the key bytes.
-        let blob = std::fs::read(keys.path()).unwrap();
-        assert!(blob.len() > KEY_LEN);
-        assert!(!blob.windows(KEY_LEN).any(|w| w == made.as_bytes()));
-    }
-
-    #[test]
-    fn a_deleted_key_is_missing_and_a_new_one_differs() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = DpapiKeyFile::new(dir.path());
-        let first = keys.load_or_create().unwrap();
-        std::fs::remove_file(keys.path()).unwrap();
-        assert_eq!(keys.load(), KeyLoad::Missing);
-        assert_ne!(keys.load_or_create().unwrap(), first);
-    }
-
-    /// Another DPAPI scope (simulated by another entropy) cannot read the key.
-    #[test]
-    fn another_entropy_cannot_decrypt() {
-        let dir = tempfile::tempdir().unwrap();
-        DpapiKeyFile::new(dir.path()).load_or_create().unwrap();
-        let other = DpapiKeyFile::with_entropy(dir.path(), b"someone else");
-        assert_eq!(other.load(), KeyLoad::Unusable);
-    }
-
-    #[test]
-    fn a_corrupt_blob_is_unusable_and_is_replaced_on_create() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = DpapiKeyFile::new(dir.path());
-        std::fs::write(keys.path(), b"not a dpapi blob").unwrap();
-        assert_eq!(keys.load(), KeyLoad::Unusable);
-        let made = keys.load_or_create().unwrap();
-        assert_eq!(keys.load(), KeyLoad::Key(made));
-    }
-
-    #[test]
-    fn a_key_file_that_is_a_junction_is_never_followed() {
-        let base = tempfile::tempdir().unwrap();
-        let target = base.path().join("elsewhere");
-        std::fs::create_dir_all(&target).unwrap();
-        let dir = base.path().join("store");
-        std::fs::create_dir_all(&dir).unwrap();
-        let linked = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(dir.join(KEY_FILE))
-            .arg(&target)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        assert!(linked, "junction created");
-        assert_eq!(DpapiKeyFile::new(&dir).load(), KeyLoad::Unusable);
-    }
-
-    #[test]
-    fn debug_never_prints_the_key() {
-        let key = ApprovalKey::for_tests(0xAB);
-        assert!(!format!("{key:?}").contains("171"));
-        assert!(format!("{key:?}").contains("redacted"));
-    }
-
-    #[test]
-    fn two_creators_end_with_one_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = DpapiKeyFile::new(dir.path());
-        let b = DpapiKeyFile::new(dir.path());
-        let (ka, kb) = std::thread::scope(|s| {
-            let ha = s.spawn(|| a.load_or_create().unwrap());
-            let hb = s.spawn(|| b.load_or_create().unwrap());
-            (ha.join().unwrap(), hb.join().unwrap())
-        });
-        assert_eq!(ka, kb, "the loser of the race keeps the winner's key");
-    }
-}
+#[cfg(test)]
+mod tests;
