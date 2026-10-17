@@ -18,6 +18,7 @@ fn base() -> StatusInput {
         overlap_run_active: false,
         quiet_secs: None,
         idle_secs: 10,
+        check_reason: None,
         next_label: None,
     }
 }
@@ -298,25 +299,60 @@ fn row_8_watch_trigger_states() {
             sub("Runs after 10 s without changes")
         )
     );
+    // WA-1.2, WA-2.3, WA-5.1, WA-6, WA-7.1: the sub-lines of the watch states.
     let cases = [
-        (TriggerState::Checking, StatusKind::Checking, "Checking"),
+        (
+            TriggerState::Checking,
+            StatusKind::Checking,
+            "Checking",
+            sub("Fresh comparison before any run"),
+        ),
         (
             TriggerState::Device,
             StatusKind::Device,
             "Waiting for device",
+            sub("A watched folder is not connected \u{2014} no sync"),
         ),
-        (TriggerState::Recheck, StatusKind::Recheck, "Needs recheck"),
+        (
+            TriggerState::Recheck,
+            StatusKind::Recheck,
+            "Needs recheck",
+            sub("Watcher missed events \u{2014} full comparison when safe"),
+        ),
         (
             TriggerState::Unsupported,
             StatusKind::Unsupported,
             "Unsupported",
+            sub("No change notifications on this provider \u{2014} can't be watched"),
         ),
-        (TriggerState::Watching, StatusKind::Watching, "Watching"),
+        (
+            TriggerState::Watching,
+            StatusKind::Watching,
+            "Watching",
+            None,
+        ),
     ];
-    for (trigger, kind, label) in cases {
+    for (trigger, kind, label, line) in cases {
         let i = StatusInput { trigger, ..base() };
-        assert_eq!(chip(&i), (kind, label.into(), None), "{trigger:?}");
+        assert_eq!(chip(&i), (kind, label.into(), line), "{trigger:?}");
     }
+    // The host's own reason for a comparison is shown as written.
+    let resumed = StatusInput {
+        trigger: TriggerState::Checking,
+        check_reason: Some(
+            "Monitoring resumed \u{2014} fresh comparison to catch changes made while paused"
+                .into(),
+        ),
+        ..base()
+    };
+    assert_eq!(
+        chip(&resumed),
+        (
+            StatusKind::Checking,
+            "Checking".into(),
+            sub("Monitoring resumed \u{2014} fresh comparison to catch changes made while paused")
+        )
+    );
     // `scheduled` is not a watch state.
     let odd = StatusInput {
         trigger: TriggerState::Scheduled,

@@ -19,6 +19,10 @@
 //! - **Every run goes through the gate.** Triggers, Run now, retries, catch-ups and pending
 //!   reruns are queue entries; a recheck is a request. Both reach the engine only through
 //!   `runner::run_gated`, which needs a `GateOk`.
+//! - **A watch trigger only queues, and compares read-only first** (`watch.rs`, `watcher.rs`): file
+//!   events are counts, never paths; a burst that went quiet becomes a queue entry through the same
+//!   checks as the schedule's; a fresh comparison (start, resume, overflow, after a run) is the
+//!   gate's read-only `Compare` mode and queues a run only when it finds differences.
 //! - **Controls are requests.** The host reads them from the store, answers them (`held`,
 //!   `queued`, ...) and applies the same gate. The webview has no parameter that skips it.
 //! - **Crash recovery (LC-6).** When a host takes the role, a `Running` row of its class whose
@@ -42,13 +46,14 @@ use serde::Serialize;
 
 use crate::automation::dpapi::ApprovalKeys;
 use crate::automation::lease::LeaseEnv;
-use crate::automation::model::Conditions;
+use crate::automation::model::{Conditions, RootSpec};
 use crate::automation::store::controls::{self, Action, Control};
 use crate::automation::store::hosts::{self, Claim, HostRow};
 use crate::automation::store::leases::{self, Holder};
 use crate::automation::store::queue::{self, HostClass, QueueEntry};
 use crate::automation::store::runs::{self, Outcome, RunHost, RunRecord};
 use crate::automation::store::{Store, StoreError, automations};
+use crate::automation::watcher::{self, Avail, WatchFactory};
 use crate::ops::CancelToken;
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::execute::{EngineReport, EngineSink};
@@ -60,6 +65,7 @@ pub mod request;
 mod requeue;
 mod runner;
 mod schedule;
+mod watch;
 
 pub use gate::{GateCtx, GateKind, GateOk, GateRefusal, RunMode, gate};
 pub use requeue::{requeue_siblings, requeue_siblings_if};
@@ -73,6 +79,8 @@ mod tests;
 mod tests_flows;
 #[cfg(test)]
 mod tests_schedule;
+#[cfg(test)]
+mod tests_watch;
 
 /// The host refreshes its row this often (design §3.3: every 5 s).
 pub const BEAT_EVERY_MS: i64 = 5_000;
@@ -206,6 +214,14 @@ pub trait HostDeps: Send + Sync + 'static {
     fn emit(&self, event: &HostEvent);
     /// The Settings flag "use the indexer journal" (IX-1).
     fn incremental(&self) -> bool;
+    /// The ONE source of change events of the watch triggers (design §9.2): operating-system
+    /// notifications in production, a hand-fed fake in the tests. There is no other source.
+    fn watch_factory(&self) -> &dyn WatchFactory;
+    /// Is the root there and still the approved folder? Opens it to read its identity; never
+    /// lists it. Replaced in the tests.
+    fn root_available(&self, root: &RootSpec) -> Avail {
+        watcher::probe_root(root)
+    }
 }
 
 // ── State ──
@@ -255,6 +271,10 @@ pub(crate) struct State {
     pub parked_logged: HashMap<i64, i64>,
     /// The schedule hook's bookkeeping (`schedule.rs`).
     pub sched: schedule::Book,
+    /// What the watch hook was told since its last pass (`watch.rs`).
+    pub watch_flags: watch::Flags,
+    /// Read-only watch comparisons in flight.
+    pub comparing: usize,
     pub last_recovery_ms: Option<i64>,
     pub shutdown: bool,
 }
@@ -268,6 +288,9 @@ pub(crate) struct Inner<D: HostDeps> {
     /// [`unattended_enabled`] when the host was made.
     pub unattended: bool,
     pub state: Mutex<State>,
+    /// The watchers of the watch hook. Held for a whole pass of the hook; never taken while the
+    /// `state` lock is held.
+    pub watch: Mutex<watch::Book>,
     pub wake: (Mutex<bool>, Condvar),
     pub stopped: AtomicBool,
 }
@@ -333,6 +356,7 @@ impl<D: HostDeps> Host<D> {
                 holder,
                 unattended: unattended_enabled(),
                 state: Mutex::new(State::default()),
+                watch: Mutex::new(watch::Book::default()),
                 wake: (Mutex::new(false), Condvar::new()),
                 stopped: AtomicBool::new(false),
             }),
@@ -351,7 +375,7 @@ impl<D: HostDeps> Host<D> {
     /// No run, no recheck and no worker in flight.
     pub fn is_idle(&self) -> bool {
         let state = self.inner.lock();
-        !state.busy && state.active.is_empty() && state.rechecking == 0
+        !state.busy && state.active.is_empty() && state.rechecking == 0 && state.comparing == 0
     }
 
     /// Ask the loop to look again now (a command wrote to the store).
@@ -363,7 +387,23 @@ impl<D: HostDeps> Host<D> {
     /// looked at again at the next tick, and occurrences that passed meanwhile are handled as
     /// missed (SC-3.3). Safe to call from any thread.
     pub fn recompute_schedules(&self, why: Recompute) {
-        self.inner.lock().sched.ask(why);
+        {
+            let mut state = self.inner.lock();
+            state.sched.ask(why);
+            // The PC woke up: whatever changed while it slept is found by a fresh comparison
+            // (WA-7.2).
+            if why == Recompute::Resumed {
+                state.watch_flags.resumed = true;
+            }
+        }
+        self.inner.nudge();
+    }
+
+    /// A local volume arrived or was removed (`power.rs`): the watched roots are looked at again
+    /// at the next pass (WA-5). The notification names nothing; it only says "look". Safe to call
+    /// from any thread.
+    pub fn volume_changed(&self) {
+        self.inner.lock().watch_flags.volume = true;
         self.inner.nudge();
     }
 
@@ -390,6 +430,7 @@ impl<D: HostDeps> Host<D> {
         self.handle_controls(now);
         self.reconcile_active();
         schedule::pass(inner, now);
+        watch::pass(inner, now);
         self.start_next(now);
     }
 
@@ -432,6 +473,8 @@ impl<D: HostDeps> Host<D> {
         }
         inner.stopped.store(true, Ordering::SeqCst);
         inner.nudge();
+        // The watchers are released at once: no handle outlives the host (LC-2).
+        watch::release_all(inner);
         let deadline = std::time::Instant::now() + wait;
         while !self.is_idle() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -467,8 +510,13 @@ impl<D: HostDeps> Host<D> {
             changed
         };
         if changed {
-            // An approval, an edit, a pause or a resume: the schedules are read again.
-            inner.lock().sched.ask(Recompute::Edited);
+            // An approval, an edit, a pause or a resume: the schedules and the watchers are
+            // read again.
+            {
+                let mut state = inner.lock();
+                state.sched.ask(Recompute::Edited);
+                state.watch_flags.dirty = true;
+            }
             inner.deps.emit(&HostEvent::Changed { seq });
         }
     }
@@ -526,6 +574,8 @@ impl<D: HostDeps> Host<D> {
                 state.needs_recovery = true;
                 // Whatever came due while no host was here is found now (SC-3.3).
                 state.sched.ask(Recompute::Started);
+                // Every watch automation is compared afresh before it watches (WA-7.2).
+                state.watch_flags.takeover = true;
             }
             // Another live process hosts, or the store cannot say (read-only, unavailable):
             // this process does not execute.

@@ -20,6 +20,7 @@ use crate::automation::store::queue::{self, HostClass, NewEntry, TriggerKind};
 use crate::automation::store::{StoreError, runs};
 use crate::automation::test_run::{DryRun, TestDeps};
 use crate::automation::test_support::Fixture;
+use crate::automation::watcher::{Avail, RawEvent, Sink, WatchError, WatchFactory, WatchHandle};
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::execute::{
     Counts, EngineError, EngineOutcome, EngineReport, OpRecord, SettleState,
@@ -90,6 +91,12 @@ pub struct World {
     /// Runs between the first and the second verification of a gate (outside any store closure):
     /// tests change the world "while the gate works".
     pub between: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// The ONE source of change events of the watch triggers: the tests feed it by hand.
+    pub factory: Arc<FakeFactory>,
+    /// Roots (lowercase) that `root_available` reports as gone.
+    pub offline: Mutex<Vec<String>>,
+    /// Every root `root_available` was asked about, in order.
+    pub probe_log: Mutex<Vec<String>>,
 }
 
 impl World {
@@ -103,6 +110,108 @@ impl World {
 
     pub fn emitted(&self) -> Vec<HostEvent> {
         self.events.lock().unwrap().clone()
+    }
+
+    /// Mark a root as gone (`true`) or back (`false`) for the availability probe.
+    pub fn set_offline(&self, root: &str, gone: bool) {
+        let mut v = self.offline.lock().unwrap();
+        v.retain(|r| r != &root.to_lowercase());
+        if gone {
+            v.push(root.to_lowercase());
+        }
+    }
+
+    pub fn probes(&self) -> Vec<String> {
+        self.probe_log.lock().unwrap().clone()
+    }
+}
+
+// ── The fake watcher factory ──
+
+struct FakeWatch {
+    id: usize,
+    root: String,
+    sink: Sink,
+}
+
+/// The only source of change events in the watch tests (design §9.2). `watch` records the roots it
+/// was asked for; `emit` delivers an event to every live watch of a root; dropping a handle
+/// removes its watch, so `live()` shows exactly what the host still holds.
+#[derive(Default)]
+pub struct FakeFactory {
+    next: AtomicUsize,
+    watches: Arc<Mutex<Vec<FakeWatch>>>,
+    asked: Mutex<Vec<String>>,
+    /// While `true`, `watch` fails (a root the backend cannot watch).
+    pub refuse: std::sync::atomic::AtomicBool,
+}
+
+struct FakeHandle {
+    id: usize,
+    watches: Arc<Mutex<Vec<FakeWatch>>>,
+}
+
+impl WatchHandle for FakeHandle {}
+
+impl Drop for FakeHandle {
+    fn drop(&mut self) {
+        self.watches.lock().unwrap().retain(|w| w.id != self.id);
+    }
+}
+
+impl WatchFactory for FakeFactory {
+    fn watch(&self, root: &str, sink: Sink) -> Result<Box<dyn WatchHandle>, WatchError> {
+        self.asked.lock().unwrap().push(root.to_string());
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(WatchError::Failed);
+        }
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.watches.lock().unwrap().push(FakeWatch {
+            id,
+            root: root.to_string(),
+            sink,
+        });
+        Ok(Box::new(FakeHandle {
+            id,
+            watches: self.watches.clone(),
+        }))
+    }
+}
+
+impl FakeFactory {
+    /// Deliver `event` to every live watch of `root` (case-insensitive).
+    pub fn emit(&self, root: &str, event: RawEvent) {
+        let sinks: Vec<Sink> = self
+            .watches
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| w.root.eq_ignore_ascii_case(root))
+            .map(|w| w.sink.clone())
+            .collect();
+        for sink in sinks {
+            sink(event.clone());
+        }
+    }
+
+    /// `n` change events for files directly under `root`.
+    pub fn emit_files(&self, root: &str, n: usize) {
+        for i in 0..n {
+            self.emit(
+                root,
+                RawEvent::Change(vec![format!("{}\\f{i}.txt", root.trim_end_matches('\\'))]),
+            );
+        }
+    }
+
+    /// Watches the host holds right now.
+    pub fn live(&self) -> usize {
+        self.watches.lock().unwrap().len()
+    }
+
+    /// Every root the host asked to watch, in order.
+    pub fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
     }
 }
 
@@ -168,6 +277,25 @@ impl HostDeps for FakeDeps {
 
     fn incremental(&self) -> bool {
         false
+    }
+
+    fn watch_factory(&self) -> &dyn WatchFactory {
+        self.world.factory.as_ref()
+    }
+
+    fn root_available(&self, root: &crate::automation::model::RootSpec) -> Avail {
+        self.world.probe_log.lock().unwrap().push(root.path.clone());
+        if self
+            .world
+            .offline
+            .lock()
+            .unwrap()
+            .contains(&root.path.to_lowercase())
+        {
+            Avail::No
+        } else {
+            Avail::Yes
+        }
     }
 }
 
@@ -372,6 +500,9 @@ impl Rig {
             unmet: Mutex::new(None),
             bin: Mutex::new(crate::sync_engine::env::BinState::Usable),
             between: Mutex::new(None),
+            factory: Arc::new(FakeFactory::default()),
+            offline: Mutex::new(Vec::new()),
+            probe_log: Mutex::new(Vec::new()),
         });
         Rig { fx, world }
     }
@@ -668,6 +799,17 @@ impl Rig {
             .unwrap()
             .status
             .label
+    }
+
+    pub fn status_sub(&self, automation: &str) -> Option<String> {
+        let rows =
+            crate::automation::read::list_in(&self.fx.store, self.fx.keys.as_ref(), self.now())
+                .unwrap();
+        rows.into_iter()
+            .find(|r| r.id == automation)
+            .unwrap()
+            .status
+            .sub
     }
 
     pub fn host_rows(&self) -> Vec<HostRow> {

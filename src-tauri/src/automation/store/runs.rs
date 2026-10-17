@@ -461,6 +461,19 @@ pub fn active(conn: &Connection) -> Result<Vec<RunRecord>, StoreError> {
     )
 }
 
+/// Runs that were active at any time since `since_ms`: not yet ended, or ended at or after it
+/// (newest first, at most 100). The watch hook uses it to tell which file events fall into a
+/// run's window (WA-4.1); it reads no operation and no path.
+pub fn since(conn: &Connection, since_ms: i64) -> Result<Vec<RunRecord>, StoreError> {
+    collect(
+        conn,
+        &format!(
+            "SELECT {COLUMNS} FROM runs WHERE ended_ms IS NULL OR ended_ms >= ?1 ORDER BY id DESC LIMIT 100"
+        ),
+        &[&since_ms],
+    )
+}
+
 /// The newest `limit` runs of one automation, newest first.
 pub fn recent(
     conn: &Connection,

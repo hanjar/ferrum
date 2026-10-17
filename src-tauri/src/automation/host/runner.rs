@@ -1,6 +1,7 @@
 //! One pass through the queue and one run (Automation design §9.4, RQ-1, RQ-7, RQ-9, RQ-10):
 //! gate → start the history row → engine → settle the history row, the attention hold, the
-//! events and follow-up entries. Also the read-only recheck and the recovery of orphan runs.
+//! events and follow-up entries. Also the read-only recheck, the read-only comparison of a watch
+//! trigger and the recovery of orphan runs.
 //!
 //! Everything that writes goes through [`Inner::write`], one immediate transaction that also
 //! bumps `change_seq`. No closure here calls the engine; the engine is called by [`run_gated`]
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use rusqlite::Connection;
 
 use super::gate::{GateCtx, GateKind, GateOk, GateRefusal, RunMode, gate};
+use super::watch::{self, CheckAnswer};
 use super::{
     Active, EngineCall, HostDeps, HostEvent, Inner, MAX_RERUN_STREAK, ProgressEvent,
     RERUN_DELAY_MS, RETRY_GAP_MS, State, StopKind,
@@ -51,6 +53,115 @@ impl<D: HostDeps> Drop for SlotGuard<'_, D> {
     fn drop(&mut self) {
         self.0.lock().busy = false;
         self.0.nudge();
+    }
+}
+
+/// Counts a watch comparison while it works and clears its flag, whatever happens.
+struct CheckGuard<D: HostDeps> {
+    inner: Arc<Inner<D>>,
+    shared: Arc<watch::Shared>,
+}
+
+impl<D: HostDeps> Drop for CheckGuard<D> {
+    fn drop(&mut self) {
+        self.shared.set_running(false);
+        let mut state = self.inner.lock();
+        state.comparing = state.comparing.saturating_sub(1);
+        drop(state);
+        self.inner.nudge();
+    }
+}
+
+/// Watch comparisons that may run at the same time (they only read).
+const MAX_COMPARES: usize = 2;
+
+/// Start the read-only comparison of a watch trigger on its own thread. `false` = no capacity
+/// right now (the hook asks again at its next pass).
+pub(super) fn begin_check<D: HostDeps>(
+    inner: &Arc<Inner<D>>,
+    automation_id: &str,
+    shared: &Arc<watch::Shared>,
+) -> bool {
+    {
+        let mut state = inner.lock();
+        if state.shutdown || state.comparing >= MAX_COMPARES {
+            return false;
+        }
+        state.comparing += 1;
+    }
+    let cancel = CancelToken::default();
+    shared.set_cancel(cancel.clone());
+    shared.set_running(true);
+    let guard = CheckGuard {
+        inner: inner.clone(),
+        shared: shared.clone(),
+    };
+    let automation_id = automation_id.to_string();
+    let started = inner.deps.spawn(
+        "ferrum-automation-check",
+        Box::new(move || {
+            let answer = compare(&guard.inner, &automation_id, cancel);
+            watch::finish_check(&guard.inner, &automation_id, &guard.shared, answer);
+        }),
+    );
+    // A job that could not be started is dropped, and the guard it owns undoes what was counted.
+    started
+}
+
+/// The comparison itself: the gate in read-only `Compare` mode (approval verified, no hold,
+/// folders present and the approved ones, NO lease), then a dry run of the engine. Nothing is
+/// written to any folder, and no run row is made.
+fn compare<D: HostDeps>(
+    inner: &Arc<Inner<D>>,
+    automation_id: &str,
+    cancel: CancelToken,
+) -> CheckAnswer {
+    let env = inner.deps.engine_env();
+    let unmet = |c: &crate::automation::model::Conditions| inner.deps.unmet_condition(c);
+    let ctx = GateCtx {
+        store: &inner.store,
+        keys: inner.deps.keys(),
+        class: inner.class,
+        lease_env: inner.deps.lease_env(),
+        env: &env,
+        unmet_condition: &unmet,
+    };
+    let proof = match gate(&ctx, automation_id, GateKind::Compare) {
+        Ok(p) => p,
+        Err(GateRefusal::Device(_)) => return CheckAnswer::Device,
+        Err(GateRefusal::Changed | GateRefusal::Store(_) | GateRefusal::LeaseBusy(_)) => {
+            return CheckAnswer::Retry;
+        }
+        Err(other) => return CheckAnswer::Refused(other.code()),
+    };
+    let call = EngineCall {
+        run_id: 0,
+        retries: 0,
+        dry_run: true,
+        incremental: inner.deps.incremental(),
+        cancel,
+        sink: &crate::sync_engine::NoSink,
+    };
+    let report =
+        std::panic::catch_unwind(AssertUnwindSafe(|| inner.deps.run_engine(&proof, &call)))
+            .unwrap_or_else(|_| internal_failure());
+    drop(proof);
+    match report.outcome {
+        EngineOutcome::DryRun {
+            plan, conflicts, ..
+        } => {
+            let remaining = (plan.to_right + plan.to_left + plan.deletes) as i64;
+            if remaining == 0 && conflicts == 0 {
+                CheckAnswer::InSync
+            } else {
+                CheckAnswer::Differences {
+                    remaining,
+                    conflicts: i64::from(conflicts),
+                }
+            }
+        }
+        // Cap, errors, a folder that went away: the comparison cannot be trusted.
+        _ => CheckAnswer::Unreliable,
     }
 }
 
@@ -1029,7 +1140,10 @@ fn settle<D: HostDeps>(
         let mut rerun = report.pending_rerun || summary.lease_lost;
         if summary.offline && wanted {
             runtime::set_trigger_state(conn, &aid, TriggerState::Device, None, None, None, now)?;
-            if inner.unattended {
+            if matches!(proof.policy().trigger, Trigger::Watch(_)) {
+                // The watch hook looks at the folders again when they are back (WA-5.2) and
+                // compares before it queues anything: no entry that would run unasked.
+            } else if inner.unattended {
                 queue::enqueue(
                     conn,
                     &NewEntry {

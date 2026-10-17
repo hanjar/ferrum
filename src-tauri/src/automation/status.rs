@@ -119,6 +119,9 @@ pub struct StatusInput {
     pub quiet_secs: Option<u64>,
     /// The watch's idle time in seconds.
     pub idle_secs: u32,
+    /// Why the watch is Checking ("Monitoring resumed \u{2014} fresh comparison ..."), as the host
+    /// wrote it; `None` reads as the generic text.
+    pub check_reason: Option<String>,
     /// The next schedule occurrence, formatted ("Tue 29 Sep, 18:00 WIB"); `None` = no upcoming run.
     pub next_label: Option<String>,
 }
@@ -256,14 +259,33 @@ pub fn compute(i: &StatusInput) -> StatusDto {
                     },
                     Some(format!("Runs after {} s without changes", i.idle_secs)),
                 ),
-                TriggerState::Checking => StatusDto::new(StatusKind::Checking, "Checking", None),
-                TriggerState::Device => {
-                    StatusDto::new(StatusKind::Device, "Waiting for device", None)
-                }
-                TriggerState::Recheck => StatusDto::new(StatusKind::Recheck, "Needs recheck", None),
-                TriggerState::Unsupported => {
-                    StatusDto::new(StatusKind::Unsupported, "Unsupported", None)
-                }
+                TriggerState::Checking => StatusDto::new(
+                    StatusKind::Checking,
+                    "Checking",
+                    Some(
+                        i.check_reason
+                            .clone()
+                            .unwrap_or_else(|| "Fresh comparison before any run".to_string()),
+                    ),
+                ),
+                TriggerState::Device => StatusDto::new(
+                    StatusKind::Device,
+                    "Waiting for device",
+                    Some("A watched folder is not connected \u{2014} no sync".to_string()),
+                ),
+                TriggerState::Recheck => StatusDto::new(
+                    StatusKind::Recheck,
+                    "Needs recheck",
+                    Some("Watcher missed events \u{2014} full comparison when safe".to_string()),
+                ),
+                TriggerState::Unsupported => StatusDto::new(
+                    StatusKind::Unsupported,
+                    "Unsupported",
+                    Some(
+                        "No change notifications on this provider \u{2014} can't be watched"
+                            .to_string(),
+                    ),
+                ),
                 // `scheduled` is not a watch state; it reads as the idle default.
                 TriggerState::Watching | TriggerState::Scheduled => {
                     StatusDto::new(StatusKind::Watching, "Watching", None)
