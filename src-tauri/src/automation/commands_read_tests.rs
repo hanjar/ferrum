@@ -124,6 +124,12 @@ fn result_fixtures_round_trip_through_the_dtos() {
     assert_eq!(d.pipeline.current, Some(4));
     assert_eq!(d.recent_runs.len(), 2);
     assert_eq!(d.waiting[0].merged_count, 3);
+    // A watch automation waiting for quiet: the pipeline step and the countdown of MH-5.
+    let q: AutomationDetailDto = roundtrip("automation-get-quiet.json");
+    assert_eq!(q.pipeline.current, Some(2));
+    assert_eq!(q.automation.status.kind, StatusKind::Quiet);
+    let quiet = q.quiet.as_ref().expect("quiet countdown");
+    assert_eq!((quiet.remaining_secs, quiet.idle_secs), (7, 10));
     let h: HistoryDto = roundtrip("automation-history.json");
     assert!(h.runs[0].needs_attention && h.next == Some(1043));
     let o: RunOpsDto = roundtrip("automation-run-ops.json");
