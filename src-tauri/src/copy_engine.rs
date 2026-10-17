@@ -85,7 +85,7 @@ fn create_staging_file(dest: &Path) -> Result<(PathBuf, fs::File), FsError> {
     .with_path(dest.to_string_lossy()))
 }
 
-fn create_backup_path(dest: &Path) -> Result<PathBuf, FsError> {
+pub(crate) fn create_backup_path(dest: &Path) -> Result<PathBuf, FsError> {
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
     for _ in 0..STAGING_NAME_ATTEMPTS {
         let n = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -175,12 +175,29 @@ fn files_match(
     }
 }
 
+/// FER-564: a caller-owned way to replace an EXISTING destination at commit time. With a guard,
+/// an overwrite does not use the built-in backup dance: the guard is handed the staged file and
+/// the destination and must either publish the staged file over it or fail leaving the
+/// destination as it was. The sync engine uses it to re-check the destination's facts on a held
+/// handle right before the swap, so a file edited during a long copy is never overwritten.
+pub trait ReplaceGuard: Send + Sync {
+    fn replace(&self, staged: &Path, dest: &Path) -> Result<(), FsError>;
+}
+
 /// Publish a staged file. `replace=false` (new name or auto-renamed target) is a rename that
 /// refuses to overwrite: an unexpected collision becomes a per-file conflict error, never a silent
 /// overwrite. `replace=true` (Overwrite policies only) keeps the old backup/rollback dance.
-fn commit_staged(staged: &Path, dest: &Path, replace: bool) -> Result<(), FsError> {
+fn commit_staged(
+    staged: &Path,
+    dest: &Path,
+    replace: bool,
+    guard: Option<&dyn ReplaceGuard>,
+) -> Result<(), FsError> {
     #[cfg(test)]
     note_event(dest, "commit");
+    if replace && let Some(guard) = guard {
+        return guard.replace(staged, dest);
+    }
     if !replace {
         return copy_native::rename_no_replace(staged, dest).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
@@ -530,6 +547,8 @@ impl TaskQueue {
 struct Shared<'a> {
     cancel: &'a CancelToken,
     options: CopyOptions,
+    /// FER-564: replaces the built-in overwrite commit (None for every other caller).
+    replace_guard: Option<&'a dyn ReplaceGuard>,
     control: &'a CopyControl,
     large_cap: usize,
     queue: Mutex<TaskQueue>,
@@ -631,6 +650,47 @@ pub fn run_copy_controlled(
     cancel: &CancelToken,
     report: &dyn Fn(OperationProgress),
 ) -> CopyOutcome {
+    run_copy_guarded(
+        sources, target_dir, policy, options, control, cancel, report, None,
+    )
+}
+
+/// FER-564: [`run_copy_with_options`] whose overwrites commit through `guard`.
+pub fn run_copy_with_guard(
+    sources: &[String],
+    target_dir: &str,
+    policy: ConflictPolicy,
+    options: CopyOptions,
+    cancel: &CancelToken,
+    guard: &dyn ReplaceGuard,
+) -> CopyOutcome {
+    let control = match cancel.operation_id() {
+        Some(id) => copy_pool::control_for(id, options.threads, options.priority),
+        None => CopyControl::new(None, options.threads, options.priority),
+    };
+    run_copy_guarded(
+        sources,
+        target_dir,
+        policy,
+        options,
+        &control,
+        cancel,
+        &|_progress| {},
+        Some(guard),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_copy_guarded(
+    sources: &[String],
+    target_dir: &str,
+    policy: ConflictPolicy,
+    options: CopyOptions,
+    control: &Arc<CopyControl>,
+    cancel: &CancelToken,
+    report: &dyn Fn(OperationProgress),
+    replace_guard: Option<&dyn ReplaceGuard>,
+) -> CopyOutcome {
     let options = CopyOptions {
         buffer_size: options.bounded_buffer_size(),
         ..options
@@ -665,6 +725,7 @@ pub fn run_copy_controlled(
     let sh = Shared {
         cancel,
         options,
+        replace_guard,
         control,
         large_cap,
         queue: Mutex::new(TaskQueue::default()),
@@ -1293,7 +1354,7 @@ fn copy_one(sh: &Shared, src: &Path, dest: &Path, size: u64, replace: bool) -> R
     if sh.cancel.is_cancelled() {
         return Err(cancelled_err());
     }
-    commit_staged(&staged, dest, replace)?;
+    commit_staged(&staged, dest, replace, sh.replace_guard)?;
     guard.disarm();
     if options.durable {
         // The staged data is already on disk; record the rename itself before the caller may delete a source.
@@ -2538,14 +2599,14 @@ mod tests {
         let root = temp("m1-net");
         write(&root.join("staged"), b"new");
         write(&root.join("dest"), b"appeared meanwhile");
-        let e = commit_staged(&root.join("staged"), &root.join("dest"), false).unwrap_err();
+        let e = commit_staged(&root.join("staged"), &root.join("dest"), false, None).unwrap_err();
         assert_eq!(e.code, ErrorCode::AlreadyExists);
         assert_eq!(read(&root.join("dest")), b"appeared meanwhile");
         assert!(
             root.join("staged").exists(),
             "the caller's guard removes it"
         );
-        commit_staged(&root.join("staged"), &root.join("dest"), true).unwrap();
+        commit_staged(&root.join("staged"), &root.join("dest"), true, None).unwrap();
         assert_eq!(read(&root.join("dest")), b"new");
         let _ = fs::remove_dir_all(&root);
     }

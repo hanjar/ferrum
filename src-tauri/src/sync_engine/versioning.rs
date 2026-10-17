@@ -87,6 +87,16 @@ pub enum Moved {
     Changed,
 }
 
+/// How [`VersionStore::restore`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restored {
+    /// The previous version is back at its place (and no longer in the versions tree).
+    Back,
+    /// Something is at the place now (the user, or another program, created it): the previous
+    /// version was neither moved nor replaced and stays in the versions tree.
+    TargetOccupied,
+}
+
 /// The facts the plan saw of a file; the move acts only on a file that still matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Expect {
@@ -195,6 +205,73 @@ impl VersionStore {
         )
     }
 
+    /// FER-564 (P0.2 review P3-3): put the previous version of an overwritten file back where
+    /// `move_in` took it from, after the copy that should have replaced it failed or was
+    /// cancelled. The target folder is opened without following links, the version is renamed
+    /// back by handle WITHOUT replacing anything (a file that appeared at the place meanwhile is
+    /// never touched: `TargetOccupied`). On another volume (the rename answers "not the same
+    /// device", or the version is a copy of a cloud placeholder) it is copied back without
+    /// overwriting, the size is verified, and only then is the version in the tree deleted.
+    pub fn restore(
+        &self,
+        side: Side,
+        target_root: &DirHandle,
+        target_dir: &str,
+        rel_parent: &[&str],
+        name: &str,
+        env: &EngineEnv,
+    ) -> Result<Restored, Classified> {
+        let comps = self.components(side, rel_parent);
+        let vdir = nofollow::open_chain_owned(&self.root, &comps, false)
+            .map_err(|e: ChainError| e.classify())?;
+        let tparent = nofollow::open_chain(target_root, rel_parent, false)
+            .map_err(|e: ChainError| e.classify())?;
+        let os = OsStr::new(name);
+        match env
+            .mover
+            .rename_into(&vdir, os, tparent.dir(), os, &|_, _| true)
+        {
+            Ok(true) => return Ok(Restored::Back),
+            Ok(false) => return Err(per_item(Reason::Unknown)),
+            Err(MoveError::Exists) => return Ok(Restored::TargetOccupied),
+            Err(MoveError::Publish(e)) => return Err(classify_publish(&e)),
+            Err(MoveError::CrossDevice) => {}
+        }
+        let expected = publish::file_size(&vdir, os).map_err(|e| classify_publish(&e))?;
+        let version = {
+            let mut p = std::path::PathBuf::from(self.dest_dir_path(side, rel_parent));
+            p.push(name);
+            p.to_string_lossy().into_owned()
+        };
+        // A fresh token: the run's own token may be the very reason the copy was stopped.
+        let report = env.copier.copy(
+            std::slice::from_ref(&version),
+            target_dir,
+            false,
+            true,
+            &CancelToken::default(),
+            None,
+        );
+        if let Some((_, class)) = report.failed.first() {
+            return Err(*class);
+        }
+        if !report.done.contains(&version) {
+            // Skipped by the copy engine: the name is taken.
+            return Ok(Restored::TargetOccupied);
+        }
+        match publish::file_size(tparent.dir(), os) {
+            Ok(n) if n == expected => {}
+            _ => {
+                let _ = publish::delete_file(tparent.dir(), os);
+                return Err(per_item(Reason::VerifyFailed));
+            }
+        }
+        // The copy is in place; the version in the tree is now a duplicate.
+        // A duplicate left behind (a failed delete) is harmless: the file is back.
+        let _ = publish::delete_file(&vdir, os);
+        Ok(Restored::Back)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn copy_then_delete(
         &self,
@@ -225,6 +302,7 @@ impl VersionStore {
             false,
             true,
             cancel,
+            None,
         );
         if report.cancelled {
             return Err(Classified {

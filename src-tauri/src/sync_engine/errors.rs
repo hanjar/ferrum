@@ -55,6 +55,12 @@ pub enum Reason {
     LinkUnsupported,
     VerifyFailed,
     TargetAppeared,
+    /// FER-564: the destination file was changed (or removed) after the plan; it was not
+    /// overwritten.
+    TargetChanged,
+    /// FER-564: a copy over a versioned file failed, and the previous version could not be put
+    /// back at its place (it is kept in the versions folder).
+    RestoreFailed,
     /// A file sent to the Recycle Bin did not end up there (the shell deleted it for good).
     RecycleBypassed,
     /// FER-562: the path is inside one of Ferrum's own state folders or a Windows Startup folder.
@@ -96,6 +102,8 @@ impl Reason {
             Reason::LinkUnsupported => "link_unsupported",
             Reason::VerifyFailed => "verify_failed",
             Reason::TargetAppeared => "target_appeared",
+            Reason::TargetChanged => "target_changed",
+            Reason::RestoreFailed => "restore_failed",
             Reason::RecycleBypassed => "recycle_bypassed",
             Reason::ProtectedFolder => "protected_folder",
             Reason::Unknown => "unknown",
@@ -126,6 +134,10 @@ impl Reason {
             Reason::LinkUnsupported => "links are not synchronized",
             Reason::VerifyFailed => "the copy could not be verified",
             Reason::TargetAppeared => "the destination appeared during the run",
+            Reason::TargetChanged => "the destination file was changed during the run",
+            Reason::RestoreFailed => {
+                "a previous version could not be put back and is kept in the versions folder"
+            }
             Reason::RecycleBypassed => "a file was removed without going to the Recycle Bin",
             Reason::ProtectedFolder => {
                 "the destination is a folder Ferrum protects (its own settings or Windows Startup)"

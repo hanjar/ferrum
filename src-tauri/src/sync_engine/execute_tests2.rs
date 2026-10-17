@@ -153,9 +153,10 @@ impl crate::sync_engine::env::Copier for TruncatingCopier {
         overwrite: bool,
         durable: bool,
         cancel: &CancelToken,
+        guard: Option<&dyn crate::copy_engine::ReplaceGuard>,
     ) -> crate::sync_engine::env::CopyReport {
         let report = crate::sync_engine::env::EngineCopier
-            .copy(sources, dest_dir, overwrite, durable, cancel);
+            .copy(sources, dest_dir, overwrite, durable, cancel, guard);
         for s in sources {
             let name = Path::new(s).file_name().unwrap();
             let f = fs::OpenOptions::new()

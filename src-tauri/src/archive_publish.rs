@@ -804,6 +804,180 @@ pub fn delete_file_if(
     }
 }
 
+/// How [`replace_file_checked`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// The staged file is now at the destination; the old file is gone.
+    Done,
+    /// The destination is not what the caller expected (other size or time, a folder, a link, or
+    /// gone): nothing was changed.
+    Changed,
+}
+
+/// FER-564 (P0.2 review P3-2): publish `staged` over the existing file `dest` ONLY if `dest` still
+/// is what `check` accepts, with the check made on a handle that is held until the swap is done.
+///
+/// 1. `dest` is opened (no-follow) for DELETE with a share mode that denies every other writer,
+///    deleter and renamer. A program that has the file open for writing makes this fail with a
+///    sharing violation (the user's file is left alone and the caller may retry later).
+/// 2. Its size and last-write time are read from that same handle and given to `check`.
+/// 3. The held handle renames the old file to `backup` (same folder, never replacing), then
+///    `staged` is renamed to `dest` WITHOUT replacing. If that fails, the old file is renamed back
+///    (if a newcomer took its name, the old file stays at `backup`: it is never overwritten or
+///    deleted in that case).
+/// 4. Only after the new file is in place is the old one deleted through the held handle.
+///
+/// Nothing in here can replace a file that was edited after the check: no writer can open the
+/// file between the check and the move, and the destination name is never overwritten.
+#[cfg(windows)]
+pub fn replace_file_checked(
+    staged: &Path,
+    dest: &Path,
+    backup: &Path,
+    check: FactsCheck<'_>,
+) -> io::Result<Replaced> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, OPEN_EXISTING,
+    };
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    let dest_w = wide(dest);
+    // SAFETY: NUL-terminated buffer that outlives the call; the handle is closed below.
+    let handle = unsafe {
+        CreateFileW(
+            dest_w.as_ptr(),
+            DELETE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let e = io::Error::last_os_error();
+        // The destination vanished: that is a change, not an error.
+        if matches!(e.raw_os_error(), Some(2 | 3)) {
+            return Ok(Replaced::Changed);
+        }
+        return Err(e);
+    }
+    let close = |h| unsafe {
+        CloseHandle(h);
+    };
+    // Kind of object, from the held handle.
+    {
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: valid handle, writable out structure.
+        if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+            let e = io::Error::last_os_error();
+            close(handle);
+            return Err(e);
+        }
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            close(handle);
+            return Ok(Replaced::Changed);
+        }
+    }
+    match handle_facts(handle) {
+        Ok((size, ms)) if check(size, ms) => {}
+        Ok(_) => {
+            close(handle);
+            return Ok(Replaced::Changed);
+        }
+        Err(e) => {
+            close(handle);
+            return Err(e);
+        }
+    }
+    // Old file aside (by handle), new file in (no replace).
+    if let Err(e) = rename_by_handle(handle, backup) {
+        close(handle);
+        return Err(e);
+    }
+    match move_no_replace(staged, dest) {
+        Ok(()) => {
+            // The new file is published: drop the old one. A failure here must not turn a valid
+            // result into a failed copy; the stale backup is ignored by sync (SP-4.4).
+            let _ = set_disposition(handle, true);
+            close(handle);
+            Ok(Replaced::Done)
+        }
+        Err(e) => {
+            // Put the old file back; if its name was taken meanwhile it stays at `backup`.
+            let _ = rename_by_handle(handle, dest);
+            close(handle);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn replace_file_checked(
+    _staged: &Path,
+    _dest: &Path,
+    _backup: &Path,
+    _check: FactsCheck<'_>,
+) -> io::Result<Replaced> {
+    Err(io::Error::other("unsupported platform"))
+}
+
+/// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`: an existing destination is an error.
+#[cfg(windows)]
+fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    let (a, b) = (wide(from), wide(to));
+    // SAFETY: NUL-terminated buffers that outlive the call; flags 0 = no REPLACE_EXISTING.
+    if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Rename the object behind `handle` to the full path `to`, never replacing an existing one.
+#[cfg(windows)]
+fn rename_by_handle(handle: windows_sys::Win32::Foundation::HANDLE, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+    let name: Vec<u16> = to.as_os_str().encode_wide().collect();
+    let header = std::mem::size_of::<FILE_RENAME_INFO>();
+    let bytes = header + name.len() * 2;
+    // A u64 buffer keeps the variable-length structure aligned.
+    let mut buffer = vec![0u64; bytes.div_ceil(8)];
+    let info = buffer.as_mut_ptr() as *mut FILE_RENAME_INFO;
+    // SAFETY: `buffer` is zeroed, aligned and large enough for the fixed part plus the name,
+    // which is copied over `FileName` and the bytes behind it. ReplaceIfExists stays FALSE.
+    unsafe {
+        (*info).FileNameLength = (name.len() * 2) as u32;
+        let at = std::ptr::addr_of_mut!((*info).FileName) as *mut u16;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), at, name.len());
+    }
+    // SAFETY: valid handle; `info` points at `bytes` initialised bytes.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileRenameInfo,
+            info as *const core::ffi::c_void,
+            bytes as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Size and last-write time (unix ms) of an open handle.
 #[cfg(windows)]
 fn handle_facts(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<(u64, i64)> {

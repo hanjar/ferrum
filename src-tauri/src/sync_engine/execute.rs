@@ -28,8 +28,10 @@ use crate::automation::model::{CompareMode, DeletePolicy, ProfilePolicy, Side, S
 use crate::compare::{
     CompareDirsReport, Ctl, DirDiffEntry, DirDiffState, DirOpts, compare_dirs_filtered_with,
 };
+use crate::copy_engine::ReplaceGuard;
 use crate::ops::CancelToken;
 use crate::sync_baseline::{BaselineDto, LoadResult, RootPair, save_with_guard};
+use crate::sync_engine::commit_check::CommitCheck;
 use crate::sync_engine::delete_policy::{Deleter, Removal, RunRoots, check_gate};
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::errors::{
@@ -46,7 +48,7 @@ use crate::sync_engine::plan::{
     sync_plan_blockers, validate_profile_plan,
 };
 use crate::sync_engine::settle::{ItemOutcome, reconcile_baseline};
-use crate::sync_engine::versioning::{Expect, VersionStore};
+use crate::sync_engine::versioning::{Expect, Restored, VersionStore};
 use crate::sync_engine::write_guard::{check_under, final_base};
 use crate::sync_incremental::{IncrementalInfo, prepare};
 
@@ -947,6 +949,8 @@ enum OpResult {
     Done,
     Skipped(Option<Reason>),
     Changed,
+    /// FER-564: the target changed during the copy and was not overwritten.
+    TargetChanged,
     Failed(Classified),
     Cancelled,
 }
@@ -1240,6 +1244,10 @@ impl<'a> Runner<'a> {
             OpResult::Changed => {
                 self.pending_rerun = true;
                 self.set(idx, OpStatus::Changed, None);
+            }
+            OpResult::TargetChanged => {
+                self.pending_rerun = true;
+                self.set(idx, OpStatus::Changed, Some(Reason::TargetChanged));
             }
             OpResult::Cancelled => {
                 self.set(idx, OpStatus::NotStarted, None);
@@ -1725,6 +1733,7 @@ impl<'a> Runner<'a> {
         );
 
         let mut comps_of: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut seen: Option<Expect> = None;
         for &idx in batch {
             let op = self.ops[idx].clone();
             let comps = match split_rel(&op.name) {
@@ -1741,6 +1750,18 @@ impl<'a> Runner<'a> {
                 Ok(Jit::Link) => out.push((idx, OpResult::Skipped(Some(Reason::LinkUnsupported)))),
                 Ok(Jit::Match) => {
                     let src = self.abs_path(source, &refs).to_string_lossy().into_owned();
+                    // FER-564: the exact facts of an in-place overwrite's target, kept for the
+                    // re-check at the commit.
+                    if overwrite && !versioning {
+                        seen = fact_of(&self.abs_path(target, &refs))
+                            .ok()
+                            .flatten()
+                            .filter(|f| !f.is_dir && !f.link)
+                            .map(|f| Expect {
+                                size: f.size,
+                                mtime_ms: f.mtime,
+                            });
+                    }
                     comps_of.insert(idx, comps);
                     ready.push((idx, src));
                 }
@@ -1855,11 +1876,28 @@ impl<'a> Runner<'a> {
         // Overwrite in place under recycleBin / permanent (SP-3.4); under versioning the old file
         // is already aside, so an existing target means it appeared meanwhile and must fail.
         let in_place = overwrite && !versioning;
+        let first_idx = ready[0].0;
+        // FER-564: an in-place overwrite swaps the staged file in only after re-checking the
+        // target on a held handle.
+        let first_name = self.ops[first_idx].name.clone();
+        let commit = in_place.then(|| {
+            CommitCheck::new(
+                &*self.req.env.hooks,
+                first_idx,
+                &first_name,
+                self.expect_of(&self.ops[first_idx]),
+                seen,
+            )
+        });
         let report = self.guarded(|cancel| {
-            self.req
-                .env
-                .copier
-                .copy(&sources, &dest_dir, in_place, false, cancel)
+            self.req.env.copier.copy(
+                &sources,
+                &dest_dir,
+                in_place,
+                false,
+                cancel,
+                commit.as_ref().map(|c| c as &dyn ReplaceGuard),
+            )
         });
         drop(held);
 
@@ -1871,6 +1909,8 @@ impl<'a> Runner<'a> {
         for (idx, src) in ready {
             let result = if report.done.contains(&src) {
                 OpResult::Done
+            } else if commit.as_ref().is_some_and(|c| c.target_changed()) {
+                OpResult::TargetChanged
             } else if let Some((_, c)) = report.failed.iter().find(|(k, _)| k == &src) {
                 OpResult::Failed(*c)
             } else if let Some(c) = whole {
@@ -1886,7 +1926,63 @@ impl<'a> Runner<'a> {
             };
             out.push((idx, result));
         }
+        // FER-564 (P3-3): a versioned file whose replacement did not land goes back where it was.
+        if overwrite && versioning && self.aside[first_idx] {
+            let landed = out
+                .iter()
+                .any(|(i, r)| *i == first_idx && matches!(r, OpResult::Done));
+            if !landed && let Err(c) = self.restore_aside(first_idx, target, &comps_of[&first_idx])
+            {
+                for (i, r) in &mut out {
+                    if *i == first_idx {
+                        *r = OpResult::Failed(c);
+                    }
+                }
+            }
+        }
         out
+    }
+
+    /// Put the previous version of the overwritten file `comps` of op `idx` back at its place. On
+    /// success (or when the place is taken by something else, which is then left alone) the op is
+    /// no longer "aside". A failure is systemic: the old file is safe in the versions tree, but
+    /// the target is empty, so the run stops and the profile needs attention.
+    fn restore_aside(
+        &mut self,
+        idx: usize,
+        target: Side,
+        comps: &[String],
+    ) -> Result<(), Classified> {
+        let failed = Classified {
+            class: ErrorClass::Systemic,
+            reason: Reason::RestoreFailed,
+        };
+        let refs: Vec<&str> = comps.iter().map(String::as_str).collect();
+        let (last, parents) = refs.split_last().expect("validated, non-empty");
+        let Some(target_root) = self.handles.root(target) else {
+            return Err(failed);
+        };
+        let Some(store) = self.versions.as_ref() else {
+            return Err(failed);
+        };
+        let target_dir = self
+            .abs_path(target, parents)
+            .to_string_lossy()
+            .into_owned();
+        match store.restore(
+            target,
+            target_root,
+            &target_dir,
+            parents,
+            last,
+            self.req.env,
+        ) {
+            Ok(Restored::Back | Restored::TargetOccupied) => {
+                self.aside[idx] = false;
+                Ok(())
+            }
+            Err(_) => Err(failed),
+        }
     }
 
     // ── outcome ──
@@ -1980,3 +2076,7 @@ mod tests3;
 #[cfg(test)]
 #[path = "execute_tests4.rs"]
 mod tests4;
+
+#[cfg(test)]
+#[path = "execute_tests5.rs"]
+mod tests5;

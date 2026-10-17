@@ -10,6 +10,7 @@
 //!   [`write_guard`] (FER-562) applies the protected-folder and Startup policy to roots and to
 //!   every write.
 
+pub mod commit_check;
 pub mod delete_policy;
 pub mod env;
 pub mod errors;
