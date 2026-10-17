@@ -381,3 +381,72 @@ describe('AutomationReview (AP-3..AP-6)', () => {
     expect(await screen.findByRole('button', { name: 'Approve & save' })).toBeTruthy();
   });
 });
+
+describe('rework R1 (review of PR 35)', () => {
+  const continueBtn2 = () =>
+    screen.getByRole('button', { name: 'Continue to review' }) as HTMLButtonElement;
+
+  it('B1: an edited schedule is reviewed as the DRAFT (Weekly), not the stored Daily text', async () => {
+    setup();
+    await fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    await waitFor(() => expect(continueBtn2().disabled).toBe(false));
+    await fireEvent.click(screen.getByRole('radio', { name: 'Weekly' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Monday' }));
+    await waitFor(() => expect(continueBtn2().disabled).toBe(false));
+    await fireEvent.click(continueBtn2());
+    const review = await screen.findByTestId('automation-review');
+    expect(review.textContent).toContain('Weekly on Mon at 02:00 (Asia/Jakarta)');
+    expect(review.textContent).not.toContain('Daily at 02:00');
+  });
+
+  it('B2: a half-typed time zone does not throw, says so, and shows no DST claim', async () => {
+    const errors: unknown[] = [];
+    const onErr = (e: ErrorEvent) => errors.push(e.error);
+    window.addEventListener('error', onErr);
+    setup();
+    await fillNewAutomation();
+    await fireEvent.click(screen.getByRole('radio', { name: 'Once' }));
+    await fireEvent.input(screen.getByLabelText('Time zone'), { target: { value: 'Asia/Ja' } });
+    expect((await screen.findByTestId('editor-errors')).textContent).toContain(
+      'Pick a valid time zone',
+    );
+    expect(screen.queryByTestId('dst-note')).toBeNull();
+    expect(screen.getByLabelText('Date')).toBeTruthy();
+    await fireEvent.input(screen.getByLabelText('Time zone'), { target: { value: '' } });
+    await fireEvent.input(screen.getByLabelText('Time zone'), {
+      target: { value: 'Europe/Amsterdam' },
+    });
+    expect(screen.getByTestId('dst-note')).toBeTruthy();
+    window.removeEventListener('error', onErr);
+    expect(errors).toEqual([]);
+  });
+
+  it('S2: Escape and Close do nothing while an approval is pending', async () => {
+    let release!: (v: unknown) => void;
+    const pending = new Promise((r) => (release = r));
+    const { backend, store } = setup({ approve: vi.fn(() => pending as never) });
+    await fillNewAutomation();
+    await waitFor(() => expect(continueBtn2().disabled).toBe(false));
+    await fireEvent.click(continueBtn2());
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run test' }));
+    await screen.findByTestId('test-passed');
+    await fireEvent.click(screen.getByRole('button', { name: 'Approve & enable' }));
+    await waitFor(() => expect(backend.approve).toHaveBeenCalledTimes(1));
+    await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Automation' }), { key: 'Escape' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(store.review).not.toBeNull();
+    expect(store.view).toBe('review');
+    release(fixture('automation-approve-canceled.json'));
+    await screen.findByTestId('review-notice');
+  });
+
+  it('S6: the review shows the runtime of the draft, not a hardcoded one', async () => {
+    const detail = fixture<Record<string, unknown>>('automation-get.json');
+    (detail.policy as Record<string, unknown>).runtime = 'background';
+    setup({ get: vi.fn(async () => detail as never) });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Review changes' }));
+    const review = await screen.findByTestId('automation-review');
+    expect(review.textContent).toContain('In the background');
+    expect(review.textContent).not.toContain('While Ferrum is running');
+  });
+});

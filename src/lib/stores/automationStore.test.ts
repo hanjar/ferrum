@@ -299,3 +299,155 @@ describe('AutomationStore', () => {
     expect(store.history.runs.length).toBeGreaterThan(0);
   });
 });
+
+describe('AutomationStore rework R1', () => {
+  it('S1: after stale the stored configRev is re-read, so retest + approve succeeds', async () => {
+    const detail = scheduleDetail();
+    let rev = detail.automation.configRev;
+    const approve = vi
+      .fn()
+      .mockResolvedValueOnce(fixture('automation-approve-stale.json'))
+      .mockResolvedValue(fixture('automation-approve.json'));
+    const { store } = make({
+      approve: approve as never,
+      get: vi.fn(async () => ({ ...detail, automation: { ...detail.automation, configRev: rev } })),
+    });
+    await store.load();
+    await store.openEdit(detail.automation.id);
+    await settle();
+    store.continueToReview();
+    await store.runTest();
+    rev = 9; // changed elsewhere
+    await store.approve();
+    expect(store.review?.notice?.text).toBe('The profile or automation changed — review again');
+    expect(store.review?.expectedConfigRev).toBe(9);
+    expect(store.canApprove).toBe(false);
+    await store.runTest();
+    await store.approve();
+    expect(approve).toHaveBeenLastCalledWith(expect.objectContaining({ expectedConfigRev: 9 }));
+    expect(store.view).toBe('list');
+    store.dispose();
+  });
+
+  it('S3: a Once time that passed while waiting blocks Continue and Approve', async () => {
+    let now = NOW;
+    const backend = fakeBackend();
+    const store = new AutomationStore({
+      backend,
+      profiles: fakeProfiles(),
+      validateDelayMs: 0,
+      now: () => now,
+    });
+    await store.load();
+    store.openNew();
+    store.changeForm({ name: 'Once', freq: 'once', tz: 'UTC', date: '2026-10-17', time: '10:30' });
+    await settle();
+    expect(store.canContinue).toBe(true);
+    now = Date.parse('2026-10-17T10:45:00Z');
+    store.continueToReview();
+    expect(store.view).toBe('editor');
+    expect(store.editor?.errors.map((e) => e.code)).toContain('time_passed');
+
+    now = NOW;
+    store.changeForm({ time: '10:30' });
+    await settle();
+    store.continueToReview();
+    await store.runTest();
+    now = Date.parse('2026-10-17T10:45:00Z');
+    await store.approve();
+    expect(backend.approve).not.toHaveBeenCalled();
+    expect(store.review?.notice?.text).toMatch(/already passed/);
+    expect(store.canApprove).toBe(false);
+  });
+
+  it('S5: Back, change, Continue reviews the NEW draft and drops the old test', async () => {
+    const { store } = make();
+    await reachReview(store);
+    await store.runTest();
+    expect(store.review?.test?.testId).toBeTruthy();
+    store.backFromReview();
+    expect(store.view).toBe('editor');
+    store.changeForm({ name: 'Renamed' });
+    await settle();
+    store.continueToReview();
+    expect(store.review?.draft.name).toBe('Renamed');
+    expect(store.review?.test).toBeUndefined();
+    expect(store.canApprove).toBe(false);
+  });
+
+  it('S5: a test answer arriving after Back is ignored', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { store } = make({
+      test: vi.fn(async () => {
+        await gate;
+        return fixture('automation-test.json') as never;
+      }),
+    });
+    await reachReview(store);
+    const run = store.runTest();
+    const old = store.review;
+    store.backFromReview();
+    store.continueToReview();
+    release();
+    await run;
+    expect(old?.test).toBeUndefined();
+    expect(store.review?.test).toBeUndefined();
+    expect(store.canApprove).toBe(false);
+  });
+
+  it('S5/S2: a double click on Approve calls the backend once; Back is a no-op meanwhile', async () => {
+    let release!: (v: unknown) => void;
+    const pending = new Promise((r) => (release = r));
+    const { store, backend } = make({ approve: vi.fn(() => pending as never) });
+    await reachReview(store);
+    await store.runTest();
+    const a = store.approve();
+    const b = store.approve();
+    store.backFromReview();
+    expect(store.view).toBe('review');
+    release(fixture('automation-approve-canceled.json'));
+    await Promise.all([a, b]);
+    expect(backend.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('S6: an edit keeps the stored runtime and refuses Background as unavailable', async () => {
+    const detail = scheduleDetail();
+    detail.policy = { ...detail.policy, runtime: 'background' };
+    const { store } = make({ get: vi.fn(async () => detail) });
+    await store.load();
+    await store.openEdit(detail.automation.id);
+    expect(store.editor?.form.runtime).toBe('background');
+    expect(store.editor?.errors.map((e) => e.code)).toContain('runtime_unavailable');
+    expect(store.canContinue).toBe(false);
+  });
+
+  it('N4: a stale history answer is ignored', async () => {
+    let first!: (v: unknown) => void;
+    const history = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((r) => (first = r)))
+      .mockResolvedValue({ runs: [], next: undefined });
+    const { store } = make({ history: history as never });
+    const a = store.loadHistory('all');
+    await store.loadHistory('attention');
+    first(fixture('automation-history.json'));
+    await a;
+    expect(store.history.filter).toBe('attention');
+    expect(store.history.runs).toEqual([]);
+  });
+
+  it('N4: of two quick Review clicks only the last one opens', async () => {
+    const gates: ((v: unknown) => void)[] = [];
+    const get = vi.fn(() => new Promise((r) => gates.push(r)));
+    const { store } = make({ get: get as never });
+    await store.load();
+    const a = store.openReview(rows()[1]);
+    const b = store.openReview(rows()[2]);
+    gates[1](fixture('automation-get.json'));
+    await b;
+    gates[0](fixture('automation-get.json'));
+    await a;
+    expect(store.review?.row?.id).toBe(rows()[2].id);
+  });
+});

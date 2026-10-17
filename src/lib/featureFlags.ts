@@ -10,7 +10,8 @@ export function flagOn(value: unknown): boolean {
 
 /**
  * Automation UI (Automation P1.5): the sidebar entry and the Automation page. Default OFF in
- * release builds; the dev server and the Playwright run turn it on with
- * `VITE_FERRUM_AUTOMATION_UI=1`. Run now / Retry are not wired in this UI either way.
+ * release builds. To try it in development run `VITE_FERRUM_AUTOMATION_UI=1 npm run dev`;
+ * `playwright.config.ts` starts its own dev server with the flag on. Run now / Retry are not wired
+ * in this UI either way.
  */
 export const automationUiEnabled: boolean = flagOn(import.meta.env.VITE_FERRUM_AUTOMATION_UI);

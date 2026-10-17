@@ -52,6 +52,7 @@
   function onKey(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     e.preventDefault();
+    if (store.review?.approving) return;
     if (store.discardPending) store.discardPending = false;
     else if (store.view === 'review') store.backFromReview();
     else if (store.view === 'editor') store.leaveEditor();
@@ -59,6 +60,7 @@
   }
 
   function closePage() {
+    if (store.review?.approving) return;
     if (store.view === 'list') {
       onclose?.();
     } else if (store.leaveEditor()) {

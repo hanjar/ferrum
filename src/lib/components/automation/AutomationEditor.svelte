@@ -18,6 +18,7 @@
     dstNote,
     errorMessage,
     nextRunLines,
+    safeZone,
     zoneClock,
   } from './automationModel';
 
@@ -37,7 +38,7 @@
 
   const form = $derived(editor.form);
   const lines = $derived(nextRunLines(editor.next, form.tz, Date.now()));
-  const today = $derived(zoneClock(form.tz, new Date()).date);
+  const today = $derived(zoneClock(safeZone(form.tz), new Date()).date);
   const maxDate = $derived(addDays(today, 13));
   const zones = $derived.by(() => {
     try {
@@ -184,7 +185,9 @@
         <p class="hint">Upcoming runs are listed here once the schedule is valid and checked.</p>
       {/if}
     </div>
-    <p class="hint" data-testid="dst-note">{dstNote(form.tz)}</p>
+    {#if dstNote(form.tz)}
+      <p class="hint" data-testid="dst-note">{dstNote(form.tz)}</p>
+    {/if}
   </section>
 
   <section>

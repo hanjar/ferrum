@@ -34,6 +34,7 @@ import {
 import {
   STALE_TEXT,
   automationErrorMessage,
+  errorMessage,
   formFromDraft,
   localErrors,
   mergeErrors,
@@ -132,6 +133,8 @@ export class AutomationStore {
 
   #deps: StoreDeps;
   #loadSeq = 0;
+  #reviewSeq = 0;
+  #historySeq = 0;
   #validateSeq = 0;
   #validateTimer: ReturnType<typeof setTimeout> | null = null;
   #highlightTimer: ReturnType<typeof setTimeout> | null = null;
@@ -341,6 +344,12 @@ export class AutomationStore {
   continueToReview(): void {
     const ed = this.editor;
     if (!ed || !this.canContinue) return;
+    // The clock moved on since the last edit: a Once time may have passed meanwhile (SC-1.1).
+    const fresh = localErrors(ed.form, this.#deps.now());
+    if (fresh.length > 0) {
+      ed.errors = mergeErrors(ed.errors, fresh);
+      return;
+    }
     this.review = {
       id: ed.id,
       expectedConfigRev: ed.expectedConfigRev,
@@ -359,6 +368,7 @@ export class AutomationStore {
   /** List → Review of an automation that needs a review (AP-6). */
   async openReview(row: AutomationRow): Promise<void> {
     this.notice = null;
+    const seq = ++this.#reviewSeq;
     try {
       const detail = await this.#deps.backend.get(row.id);
       let changes: FieldChange[] = [];
@@ -374,6 +384,7 @@ export class AutomationStore {
           // The list of changes is informational; the review itself still works.
         }
       }
+      if (seq !== this.#reviewSeq) return;
       this.editor = null;
       this.review = {
         id: row.id,
@@ -394,6 +405,7 @@ export class AutomationStore {
       };
       this.view = 'review';
     } catch (e) {
+      if (seq !== this.#reviewSeq) return;
       this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
     }
   }
@@ -401,6 +413,9 @@ export class AutomationStore {
   /** Review → Editor (new or edited automation) or → list (re-review). */
   backFromReview(): void {
     const r = this.review;
+    // A native confirmation may be open: leaving now would orphan the answer.
+    if (r?.approving) return;
+    this.#reviewSeq++;
     this.review = null;
     this.view = r && this.editor ? 'editor' : 'list';
   }
@@ -437,6 +452,14 @@ export class AutomationStore {
   async approve(): Promise<void> {
     const r = this.review;
     if (!r || !this.canApprove || !r.test) return;
+    // Re-check the clock-dependent rules right before asking (a Once time may have passed).
+    const form = formFromDraft(r.draft, this.#deps.now());
+    const fresh = form ? localErrors(form, this.#deps.now()) : [];
+    if (fresh.length > 0) {
+      r.test = undefined;
+      r.notice = { kind: 'error', text: errorMessage(fresh[0]) };
+      return;
+    }
     r.approving = true;
     r.notice = null;
     try {
@@ -461,22 +484,44 @@ export class AutomationStore {
         // The user stays on the review; the test is still valid, they can approve again.
         r.notice = { kind: 'info', text: 'Approval was canceled. Nothing was changed.' };
       } else {
-        this.#markStale(r);
+        await this.#markStale(r);
       }
     } catch (e) {
       if (this.review !== r) return;
-      if (codeOf(e) === 'stale') this.#markStale(r);
+      if (codeOf(e) === 'stale') await this.#markStale(r);
       else r.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
     } finally {
       if (this.review === r) r.approving = false;
     }
   }
 
-  #markStale(r: ReviewState): void {
+  /**
+   * The backend says the profile or automation changed. The test is void. Re-read the stored
+   * automation so the next approval carries its CURRENT `configRev` (otherwise every retry would
+   * be stale again); a new test is still required.
+   */
+  async #markStale(r: ReviewState): Promise<void> {
     r.stale = true;
     r.test = undefined;
     r.notice = { kind: 'error', text: STALE_TEXT };
-    void this.load();
+    await this.load();
+    if (!r.id || this.review !== r) return;
+    try {
+      const detail = await this.#deps.backend.get(r.id);
+      if (this.review !== r) return;
+      r.expectedConfigRev = detail.automation.configRev;
+      if (this.editor?.id === r.id) this.editor.expectedConfigRev = detail.automation.configRev;
+      r.row = this.rows.find((x) => x.id === r.id) ?? r.row;
+      if (r.mode === 'resume') {
+        r.draft = {
+          name: detail.automation.name,
+          profileId: detail.automation.profileId,
+          policy: detail.policy,
+        };
+      }
+    } catch {
+      // Keep the old revision: the next approval then reports stale again, with the same text.
+    }
   }
 
   #highlight(id: string): void {
@@ -493,16 +538,18 @@ export class AutomationStore {
   async loadHistory(filter: HistoryFilter = this.history.filter): Promise<void> {
     this.history.filter = filter;
     this.history.loading = true;
+    const seq = ++this.#historySeq;
     try {
       const page = await this.#deps.backend.history({ filter, limit: 50 });
-      if (this.history.filter !== filter) return;
+      if (seq !== this.#historySeq) return;
       this.history.runs = page.runs;
       this.history.next = page.next;
       this.history.error = null;
     } catch (e) {
+      if (seq !== this.#historySeq) return;
       this.history.error = automationErrorMessage(codeOf(e));
     } finally {
-      this.history.loading = false;
+      if (seq === this.#historySeq) this.history.loading = false;
     }
   }
 

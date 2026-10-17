@@ -42,6 +42,8 @@ export interface ScheduleForm {
   tz: string;
   missed: 'skip' | 'runOnce';
   retries: number;
+  /** Carried through from a stored automation; the editor only offers 'app' (Background is Unavailable). */
+  runtime: 'app' | 'background';
   /** Carried through unchanged: the editor has no controls for them (optional OP-1). */
   conditions: AutomationConditions;
 }
@@ -82,6 +84,11 @@ export function addDays(date: string, days: number): string {
   return t.toISOString().slice(0, 10);
 }
 
+/** `tz` when it is a valid zone id, else the system zone (a half-typed zone must not throw). */
+export function safeZone(tz: string): string {
+  return isValidZone(tz) ? tz : systemZone();
+}
+
 export function isValidZone(tz: string): boolean {
   if (!tz) return false;
   try {
@@ -107,6 +114,7 @@ export function zoneHasDst(tz: string, year = new Date().getFullYear()): boolean
 
 /** SC-2.3, exact texts. */
 export function dstNote(tz: string): string {
+  if (!isValidZone(tz)) return '';
   return zoneHasDst(tz)
     ? "Daylight saving: a local time that doesn't exist is skipped; a local time that happens twice runs once."
     : `${tz} has no daylight-saving changes. For zones that do: a nonexistent local time is skipped, a repeated one runs once.`;
@@ -124,6 +132,7 @@ export function newScheduleForm(profileId = '', now: Date | number = new Date())
     tz,
     missed: 'skip',
     retries: 2,
+    runtime: 'app',
     conditions: { skipOnBattery: false, skipOnMetered: false },
   };
 }
@@ -145,6 +154,7 @@ export function formFromDraft(
     tz: t.tz,
     missed: t.missed,
     retries: draft.policy.retries,
+    runtime: draft.policy.runtime,
     conditions: { ...draft.policy.conditions },
   };
 }
@@ -165,7 +175,7 @@ export function toDraft(form: ScheduleForm): AutomationDraft {
   };
   const policy: AutomationPolicy = {
     trigger,
-    runtime: 'app',
+    runtime: form.runtime,
     retries: form.retries,
     conditions: { ...form.conditions },
   };
@@ -182,7 +192,7 @@ export function localErrors(form: ScheduleForm, now: Date | number = new Date())
   const errors: FieldError[] = [];
   const name = form.name.trim();
   if (!name) errors.push({ field: 'name', code: 'name_required' });
-  else if (name.length > NAME_MAX) errors.push({ field: 'name', code: 'name_too_long' });
+  else if ([...name].length > NAME_MAX) errors.push({ field: 'name', code: 'name_too_long' });
   if (!form.profileId) errors.push({ field: 'profileId', code: 'profile_required' });
   const timeOk = TIME_RE.test(form.time);
   if (!timeOk) errors.push({ field: 'trigger.time', code: 'time_invalid' });
@@ -202,6 +212,7 @@ export function localErrors(form: ScheduleForm, now: Date | number = new Date())
       }
     }
   }
+  if (form.runtime === 'background') errors.push({ field: 'runtime', code: 'runtime_unavailable' });
   if (!Number.isInteger(form.retries) || form.retries < 0 || form.retries > MAX_RETRIES)
     errors.push({ field: 'retries', code: 'retries_out_of_range' });
   return errors;
@@ -246,6 +257,8 @@ export function errorMessage(e: FieldError): string {
       return `Pick a date from today up to ${ONCE_MAX_DAYS_AHEAD} days ahead`;
     case 'tz_invalid':
       return 'Pick a valid time zone';
+    case 'runtime_unavailable':
+      return RUNTIME_BACKGROUND_UNAVAILABLE;
     case 'retries_out_of_range':
       return `Retries must be between 0 and ${MAX_RETRIES}`;
     case 'watch_root_required':
@@ -351,7 +364,18 @@ export function automationErrorMessage(code: string): string {
     case 'needs_review':
       return 'Review the profile change before running';
     case 'needs_attention':
+    case 'held':
       return 'A held run needs your attention first.';
+    case 'lease_busy':
+      return 'These folders are in use by another sync. Wait for it to finish, then try again.';
+    case 'rate_limited':
+      return 'Too many requests. Wait a moment and try again.';
+    case 'runner_down':
+      return 'The background runner is not running.';
+    case 'runtime_unavailable':
+      return RUNTIME_BACKGROUND_UNAVAILABLE;
+    case 'canceled':
+      return 'Canceled in the confirmation dialog. Nothing was changed.';
     case 'not_ready':
       return "The sync profile isn't ready. Check its folders and delete policy.";
     case 'in_use':

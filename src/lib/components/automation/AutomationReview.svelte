@@ -7,7 +7,13 @@
    */
   import { reviewLabel } from '../../ipc/automation';
   import type { AutomationStore, ReviewState } from '../../stores/automationStore.svelte';
-  import { dstNote, missedText, nextRunLines, scheduleSummary } from './automationModel';
+  import {
+    RUNTIME_BACKGROUND_DESC,
+    dstNote,
+    missedText,
+    nextRunLines,
+    scheduleSummary,
+  } from './automationModel';
 
   let {
     store,
@@ -95,7 +101,11 @@
   <section>
     <h3>Trigger</h3>
     <div class="line">
-      {review.row?.trigger ?? (trigger.kind === 'schedule' ? scheduleSummary(trigger) : '')}
+      {review.mode === 'resume' && review.row
+        ? review.row.trigger
+        : trigger.kind === 'schedule'
+          ? scheduleSummary(trigger)
+          : ''}
     </div>
     {#if nextLines.length > 0}
       <ol class="next">
@@ -111,10 +121,16 @@
 
   <section>
     <h3>Runtime</h3>
-    <div class="line">While Ferrum is running</div>
-    <div class="line muted">
-      Enabled doesn't mean always running: this automation runs only while a Ferrum window is open.
-    </div>
+    {#if draft.policy.runtime === 'background'}
+      <div class="line">In the background</div>
+      <div class="line muted">{RUNTIME_BACKGROUND_DESC}</div>
+    {:else}
+      <div class="line">While Ferrum is running</div>
+      <div class="line muted">
+        Enabled doesn't mean always running: this automation runs only while a Ferrum window is
+        open.
+      </div>
+    {/if}
   </section>
 
   <section>
@@ -122,7 +138,7 @@
     <ul class="policies">
       {#if trigger.kind === 'schedule'}
         <li>{missedText(trigger.missed)}</li>
-        <li>{dstNote(trigger.tz)}</li>
+        {#if dstNote(trigger.tz)}<li>{dstNote(trigger.tz)}</li>{/if}
       {/if}
       <li>Overlapping runs: a run waits while another uses the same folders.</li>
       <li>Conflicts: held for review, never overwritten.</li>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  automationErrorMessage,
   STATUS_KINDS,
   STATUS_TONE,
   addDays,
@@ -145,5 +146,19 @@ describe('automationModel', () => {
   it('computes the wall clock of a zone and calendar arithmetic', () => {
     expect(zoneClock('Asia/Jakarta', NOW)).toEqual({ date: '2026-10-17', time: '17:00' });
     expect(addDays('2026-10-30', 2)).toBe('2026-11-01');
+  });
+});
+
+describe('automationModel rework R1', () => {
+  it('N2: the name length counts code points like the backend', () => {
+    expect(localErrors(form({ name: '\u{1F600}'.repeat(80) }), NOW)).toEqual([]);
+    expect(localErrors(form({ name: '\u{1F600}'.repeat(81) }), NOW)[0].code).toBe('name_too_long');
+  });
+
+  it('N3/N8: backend error codes have texts, and an invalid zone gets no DST claim', () => {
+    for (const code of ['held', 'lease_busy', 'rate_limited', 'runner_down', 'canceled']) {
+      expect(automationErrorMessage(code)).not.toMatch(/Something went wrong/);
+    }
+    expect(dstNote('Asia/Ja')).toBe('');
   });
 });
