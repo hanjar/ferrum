@@ -75,6 +75,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_SystemInformation",
     # Automation P1.1 (design §8.4): DPAPI (CryptProtectData) protects the approval MAC key.
     "Win32_Security_Cryptography",
+    # Automation P1.3 (OP-1): battery state for the run conditions (GetSystemPowerStatus).
+    "Win32_System_Power",
 ] }
 # Automation P0.3: the automation store (same version and `bundled` feature as the activity
 # store; design §4.2, §6.2).

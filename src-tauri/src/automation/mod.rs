@@ -8,6 +8,7 @@ pub mod commands;
 pub mod confirm_text;
 pub mod dpapi;
 pub mod dto;
+pub mod host;
 pub mod lease;
 pub mod manual_run;
 pub mod model;

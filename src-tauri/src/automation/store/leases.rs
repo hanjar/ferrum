@@ -389,6 +389,25 @@ pub fn acquire(
     Ok(AcquireOutcome::Acquired { id })
 }
 
+/// Delete every lease whose holder process is gone or whose heartbeat is stale (LC-6). The
+/// host calls this when it takes over, so a crashed host's lease is visibly gone at once instead
+/// of at the next acquire. Returns how many rows went.
+pub fn reclaim_dead(
+    conn: &Connection,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+) -> Result<usize, StoreError> {
+    let mut removed = 0;
+    for row in read_rows(conn)? {
+        if stale(now_ms, row.beat_ms) || !probe.is_alive(row.holder) {
+            removed += conn
+                .execute("DELETE FROM leases WHERE id = ?1", [&row.id])
+                .map_err(unavailable)?;
+        }
+    }
+    Ok(removed)
+}
+
 /// Refresh the heartbeat. `false` = no such lease for this holder (reclaimed, released, wrong
 /// token or someone else's lease): the caller has lost it.
 pub fn heartbeat(

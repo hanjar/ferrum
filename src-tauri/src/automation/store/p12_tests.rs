@@ -347,6 +347,7 @@ fn pause_and_delete_drop_the_queue_and_the_pending_rerun() {
     write(&fx, |c| runtime::set_pending_rerun(c, &b, true, T0));
     crate::automation::approval::pause_in(
         &fx.store,
+        fx.keys.as_ref(),
         &b,
         crate::automation::dto::PauseMode::Finish,
         fx.clock(),
@@ -363,7 +364,7 @@ fn pause_and_delete_drop_the_queue_and_the_pending_rerun() {
     let rt = read(&fx, |c| runtime::get(c, &b)).unwrap();
     assert!(!rt.pending_rerun, "RQ-8.2: pending rerun removed");
     // Deleting an automation removes its entries by cascade.
-    crate::automation::approval::delete_in(&fx.store, &a).unwrap();
+    crate::automation::approval::delete_in(&fx.store, fx.keys.as_ref(), &a, fx.clock()).unwrap();
     assert!(read(&fx, queue::all).is_empty());
 }
 

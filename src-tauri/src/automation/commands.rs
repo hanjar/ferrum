@@ -1284,9 +1284,12 @@ pub async fn automation_pause(
     mode: dto::PauseMode,
 ) -> Result<dto::PauseResultDto, CommandError> {
     let store = state.store.clone();
-    tauri::async_runtime::spawn_blocking(move || approval::pause_in(&store, &id, mode, &now_ms))
-        .await
-        .map_err(|_| internal())?
+    let keys = state.keys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        approval::pause_in(&store, keys.as_ref(), &id, mode, &now_ms)
+    })
+    .await
+    .map_err(|_| internal())?
 }
 
 /// Delete an automation. The webview confirms in its own dialog (safe direction).
@@ -1296,9 +1299,12 @@ pub async fn automation_delete(
     id: String,
 ) -> Result<dto::DeleteAutomationDto, CommandError> {
     let store = state.store.clone();
-    tauri::async_runtime::spawn_blocking(move || approval::delete_in(&store, &id))
-        .await
-        .map_err(|_| internal())?
+    let keys = state.keys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        approval::delete_in(&store, keys.as_ref(), &id, &now_ms)
+    })
+    .await
+    .map_err(|_| internal())?
 }
 
 // ── Read side (P1.2): list, detail, history, operations, events ──

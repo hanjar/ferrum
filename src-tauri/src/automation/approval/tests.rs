@@ -557,7 +557,14 @@ fn se_1_requests_refuse_unknown_fields() {
 fn paused(fx: &Fixture) -> (String, String, i64) {
     let (profile, revision, _) = draft_of(fx, "Nightly");
     let id = fx.new_automation("Nightly", &profile, Fixture::daily());
-    pause_in(&fx.store, &id, PauseMode::Finish, fx.clock()).unwrap();
+    pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &id,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     (id, profile, revision)
 }
 
@@ -680,7 +687,7 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
     );
     assert_eq!(count(&fx, "queue"), 1);
     for mode in [PauseMode::Finish, PauseMode::Stop] {
-        let out = pause_in(&fx.store, &id, mode, fx.clock()).unwrap();
+        let out = pause_in(&fx.store, fx.keys.as_ref(), &id, mode, fx.clock()).unwrap();
         assert_eq!(out, PauseResultDto::Paused);
     }
     assert!(!record(&fx, &id).enabled);
@@ -696,6 +703,7 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
     assert_eq!(
         pause_in(
             &fx.store,
+            fx.keys.as_ref(),
             "99999999-9999-4999-8999-999999999999",
             PauseMode::Stop,
             fx.clock()
@@ -705,9 +713,15 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
         "not_found"
     );
     assert_eq!(
-        pause_in(&fx.store, "nope", PauseMode::Stop, fx.clock())
-            .unwrap_err()
-            .code,
+        pause_in(
+            &fx.store,
+            fx.keys.as_ref(),
+            "nope",
+            PauseMode::Stop,
+            fx.clock()
+        )
+        .unwrap_err()
+        .code,
         "invalid_input"
     );
 }
@@ -731,7 +745,14 @@ fn disabling_with_a_running_run_needs_a_choice() {
     assert_eq!(out, SetEnabledResultDto::NeedsChoice);
     assert!(record(&fx, &id).enabled);
     // After the choice, pause goes through even with the run in progress.
-    pause_in(&fx.store, &id, PauseMode::Stop, fx.clock()).unwrap();
+    pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &id,
+        PauseMode::Stop,
+        fx.clock(),
+    )
+    .unwrap();
     assert!(!record(&fx, &id).enabled);
     // And a plain disable without a run is a pause.
     let (profile2, _, _) = draft_of(&fx, "Other");
@@ -760,7 +781,7 @@ fn delete_removes_everything_and_releases_the_profile() {
     let err = commands::delete_in(&fx.store, &profile, revision).unwrap_err();
     assert_eq!(err.code, "in_use");
     assert_eq!(
-        delete_in(&fx.store, &id).unwrap(),
+        delete_in(&fx.store, fx.keys.as_ref(), &id, fx.clock()).unwrap(),
         DeleteAutomationDto::Deleted
     );
     for table in [
@@ -772,7 +793,12 @@ fn delete_removes_everything_and_releases_the_profile() {
     ] {
         assert_eq!(count(&fx, table), 0, "{table}");
     }
-    assert_eq!(delete_in(&fx.store, &id).unwrap_err().code, "not_found");
+    assert_eq!(
+        delete_in(&fx.store, fx.keys.as_ref(), &id, fx.clock())
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
     commands::delete_in(&fx.store, &profile, revision).unwrap();
 }
 

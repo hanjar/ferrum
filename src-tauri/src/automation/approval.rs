@@ -552,7 +552,8 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
         )?;
         // An edited or re-approved automation starts from a clean slate: no queued entry from the
         // old configuration, no countdown. An attention hold stays until a recheck or retry resolves it.
-        automations::clear_queue(&tx, &automation_id)?;
+        let removed = automations::take_queue(&tx, &automation_id)?;
+        crate::automation::host::requeue_siblings(&tx, deps.keys, &removed, now)?;
         let trigger_state = match &validated.policy.trigger {
             model::Trigger::Schedule(_) => "scheduled",
             model::Trigger::Watch(_) => "watching",
@@ -635,7 +636,7 @@ pub fn set_enabled_in<A: Into<ConfirmAnswer>>(
     require_id(id, "automation id")?;
     store.check_writable()?;
     if !enabled {
-        return disable(store, id, deps.clock, None);
+        return disable(store, deps.keys, id, deps.clock, None);
     }
     struct Shown {
         rec: automations::AutomationRecord,
@@ -727,6 +728,7 @@ pub fn set_enabled_in<A: Into<ConfirmAnswer>>(
 /// finish/stop (pause), so a running run does not ask again.
 fn disable(
     store: &Store,
+    keys: &dyn ApprovalKeys,
     id: &str,
     clock: Clock<'_>,
     forced: Option<PauseMode>,
@@ -744,8 +746,11 @@ fn disable(
         }
         let now = clock();
         automations::set_enabled(&tx, id, false, now)?;
-        // Queued entries are cancelled; the run part (finish or stop) arrives with the host (P1.3).
-        automations::clear_queue(&tx, id)?;
+        // Queued entries are cancelled; the run part (finish or stop) is a control for the host
+        // (`host::request::pause_run_part`). Triggers of other automations that were merged into
+        // this one's entry move to a healthy sibling (design §9.5).
+        let removed = automations::take_queue(&tx, id)?;
+        crate::automation::host::requeue_siblings(&tx, keys, &removed, now)?;
         // RQ-8.2: pausing also drops the pending rerun.
         runtime::set_pending_rerun(&tx, id, false, now)?;
         let text = match forced {
@@ -763,28 +768,37 @@ fn disable(
 /// `automation_pause` core (config part): no native dialog, safe direction.
 pub fn pause_in(
     store: &Store,
+    keys: &dyn ApprovalKeys,
     id: &str,
     mode: PauseMode,
     clock: Clock<'_>,
 ) -> Result<PauseResultDto, CommandError> {
     require_id(id, "automation id")?;
     store.check_writable()?;
-    disable(store, id, clock, Some(mode))?;
+    disable(store, keys, id, clock, Some(mode))?;
     Ok(PauseResultDto::Paused)
 }
 
 /// `automation_delete` core: webview confirmation only. Queued entries, the approval and the
 /// runtime row go with the automation.
-pub fn delete_in(store: &Store, id: &str) -> Result<DeleteAutomationDto, CommandError> {
+pub fn delete_in(
+    store: &Store,
+    keys: &dyn ApprovalKeys,
+    id: &str,
+    clock: Clock<'_>,
+) -> Result<DeleteAutomationDto, CommandError> {
     require_id(id, "automation id")?;
     store.check_writable()?;
     store.with_write(|conn| -> Result<(), CommandError> {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::Unavailable)?;
+        // Triggers of other automations merged into this one's entry move to a sibling.
+        let removed = automations::take_queue(&tx, id)?;
         if !automations::delete(&tx, id)? {
             return Err(automation_missing());
         }
+        crate::automation::host::requeue_siblings(&tx, keys, &removed, clock())?;
         automations::bump_change_seq(&tx)?;
         tx.commit().map_err(|_| StoreError::Unavailable)?;
         Ok(())
