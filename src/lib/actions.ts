@@ -850,6 +850,12 @@ export const actions: Action[] = [
     run: () => (ui.activityOpen = true),
   },
   {
+    id: 'sync.profiles.open',
+    label: 'Sync & Backup: Sync profiles',
+    group: 'Commands',
+    run: () => (ui.syncProfilesOpen = true),
+  },
+  {
     id: 'palette.open',
     label: 'Command palette',
     group: 'Commands',
@@ -1443,6 +1449,7 @@ export const FULL_PAGE_SHORTCUT_IDS: ReadonlySet<string> = new Set([
   'palette.open',
   'app.settings',
   'activity.open',
+  'sync.profiles.open',
 ]);
 
 /** True when a full page is open and this action's shortcut must not run. */

@@ -221,7 +221,11 @@ export const SYNC_PROFILE_RUN_EVENT = 'sync-profile://run';
 
 /** A failed call; `code` is from the closed set of design §7 (`stale`, `not_found`, ...). */
 export class SyncProfilesError extends Error {
-  constructor(public code: string) {
+  constructor(
+    public code: string,
+    /** The backend's fixed, path-free message; only used to tell cases apart. */
+    public detail?: string,
+  ) {
     super(code);
     this.name = 'SyncProfilesError';
   }
@@ -244,7 +248,11 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     return await invoke<T>(cmd, args);
   } catch (e) {
     const code = typeof e === 'object' && e !== null && 'code' in e ? String(e.code) : 'unknown';
-    throw new SyncProfilesError(code);
+    const detail =
+      typeof e === 'object' && e !== null && 'message' in e && typeof e.message === 'string'
+        ? e.message
+        : undefined;
+    throw new SyncProfilesError(code, detail);
   }
 }
 

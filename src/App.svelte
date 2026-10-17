@@ -13,6 +13,7 @@
   import SettingsDialog from './lib/components/SettingsDialog.svelte';
   import { initProviderSetup } from './lib/ai/providerSettings';
   import ActivityPage from './lib/components/ActivityPage.svelte';
+  import SyncProfilesPage from './lib/components/sync/SyncProfilesPage.svelte';
   import ChatPanel from './lib/components/ai/ChatPanel.svelte';
   import { aiChatHost } from './lib/ai/aiChatHost.svelte';
   import { aiRuntime } from './lib/ai/aiRuntime';
@@ -201,6 +202,9 @@
     <Toast />
     {#if ui.activityOpen}
       <ActivityPage onclose={() => (ui.activityOpen = false)} />
+    {/if}
+    {#if ui.syncProfilesOpen}
+      <SyncProfilesPage onclose={() => (ui.syncProfilesOpen = false)} />
     {/if}
     {#if ui.settingsOpen}
       <SettingsDialog onclose={() => (ui.settingsOpen = false)} />
