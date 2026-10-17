@@ -24,6 +24,7 @@ use crate::automation::model::{
     WireDeletePolicy, WireMode, WireSide,
 };
 use crate::automation::profile_baseline::ProfileBaselineStore;
+use crate::automation::read;
 use crate::automation::store::{Store, StoreError, profiles};
 use crate::automation::test_run::{self, DryRun, TestLedger};
 use crate::profile;
@@ -1298,6 +1299,99 @@ pub async fn automation_delete(
     tauri::async_runtime::spawn_blocking(move || approval::delete_in(&store, &id))
         .await
         .map_err(|_| internal())?
+}
+
+// ── Read side (P1.2): list, detail, history, operations, events ──
+
+/// Every automation with its status, last result and button flags (MH-2). Read-only.
+#[tauri::command]
+pub async fn automation_list(
+    state: State<'_, AutomationState>,
+) -> Result<Vec<dto::AutomationRowDto>, CommandError> {
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    tauri::async_runtime::spawn_blocking(move || read::list_in(&store, keys.as_ref(), now_ms()))
+        .await
+        .map_err(|_| internal())?
+}
+
+/// The detail page of one automation (MH-5). Read-only.
+#[tauri::command]
+pub async fn automation_get(
+    state: State<'_, AutomationState>,
+    id: String,
+) -> Result<dto::AutomationDetailDto, CommandError> {
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read::get_in(&store, keys.as_ref(), now_ms(), &id)
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Run history, newest first, paged by run id (MH-6). Read-only.
+#[tauri::command]
+pub async fn automation_history(
+    state: State<'_, AutomationState>,
+    filter: read::HistoryFilterWire,
+    automation_id: Option<String>,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<dto::HistoryDto, CommandError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read::history_in(
+            &store,
+            &read::HistoryRequest {
+                filter,
+                automation_id,
+                before,
+                limit,
+            },
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// The stored operations of one run, paged (RQ-5, MH-8). Read-only.
+#[tauri::command]
+pub async fn automation_run_ops(
+    state: State<'_, AutomationState>,
+    run_id: i64,
+    offset: i64,
+    limit: i64,
+) -> Result<dto::RunOpsDto, CommandError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read::run_ops_in(
+            &store,
+            &read::RunOpsRequest {
+                run_id,
+                offset,
+                limit,
+            },
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// The event log of one automation, newest first, paged by event id (MH-7). Read-only.
+#[tauri::command]
+pub async fn automation_events(
+    state: State<'_, AutomationState>,
+    id: String,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<dto::EventsPageDto, CommandError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read::events_in(&store, &read::EventsRequest { id, before, limit })
+    })
+    .await
+    .map_err(|_| internal())?
 }
 
 // Whether profile runs may skip content reads with the indexer journal (IX-1): the user's
@@ -2662,3 +2756,7 @@ mod lease_tests;
 #[cfg(test)]
 #[path = "commands_approval_tests.rs"]
 mod approval_tests;
+
+#[cfg(test)]
+#[path = "commands_read_tests.rs"]
+mod read_tests;

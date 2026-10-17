@@ -1,0 +1,42 @@
+{
+  "runs": [
+    {
+      "id": 1043,
+      "automationId": "c4d5e6f7-a8b9-4c0d-8e1f-2a3b4c5d6e7f",
+      "automationName": "Documents mirror",
+      "profileId": "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9",
+      "profileRevision": 1,
+      "host": "background",
+      "triggerKind": "schedule",
+      "triggerText": "Scheduled · 02:00 WIB",
+      "mergedCount": 0,
+      "startedMs": 1760000100000,
+      "endedMs": 1760000130000,
+      "phase": "done",
+      "outcome": "partial",
+      "opsTotal": 6,
+      "counts": {
+        "ok": 4,
+        "failed": 1,
+        "notStarted": 1,
+        "held": 0,
+        "skippedChanged": 0
+      },
+      "result": {
+        "kind": "partial",
+        "label": "Partial",
+        "sub": "4 succeeded · 1 failed · 1 not started"
+      },
+      "errorText": "Access is denied",
+      "note": "Not retried automatically — permission errors need you. Fix access, then Recheck.",
+      "recheck": {
+        "state": "remaining",
+        "remaining": 2,
+        "text": "Fresh comparison: 4 earlier operations are in sync and won't be repeated · 2 operations remaining.",
+        "atMs": 1760000140000
+      },
+      "needsAttention": true
+    }
+  ],
+  "next": 1043
+}

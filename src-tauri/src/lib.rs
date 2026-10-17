@@ -261,7 +261,12 @@ pub fn run() {
             automation::commands::automation_approve,
             automation::commands::automation_set_enabled,
             automation::commands::automation_pause,
-            automation::commands::automation_delete
+            automation::commands::automation_delete,
+            automation::commands::automation_list,
+            automation::commands::automation_get,
+            automation::commands::automation_history,
+            automation::commands::automation_run_ops,
+            automation::commands::automation_events
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())

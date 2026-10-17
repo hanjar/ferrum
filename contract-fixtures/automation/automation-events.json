@@ -1,0 +1,17 @@
+{
+  "events": [
+    {
+      "id": 30,
+      "atMs": 1760000190000,
+      "kind": "mute",
+      "text": "Ignored a change made by Ferrum itself"
+    },
+    {
+      "id": 29,
+      "atMs": 1760000100000,
+      "kind": "ok",
+      "text": "Run #1041 completed · 6 of 6",
+      "runId": 1041
+    }
+  ]
+}
