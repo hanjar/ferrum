@@ -395,6 +395,32 @@ export function automationErrorMessage(code: string): string {
   }
 }
 
+/**
+ * Error text of a control action. The backend uses one code for several refusals, so the same code
+ * means different things per action: `not_ready` on Stop/Retry/Recheck is about the RUN, not the
+ * profile; `busy` on Run now/Retry is the queue, not a confirmation dialog.
+ */
+export type ControlAction = 'run' | 'retry' | 'recheck' | 'stop' | 'pause';
+
+export function actionErrorMessage(action: ControlAction, code: string): string {
+  if (code === 'not_ready') {
+    switch (action) {
+      case 'stop':
+        return 'That run has already finished.';
+      case 'retry':
+        return 'Recheck first — there is nothing to retry yet.';
+      case 'recheck':
+        return 'That run is no longer the one that needs attention.';
+      default:
+        break;
+    }
+  }
+  if (code === 'busy' && (action === 'run' || action === 'retry')) {
+    return 'Another automation is waiting for these folders — try again in a moment.';
+  }
+  return automationErrorMessage(code);
+}
+
 /** Runtime chooser texts (RT-1, RT-1.1). */
 export const RUNTIME_APP_DESC =
   "Runs at the scheduled time if Ferrum is open. Won't run while Ferrum is closed, the PC sleeps or you're signed out.";

@@ -10,7 +10,8 @@
  *   screen, `stale` shows one fixed text and drops the test.
  * - Run now / Retry / Stop / Recheck (P1.6) are REQUESTS: the buttons only call the backend, which
  *   decides at its gate; the answer is rendered as the backend reported it. A pending set stops
- *   double submits and an answer for a screen that has since changed is dropped (stale response).
+ *   double submits. A stale answer for the detail page or an operation page is dropped; the
+ *   notice or toast of an action can still appear after the user left the screen (harmless).
  * - Pause with a run in progress shows the three-way dialog; its choice is sent as
  *   `automation_pause{mode}` and nothing else.
  */
@@ -44,7 +45,9 @@ import {
 } from '../ipc/syncProfiles';
 import {
   STALE_TEXT,
+  actionErrorMessage,
   automationErrorMessage,
+  DETAIL_EVENTS,
   errorMessage,
   formFromDraft,
   localErrors,
@@ -119,6 +122,8 @@ export interface DetailState {
   /** Events paged in after the first screen ("Show earlier events"), newest first. */
   moreEvents: AutomationEvent[];
   eventsNext?: number;
+  /** The cursor the first "Show earlier events" started from (the first screen's lowest id). */
+  eventsChain?: number;
   eventsLoading: boolean;
 }
 
@@ -185,6 +190,8 @@ export class AutomationStore {
   detail = $state<DetailState | null>(null);
   /** Pause / Stop dialog, when one is open. */
   dialog = $state<DialogState | null>(null);
+  /** Runs whose operation list is open in the current-run card (kept live like `expanded`). */
+  opsOpen = $state<Record<number, boolean>>({});
   /** Requests in flight (`run:<id>`, `stop:<runId>`, `recheck:<runId>`, `retry:<runId>`, `pause:<id>`, `sync:<runId>`). */
   pending = $state<Record<string, boolean>>({});
   /** Run ids whose rows are expanded (history and recent runs). */
@@ -199,6 +206,7 @@ export class AutomationStore {
   #detailSeq = 0;
   #opsSeq: Record<number, number> = {};
   #opsTimer: ReturnType<typeof setTimeout> | null = null;
+  #progressRefresh = false;
   #validateSeq = 0;
   #validateTimer: ReturnType<typeof setTimeout> | null = null;
   #highlightTimer: ReturnType<typeof setTimeout> | null = null;
@@ -233,6 +241,7 @@ export class AutomationStore {
     this.#highlightTimer = null;
     if (this.#opsTimer) clearTimeout(this.#opsTimer);
     this.#opsTimer = null;
+    this.dialog = null;
     this.#validateSeq++;
     this.#detailSeq++;
   }
@@ -311,21 +320,28 @@ export class AutomationStore {
     const key = `pause:${d.id}`;
     if (this.pending[key]) return;
     this.pending[key] = true;
+    let paused = false;
     try {
       await this.#deps.backend.pause(d.id, mode);
-      toast.show(
-        mode === 'stop'
-          ? `${d.name} paused — stopping the current run`
-          : `${d.name} paused — the current run will finish`,
-        4000,
-      );
+      paused = true;
     } catch (e) {
-      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      this.notice = { kind: 'error', text: actionErrorMessage('pause', codeOf(e)) };
     } finally {
       delete this.pending[key];
       if (this.dialog === d) this.dialog = null;
     }
     await this.#refreshShown();
+    if (!paused) return;
+    // Say "stopping" / "will finish" only while a run really is going (it may have ended meanwhile).
+    const going = this.rows.find((r) => r.id === d.id)?.status.kind === 'running';
+    toast.show(
+      !going
+        ? `${d.name} paused`
+        : mode === 'stop'
+          ? `${d.name} paused — stopping the current run`
+          : `${d.name} paused — the current run will finish`,
+      4000,
+    );
   }
 
   /** Confirmed Stop: a request; the host stops after the current file (RQ-8.1). */
@@ -339,7 +355,7 @@ export class AutomationStore {
       await this.#deps.backend.stopRun(d.runId);
       toast.show('Stop requested — stopping after the current file', 4000);
     } catch (e) {
-      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      this.notice = { kind: 'error', text: actionErrorMessage('stop', codeOf(e)) };
     } finally {
       delete this.pending[key];
       if (this.dialog === d) this.dialog = null;
@@ -360,7 +376,7 @@ export class AutomationStore {
       const res = await this.#deps.backend.runNow(row.id);
       toast.show(queueToast(res), 4000);
     } catch (e) {
-      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      this.notice = { kind: 'error', text: actionErrorMessage('run', codeOf(e)) };
     } finally {
       delete this.pending[key];
     }
@@ -377,7 +393,7 @@ export class AutomationStore {
       await this.#deps.backend.recheck(run.id);
       toast.show('Recheck requested — comparing the folders (read-only)', 4000);
     } catch (e) {
-      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      this.notice = { kind: 'error', text: actionErrorMessage('recheck', codeOf(e)) };
     } finally {
       delete this.pending[key];
     }
@@ -394,7 +410,7 @@ export class AutomationStore {
       const res = await this.#deps.backend.retry(run.id);
       toast.show(queueToast(res), 4000);
     } catch (e) {
-      this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+      this.notice = { kind: 'error', text: actionErrorMessage('retry', codeOf(e)) };
     } finally {
       delete this.pending[key];
     }
@@ -440,6 +456,7 @@ export class AutomationStore {
   async openDetail(id: string): Promise<void> {
     this.notice = null;
     this.expanded = {};
+    this.opsOpen = {};
     this.opsByRun = {};
     this.detail = {
       id,
@@ -455,8 +472,11 @@ export class AutomationStore {
 
   closeDetail(): void {
     this.#detailSeq++;
+    if (this.#opsTimer) clearTimeout(this.#opsTimer);
+    this.#opsTimer = null;
     this.detail = null;
     this.expanded = {};
+    this.opsOpen = {};
     this.opsByRun = {};
     this.dialog = null;
     this.view = 'list';
@@ -473,7 +493,7 @@ export class AutomationStore {
       if (seq !== this.#detailSeq || this.detail !== d) return;
       d.data = data;
       d.error = null;
-      if (d.eventsNext === undefined && d.moreEvents.length === 0) d.eventsNext = data.events.next;
+      this.#mergeEvents(d, data);
     } catch (e) {
       if (seq !== this.#detailSeq || this.detail !== d) return;
       d.error = automationErrorMessage(codeOf(e));
@@ -483,12 +503,42 @@ export class AutomationStore {
     this.#reloadExpandedOps();
   }
 
-  /** Keep the expanded operation lists current. */
-  #reloadExpandedOps(): void {
-    for (const key of Object.keys(this.expanded)) {
-      const runId = Number(key);
-      if (this.expanded[runId]) void this.loadOps(runId, this.opsByRun[runId]?.offset ?? 0);
+  /**
+   * Keep "Show earlier events" gap-free (the cursor is an event id). Nothing paged in yet: take the
+   * cursor of the fresh first screen. Paged-in events stay only while the fresh first screen still
+   * reaches down to the boundary they were paged from; when newer events pushed the screen up and
+   * left a gap, the paged-in part is dropped and the cursor restarts, so no event is skipped.
+   */
+  #mergeEvents(d: DetailState, data: AutomationDetail): void {
+    const shown = data.events.events.slice(0, DETAIL_EVENTS);
+    const lowest = shown.length > 0 ? shown[shown.length - 1].id : undefined;
+    if (d.moreEvents.length > 0 && d.eventsChain !== undefined && lowest !== undefined) {
+      if (lowest <= d.eventsChain) {
+        d.moreEvents = d.moreEvents.filter((e) => e.id < lowest);
+        return;
+      }
     }
+    d.moreEvents = [];
+    d.eventsChain = undefined;
+    d.eventsNext = data.events.next;
+  }
+
+  /** Keep the open operation lists current. */
+  #reloadExpandedOps(): void {
+    const ids: Record<number, true> = {};
+    for (const [k, v] of Object.entries(this.expanded)) if (v) ids[Number(k)] = true;
+    for (const [k, v] of Object.entries(this.opsOpen)) if (v) ids[Number(k)] = true;
+    for (const key of Object.keys(ids)) {
+      const runId = Number(key);
+      void this.loadOps(runId, this.opsByRun[runId]?.offset ?? 0);
+    }
+  }
+
+  /** The current-run card's "Show operations" toggle; the list then follows progress and refreshes. */
+  toggleOps(run: AutomationRun): void {
+    const open = !this.opsOpen[run.id];
+    this.opsOpen[run.id] = open;
+    if (open && run.opsTotal > 0) void this.loadOps(run.id, 0);
   }
 
   /** "Show earlier events": pages the log by the `next` cursor (50 per page). */
@@ -499,8 +549,10 @@ export class AutomationStore {
     try {
       const page = await this.#deps.backend.events(d.id, d.eventsNext, 50);
       if (this.detail !== d) return;
-      const seen = [...(d.data?.events.events ?? []), ...d.moreEvents].map((e) => e.id);
-      d.moreEvents = [...d.moreEvents, ...page.events.filter((e) => !seen.includes(e.id))];
+      const seen: Record<number, true> = {};
+      for (const e of [...(d.data?.events.events ?? []), ...d.moreEvents]) seen[e.id] = true;
+      if (d.moreEvents.length === 0) d.eventsChain = d.eventsNext;
+      d.moreEvents = [...d.moreEvents, ...page.events.filter((e) => !seen[e.id])];
       d.eventsNext = page.next;
     } catch (e) {
       if (this.detail === d) {
@@ -517,8 +569,11 @@ export class AutomationStore {
     if (!data || data.automation.id !== p.automationId) return;
     const cur = data.currentRun;
     if (!cur || cur.id !== p.runId) {
-      // A run we do not know yet (it just started): re-read once.
-      void this.refreshDetail();
+      // A run we do not know yet (it just started or ended): re-read once, not once per event.
+      if (!this.#progressRefresh) {
+        this.#progressRefresh = true;
+        void this.refreshDetail().finally(() => (this.#progressRefresh = false));
+      }
       return;
     }
     cur.phase = p.phase;
@@ -530,7 +585,7 @@ export class AutomationStore {
       recent.opsTotal = p.opsTotal;
       recent.counts = p.counts;
     }
-    if (this.expanded[p.runId] && !this.#opsTimer) {
+    if ((this.expanded[p.runId] || this.opsOpen[p.runId]) && !this.#opsTimer) {
       this.#opsTimer = setTimeout(() => {
         this.#opsTimer = null;
         void this.loadOps(p.runId, this.opsByRun[p.runId]?.offset ?? 0);
@@ -560,7 +615,14 @@ export class AutomationStore {
   async loadOps(runId: number, offset: number): Promise<void> {
     const seq = (this.#opsSeq[runId] = (this.#opsSeq[runId] ?? 0) + 1);
     const prev = this.opsByRun[runId];
-    this.opsByRun[runId] = { runId, offset, page: prev?.page ?? null, loading: true, error: null };
+    // The pager keeps showing the offset of the rows on screen until the new page arrives.
+    this.opsByRun[runId] = {
+      runId,
+      offset: prev?.page ? prev.offset : offset,
+      page: prev?.page ?? null,
+      loading: true,
+      error: null,
+    };
     try {
       const page = await this.#deps.backend.runOps(runId, offset, OPS_PAGE);
       if (seq !== this.#opsSeq[runId]) return;
@@ -569,7 +631,7 @@ export class AutomationStore {
       if (seq !== this.#opsSeq[runId]) return;
       this.opsByRun[runId] = {
         runId,
-        offset,
+        offset: prev?.page ? prev.offset : offset,
         page: prev?.page ?? null,
         loading: false,
         error: automationErrorMessage(codeOf(e)),

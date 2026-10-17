@@ -50,7 +50,7 @@
       : 0,
   );
 
-  let showOps = $state(false);
+  const showOps = $derived(run ? !!store.opsOpen[run.id] : false);
 
   function resolveHeld() {
     const hold = row?.attention;
@@ -205,8 +205,7 @@
             class="link"
             aria-expanded={showOps}
             onclick={() => {
-              showOps = !showOps;
-              if (showOps) void store.loadOps(run.id, 0);
+              store.toggleOps(run);
             }}
           >
             {showOps ? 'Hide operations' : 'Show operations'}

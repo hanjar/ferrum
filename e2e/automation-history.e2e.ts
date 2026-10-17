@@ -381,6 +381,18 @@ test.describe('FER-527 Automation detail, history and dialogs (mock IPC)', () =>
     expect(compared.length).toBeGreaterThan(0);
     expect(compared[0].left).toBe('C:\\Users\\demo\\Documents');
     expect(compared[0].right).toBe('E:\\Backups\\Documents');
+    // Review in Sync is a preview only: nothing is copied, deleted, leased or queued by it.
+    const all = await page.evaluate(() =>
+      (window as unknown as { __calls: Calls }).__calls.map((c) => c.cmd),
+    );
+    const forbidden = all.filter(
+      (c) =>
+        c !== 'copy_control_snapshot' &&
+        /copy|move|delete|sync_baseline_save|sync_lease_acquire|automation_run_now|automation_retry/.test(
+          c,
+        ),
+    );
+    expect(forbidden).toEqual([]);
   });
 
   test('detail page: live progress, Stop dialog and Pause dialog', async () => {
