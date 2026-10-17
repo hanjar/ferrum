@@ -2,21 +2,19 @@
 //! crash recovery and the security properties the review of P1.1 asked for. A fake clock and a
 //! scripted engine drive `Host::tick()`; the store, the keys and the leases are real.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use super::request::{self, QueueAnswer, RequestError};
+use super::HostClass;
+use super::request;
 use super::test_support::*;
-use super::{HostClass, StopKind};
 use crate::automation::dto::PauseMode;
 use crate::automation::lease::{GuardOutcome, LeaseEnv, LeaseGuard};
-use crate::automation::policy::NeedsReview;
 use crate::automation::status::StatusKind;
-use crate::automation::store::leases::{self, Holder, HolderKind};
+use crate::automation::store::leases::{self, HolderKind};
 use crate::automation::store::queue::TriggerKind;
-use crate::automation::store::runs::{Outcome, RecheckState};
-use crate::automation::store::{StoreError, controls, hosts, runtime};
+use crate::automation::store::runs::Outcome;
+use crate::automation::store::{StoreError, runtime};
 use crate::sync_engine::roots;
 
 const ALL_TRIGGERS: [TriggerKind; 9] = [
@@ -44,14 +42,6 @@ fn set_attention(rig: &Rig, automation: &str, run_id: i64) {
     ));
 }
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 // ── A run, start to end ──
 
 /// RQ-1 / RQ-9: a queued run passes the gate, holds a lease that covers its folders, calls the
@@ -69,6 +59,11 @@ fn a_queued_run_goes_through_the_gate_and_is_recorded() {
     assert_eq!(calls.len(), 1);
     assert!(calls[0].holds_lease && calls[0].lease_covers, "{calls:?}");
     assert!(!calls[0].dry_run);
+    assert_eq!(
+        calls[0].run_id,
+        rig.runs()[0].id,
+        "the engine got the run id of the history row"
+    );
     assert!(
         calls[0].verify_loads_before > before,
         "the approval was verified by the gate before the engine ran"
@@ -89,11 +84,7 @@ fn a_queued_run_goes_through_the_gate_and_is_recorded() {
     assert_eq!(ops, 3);
     assert_eq!(rig.queue_len(), 0, "the entry left the queue");
     assert!(
-        rig.fx
-            .store
-            .with_read(|c| leases::all(c))
-            .unwrap()
-            .is_empty(),
+        rig.fx.store.with_read(leases::all).unwrap().is_empty(),
         "the lease was released"
     );
     let events = rig.event_texts(&a);
@@ -680,8 +671,26 @@ fn the_host_has_no_app_runtime_dependency() {
     }
 }
 
-#[allow(dead_code)]
-fn _unused(_: StopKind, _: NeedsReview, _: Outcome, _: RecheckState, _: AtomicUsize) {
-    let _ = (hosts::KIND_APP, controls::TTL_MS);
-    let _ = (RequestError::NotFound, QueueAnswer::Queued);
+/// No panic can come out of the host loop or the request functions (they run on the IPC path
+/// and on the loop thread): the code has no `unwrap`, `expect`, `panic!` or `unreachable!`.
+#[test]
+fn the_host_code_cannot_panic_on_its_own() {
+    for (name, text) in host_sources() {
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for needle in [".unwrap()", ".expect(", "panic!(", "unreachable!("] {
+                assert!(!code.contains(needle), "{name}:{} uses {needle}", n + 1);
+            }
+        }
+    }
+}
+
+/// The host never builds a `GuardAck` (the native "yes" to a tripped delete guard exists only for
+/// a manual run): a guard that trips in an unattended run fails the run (SP-5.1).
+#[test]
+fn the_host_never_acknowledges_a_tripped_guard() {
+    for (name, text) in host_sources() {
+        assert!(!text.contains("GuardAck"), "{name}");
+        assert!(!text.contains("from_native_yes"), "{name}");
+    }
 }

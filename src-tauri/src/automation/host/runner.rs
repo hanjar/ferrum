@@ -17,8 +17,7 @@ use super::{
     Active, EngineCall, HostDeps, HostEvent, Inner, MAX_RERUN_STREAK, ProgressEvent,
     RERUN_DELAY_MS, RETRY_GAP_MS, State, StopKind,
 };
-use crate::automation::model::{DeletePolicy, ProfilePolicy, Runtime, Trigger};
-use crate::automation::policy::NeedsReview;
+use crate::automation::model::{DeletePolicy, ProfilePolicy, Trigger};
 use crate::automation::status::review_label;
 use crate::automation::store::automations::{self, EventKind};
 use crate::automation::store::controls::{self, Action};
@@ -263,13 +262,25 @@ fn refuse<D: HostDeps>(
                     | GateRefusal::WrongRuntime
             )
         {
-            super::requeue::requeue_siblings(conn, inner.deps.keys(), &[entry.clone()], now)?;
+            super::requeue::requeue_siblings(
+                conn,
+                inner.deps.keys(),
+                std::slice::from_ref(entry),
+                now,
+            )?;
         }
         Ok(removed)
     });
     match result {
         Ok(_) => Attempt::Gone,
-        Err(_) => Attempt::Kept,
+        Err(_) => {
+            // The store refused the bookkeeping: try again in a few seconds, not every tick.
+            inner
+                .lock()
+                .next_try
+                .insert(entry.id, now.saturating_add(RETRY_GAP_MS));
+            Attempt::Kept
+        }
     }
 }
 
@@ -506,7 +517,13 @@ fn run_entry<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, proof: Gate
         Ok(Some(id)) => id,
         // Withdrawn meanwhile, or the store failed: nothing started, the lease goes with `proof`.
         Ok(None) => return Attempt::Gone,
-        Err(_) => return Attempt::Kept,
+        Err(_) => {
+            inner
+                .lock()
+                .next_try
+                .insert(entry.id, now.saturating_add(RETRY_GAP_MS));
+            return Attempt::Kept;
+        }
     };
     if let Some(lease) = proof.lease() {
         lease.attach_run(run_id);
@@ -1145,6 +1162,3 @@ pub(super) fn recheck<D: HostDeps>(inner: &Arc<Inner<D>>, automation_id: &str, r
     });
     drop(proof);
 }
-
-#[allow(dead_code)]
-fn _kinds_are_used(_: Runtime, _: NeedsReview) {}

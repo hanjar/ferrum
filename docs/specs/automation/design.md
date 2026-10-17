@@ -1014,6 +1014,52 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
 - **Not changed:** schema v2 (no migration step); `automation_runtime.next_occurrence_ms` stays empty until P1.4.
 - **Additions to the P1.1 code:** `StoreError::Invalid`; `pause` also clears `pending_rerun` (RQ-8.2).
 
+### 9.6 P1.3 implementation notes (as built)
+
+- **Modules.** `automation/host.rs` (loop, election, controls, recovery) with `host/gate.rs` (the gate and its proof),
+  `host/runner.rs` (queue walk, one run, recheck, settle), `host/request.rs` (what the commands and controls ask),
+  `host/engine.rs` (the one door to the engine), `host/requeue.rs` (merged triggers), `host/prod.rs` (production deps).
+  The host is generic over `HostDeps`; `HostClass::App` is wired by `lib.rs`, `HostClass::Background` is only
+  constructed by tests until P3.1. A host executes only automations of its class.
+- **The gate is a type.** `gate()` is the only function that can build a `GateOk` (private fields, no constructor, not
+  `Clone`). `HostDeps::run_engine` and `engine::run_gated` take `&GateOk`, so every run path - triggers, Run now, retry,
+  recheck, catch-up, pending rerun - reaches the engine only after `policy::verify` (design §10.4). Source tests keep the
+  engine's request type out of every other host file and keep `GateOk {` out of every file but `gate.rs`; the same tests
+  forbid `GuardAck` in the host (an unattended tripped guard fails the run). `verify` runs twice per gate: before the
+  folder probes and the lease, and again after them, and the run is refused (`Changed`) if the approval, profile
+  revision, configuration revision or hold moved in between. A recheck is gated too (`GateKind::Recheck`: read only, no
+  lease, may look at a paused automation).
+- **Refusals.** One reason per refusal, one event, never a file operation. Removed from the queue: paused, wrong runtime,
+  needs review, attention hold, a failed delete-policy prerequisite (recorded as a Failed run). Kept: unmet condition,
+  offline or swapped folder (status Waiting for device; identity mismatch waits too, per §10.4 step 7), busy folders,
+  a store error. Kept entries are logged once per reason and tried again after 5 s.
+- **Election** (`store/hosts.rs`). `claim` runs in one immediate transaction: an own row refreshes, a live foreign row
+  (beat <= 15 s and process alive) refuses, anything else is taken over. The host beats every 5 s; a process that does not
+  host asks every second. A host that lost its row stops starting runs but finishes the ones it has; their lease keeps the
+  folders safe.
+- **Recovery** (LC-6). On takeover a `Running` row of the host's class becomes Interrupted unless a LIVE lease still names
+  it (a stalled host keeps its run), and dead leases are deleted at once.
+- **Requests.** Run now and Retry queue directly for app automations (the toast needs the answer); background ones and
+  Stop, Pause & stop and Recheck are `controls` rows answered by the host that owns the run (`mark_handled`). A Stop
+  control stays pending until the run ends so the status line reads "Stopping after the current file". At most 10
+  controls per second per target (T5).
+- **Review items of P1.1** (`NTMS FER-524`): the approval key is replaced only after the user said Yes (Missing may still be
+  created before the dialog); lease coverage is checked per holder kind (`manual` for the webview-driven baseline
+  commands, the run's own kind for a run); the store refuses a nested call from inside one of its closures
+  (`StoreError::Unavailable`, plus `store::inside_closure()` for the engine call) instead of deadlocking, and
+  `KeyedAuth` documents the rule; `DeleteGuard::effective()` decides in the engine too; `baseline_gen` is created when a
+  store is opened; key backups never overwrite an older `.bak` (timestamped); a lock file that cannot be created is
+  logged with the OS error.
+- **Engine.** A run asks `lease.covers()` at least every 2 s (P0.2 review P3-12) in addition to `is_lost()`, between
+  operations and from the watcher that cancels a copy in flight.
+- **Not done here (open entry criteria of P0.2 review 2).** P3-2 (re-check the target at the commit of an in-place
+  overwrite) and P3-3 (restore the old target when a versioning overwrite fails or is cancelled) touch the copy engine
+  and the versioning tree; they are tracked separately. Until they land, the only trigger that can reach the engine is
+  a user's Run now, a retry or a queued entry written by hand: the scheduler (P1.4) and the watcher (P1.5) do not exist yet.
+- **Known limits.** One run at a time per host. The per-operation list of a run is written when the run ends (the live
+  view shows counts). Conditions: battery is read from Windows; a metered connection cannot be told yet, so a policy
+  that skips metered connections waits (fail closed) until OP-1.
+
 ## 10. Threat model and security controls
 
 ### 10.1 Assets, actors, trust boundaries

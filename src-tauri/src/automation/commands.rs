@@ -3002,3 +3002,7 @@ mod approval_tests;
 #[cfg(test)]
 #[path = "commands_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+#[path = "commands_host_tests.rs"]
+mod host_tests;

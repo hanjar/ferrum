@@ -242,7 +242,7 @@ mod tests {
             claim_in(&store, &me(2, 2_000), &probe),
             Claim::Held { by: holder(1) }
         );
-        let rows = store.with_read(|c| all(c)).unwrap();
+        let rows = store.with_read(all).unwrap();
         assert_eq!((rows.len(), rows[0].pid), (1, 1));
         // The host refreshes its own beat.
         assert_eq!(claim_in(&store, &me(1, 6_000), &probe), Claim::Refreshed);
@@ -311,7 +311,7 @@ mod tests {
         claim_in(&store, &me(1, 1_000), &probe);
         assert!(!store.with_read(|c| release(c, "app", holder(2))).unwrap());
         assert!(store.with_read(|c| release(c, "app", holder(1))).unwrap());
-        assert!(store.with_read(|c| all(c)).unwrap().is_empty());
+        assert!(store.with_read(all).unwrap().is_empty());
         // After a clean release anyone can host at once.
         assert!(matches!(
             claim_in(&store, &me(2, 1_001), &probe),

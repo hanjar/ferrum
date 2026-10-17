@@ -19,7 +19,7 @@ use crate::automation::store::leases::test_support::FakeProbe;
 use crate::automation::store::queue::{self, HostClass, NewEntry, TriggerKind};
 use crate::automation::store::{StoreError, runs};
 use crate::automation::test_run::{DryRun, TestDeps};
-use crate::automation::test_support::{Fixture, T0};
+use crate::automation::test_support::Fixture;
 use crate::sync_engine::env::EngineEnv;
 use crate::sync_engine::execute::{
     Counts, EngineError, EngineOutcome, EngineReport, OpRecord, SettleState,
@@ -33,9 +33,6 @@ use crate::sync_engine::test_support::test_env;
 pub struct CountingKeys {
     inner: Arc<dyn ApprovalKeys>,
     pub loads: AtomicUsize,
-    /// Called after every load with the new count (tests tamper with the store between the
-    /// first and the second verification of one gate).
-    pub after_load: Mutex<Option<Box<dyn Fn(usize) + Send>>>,
 }
 
 impl CountingKeys {
@@ -43,7 +40,6 @@ impl CountingKeys {
         Arc::new(Self {
             inner,
             loads: AtomicUsize::new(0),
-            after_load: Mutex::new(None),
         })
     }
 
@@ -54,12 +50,8 @@ impl CountingKeys {
 
 impl ApprovalKeys for CountingKeys {
     fn load(&self) -> KeyLoad {
-        let n = self.loads.fetch_add(1, Ordering::SeqCst) + 1;
-        let out = self.inner.load();
-        if let Some(hook) = self.after_load.lock().unwrap().as_ref() {
-            hook(n);
-        }
-        out
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        self.inner.load()
     }
 
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError> {
@@ -412,6 +404,24 @@ impl Rig {
         )
     }
 
+    /// A host over another store (a read-only one, for example).
+    pub fn host_on(
+        &self,
+        store: Arc<crate::automation::store::Store>,
+        pid: i64,
+        class: HostClass,
+    ) -> Host<FakeDeps> {
+        Host::new(
+            store,
+            FakeDeps {
+                world: self.world.clone(),
+                lease_env: self.lease_env(pid),
+            },
+            class,
+            "0.2.0",
+        )
+    }
+
     pub fn now(&self) -> i64 {
         self.world.clock.load(Ordering::SeqCst)
     }
@@ -594,7 +604,7 @@ impl Rig {
     pub fn queue_len(&self) -> usize {
         self.fx
             .store
-            .with_read(|c| queue::all(c))
+            .with_read(queue::all)
             .map(|v| v.len())
             .unwrap()
     }
@@ -658,7 +668,7 @@ impl Rig {
     }
 
     pub fn host_rows(&self) -> Vec<HostRow> {
-        self.fx.store.with_read(|c| hosts::all(c)).unwrap()
+        self.fx.store.with_read(hosts::all).unwrap()
     }
 }
 
@@ -680,5 +690,3 @@ pub fn tick(host: &Host<FakeDeps>) {
     host.tick();
     settle(host);
 }
-
-pub const START: i64 = T0;

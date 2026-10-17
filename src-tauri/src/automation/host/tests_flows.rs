@@ -16,7 +16,7 @@ use crate::automation::store::queue::{self, TriggerKind};
 use crate::automation::store::runs::{self, NewRun, Outcome, RecheckState, RunHost};
 use crate::automation::store::{StoreError, controls, runtime};
 use crate::sync_engine::InterruptReason;
-use crate::sync_engine::execute::{Counts, EngineOutcome, Phase};
+use crate::sync_engine::execute::{Counts, Phase};
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -580,7 +580,7 @@ fn a_folder_that_disappears_mid_run_waits_for_the_device_without_attention() {
     assert_eq!(run.outcome, Some(Outcome::Interrupted));
     assert!(attention_of(&rig, &a).is_none(), "RQ-7.4 / RQ-9.2");
     assert_eq!(rig.status_kind(&a), StatusKind::Device);
-    let entry = rig.fx.store.with_read(|c| queue::all(c)).unwrap();
+    let entry = rig.fx.store.with_read(queue::all).unwrap();
     assert_eq!(entry.len(), 1);
     assert_eq!(
         entry[0].kind,
@@ -680,13 +680,7 @@ fn a_panic_in_the_engine_fails_the_run_and_frees_the_lease() {
     assert_eq!(run.outcome, Some(Outcome::Failed));
     assert!(run.error_text.unwrap().contains("stopped unexpectedly"));
     assert_eq!(rig.status_kind(&a), StatusKind::Attention);
-    assert!(
-        rig.fx
-            .store
-            .with_read(|c| leases::all(c))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(rig.fx.store.with_read(leases::all).unwrap().is_empty());
     assert!(host.is_idle());
 }
 
@@ -875,11 +869,7 @@ fn a_run_left_running_by_a_dead_host_becomes_interrupted_and_its_lease_is_freed(
         "an interrupted run holds nothing (RQ-9.2)"
     );
     assert!(
-        rig.fx
-            .store
-            .with_read(|c| leases::all(c))
-            .unwrap()
-            .is_empty(),
+        rig.fx.store.with_read(leases::all).unwrap().is_empty(),
         "the dead host's lease is gone"
     );
     assert!(
@@ -1036,10 +1026,10 @@ fn merged_triggers_move_to_a_healthy_sibling_when_the_owner_is_paused() {
             .map(|_| ())
         })
         .unwrap();
-    let before = rig.fx.store.with_read(|c| queue::all(c)).unwrap();
+    let before = rig.fx.store.with_read(queue::all).unwrap();
     assert_eq!((before.len(), before[0].merged_count), (1, 1));
     approval_pause(&rig, &owner);
-    let after = rig.fx.store.with_read(|c| queue::all(c)).unwrap();
+    let after = rig.fx.store.with_read(queue::all).unwrap();
     assert_eq!(after.len(), 1, "the merged trigger survived");
     assert_eq!(after[0].automation_id, sibling);
     assert_eq!(after[0].kind, TriggerKind::Watch);
@@ -1078,7 +1068,7 @@ fn merged_triggers_move_when_the_owner_is_held_or_in_review_at_the_gate() {
     set_attention(&rig, &owner, 4);
     tick(&host);
     assert!(rig.world.calls().is_empty(), "the held owner did not run");
-    let entries = rig.fx.store.with_read(|c| queue::all(c)).unwrap();
+    let entries = rig.fx.store.with_read(queue::all).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].automation_id, sibling);
     rig.advance(1_000);
@@ -1147,7 +1137,7 @@ fn deleting_the_owner_moves_merged_triggers_too() {
         rig.fx.clock(),
     )
     .unwrap();
-    let entries = rig.fx.store.with_read(|c| queue::all(c)).unwrap();
+    let entries = rig.fx.store.with_read(queue::all).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].automation_id, sibling);
 }
@@ -1242,5 +1232,110 @@ fn a_change_made_elsewhere_is_announced_within_two_seconds() {
     assert!(all.last().unwrap() > first.last().unwrap());
 }
 
-#[allow(dead_code)]
-fn _keep(_: EngineOutcome) {}
+// ── More gate and lifecycle cases ──
+
+/// A lost or replaced key means no approval verifies: the gate refuses with a review reason.
+#[test]
+fn a_missing_approval_key_stops_every_run_at_the_gate() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("No key");
+    let host = rig.host(1, HostClass::App);
+    rig.fx
+        .memory
+        .as_ref()
+        .unwrap()
+        .set(crate::automation::dpapi::KeyLoad::Missing);
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    assert!(rig.world.calls().is_empty());
+    assert_eq!(rig.status_kind(&a), StatusKind::Review);
+    assert!(
+        rig.event_texts(&a)
+            .iter()
+            .any(|e| e.contains("Approval key unavailable")),
+        "{:?}",
+        rig.event_texts(&a)
+    );
+}
+
+/// RQ-5 (data): while the engine works, the run row carries the phase and the counts, so the
+/// status reads "Running 1/3", and the shell gets progress events (privacy tested elsewhere).
+#[test]
+fn counts_and_phase_are_recorded_while_the_engine_runs() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Progress");
+    let host = rig.host(1, HostClass::App);
+    let release = Arc::new(AtomicBool::new(false));
+    {
+        let release = release.clone();
+        rig.world.set_script(script(move |_, call| {
+            call.sink.phase(Phase::Comparing);
+            call.sink.phase(Phase::Syncing);
+            call.sink.counts(&Counts {
+                total: 3,
+                done: 1,
+                not_started: 2,
+                ..Counts::default()
+            });
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            completed(3)
+        }));
+    }
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    host.tick();
+    wait_until("progress written", || rig.status_label(&a) == "Running 1/3");
+    let run = rig.runs()[0].clone();
+    assert_eq!(run.phase, runs::Phase::Sync);
+    assert_eq!(
+        (run.ops_total, run.counts.ok, run.counts.not_started),
+        (3, 1, 2)
+    );
+    release.store(true, Ordering::SeqCst);
+    drive(&host);
+    assert_eq!(rig.runs()[0].outcome, Some(Outcome::Completed));
+}
+
+/// LC-3: an older binary facing a newer store never hosts and never writes.
+#[test]
+fn a_read_only_store_never_hosts() {
+    let rig = Rig::new();
+    let dir = tempfile::tempdir().unwrap();
+    crate::automation::store::Store::open(dir.path(), "0.2.0");
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("automation.db")).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+    }
+    let store = Arc::new(crate::automation::store::Store::open(dir.path(), "0.2.0"));
+    let host = rig.host_on(store, 1, HostClass::App);
+    host.tick();
+    settle(&host);
+    assert!(!host.is_hosting());
+    assert!(rig.world.calls().is_empty());
+}
+
+/// Deleting an automation while its run is going stops the run (its history stays).
+#[test]
+fn deleting_an_automation_stops_its_run() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Deleted mid-run");
+    let host = rig.host(1, HostClass::App);
+    rig.world
+        .set_script(blocking(Arc::new(AtomicBool::new(false)), 1, 3));
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    host.tick();
+    wait_until("run active", || !host.active_runs().is_empty());
+    let run_id = host.active_runs()[0];
+    crate::automation::approval::delete_in(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.fx.clock())
+        .unwrap();
+    drive(&host);
+    let row = run_row(&rig, run_id);
+    assert_eq!(row.outcome, Some(Outcome::Cancelled));
+    assert!(
+        row.note.as_deref().unwrap_or("").contains("was deleted"),
+        "{:?}",
+        row.note
+    );
+    assert_eq!(rig.queue_len(), 0);
+}
