@@ -513,6 +513,9 @@ fn background_automations_need_a_live_runner() {
         (r.runtime.as_str(), r.runtime_note.as_str()),
         ("background", "Background runner")
     );
+    // Run now is dimmed with the reason while the runner is down.
+    assert!(!r.can_run_now);
+    assert_eq!(r.run_now_reason.as_deref(), Some("Runner not running"));
     // A live runner heartbeat ends it; a stale one does not count.
     let beat = |at: i64| HostRow {
         kind: "runner".into(),
@@ -527,6 +530,7 @@ fn background_automations_need_a_live_runner() {
     assert_eq!(row(&fx, &id, T0).status.kind, StatusKind::Warn);
     write(&fx, |c| hosts::beat(c, &beat(T0 - 5_000)));
     assert_eq!(row(&fx, &id, T0).status.kind, StatusKind::Watching);
+    assert!(row(&fx, &id, T0).can_run_now);
     // The app host's heartbeat is not the runner's.
     write(&fx, |c| {
         hosts::beat(
@@ -1079,4 +1083,67 @@ fn trigger_summaries_read_like_the_prototype() {
         watch(false, true, false, true),
         "Watches the right folder \u{b7} runs when a folder comes back"
     );
+}
+
+// ── Rework 1 ──
+
+/// B1: the Queued chip follows the AUTOMATION's own entry (design 9.1), not the profile's.
+#[test]
+fn the_queued_chip_belongs_to_the_automation_that_owns_the_entry() {
+    let fx = Fixture::new();
+    let (p, a) = one_watch(&fx, "Projects watch");
+    let b = fx.new_automation("Same folders, other trigger", &p, Fixture::daily());
+    queue_up(&fx, &a, &p, "Changes detected", T0);
+    assert_eq!(status(&fx, &a, T0).0, StatusKind::Queued);
+    // B shares the profile but has no entry of its own: it shows its trigger state ...
+    assert_eq!(status(&fx, &b, T0).0, StatusKind::Scheduled);
+    // ... a paused B stays Paused ...
+    approval::pause_in(&fx.store, &b, PauseMode::Finish, fx.clock()).unwrap();
+    assert_eq!(status(&fx, &b, T0).0, StatusKind::Paused);
+    assert_eq!(status(&fx, &a, T0).0, StatusKind::Queued);
+    // ... and a held B says Needs attention.
+    let run = start(&fx, &b, "Same folders, other trigger", &p, T0 + 1);
+    let counts = RunCounts {
+        failed: 1,
+        ..Default::default()
+    };
+    end(&fx, run, Outcome::Failed, counts, 1, T0 + 2);
+    assert_eq!(status(&fx, &b, T0 + 3).0, StatusKind::Attention);
+    // The detail of B still lists the profile's one waiting entry.
+    let d = get_in(&fx.store, fx.keys.as_ref(), T0 + 3, &b).unwrap();
+    assert_eq!(d.waiting.len(), 1);
+    assert_eq!(d.waiting[0].automation_id, a);
+}
+
+/// N7: approving again or resuming never releases an attention hold; only a recheck or retry does.
+#[test]
+fn approve_and_resume_keep_the_attention_hold() {
+    let fx = Fixture::new();
+    let (p, a) = one_watch(&fx, "Projects watch");
+    let run = start(&fx, &a, "Projects watch", &p, T0);
+    let counts = RunCounts {
+        ok: 1,
+        failed: 1,
+        ..Default::default()
+    };
+    end(&fx, run, Outcome::Partial, counts, 2, T0 + 1);
+    let held = |fx: &Fixture| row(fx, &a, T0 + 10).attention.map(|h| h.run_id);
+    assert_eq!(held(&fx), Some(run));
+    // Pause and resume (native confirmation answered yes).
+    approval::pause_in(&fx.store, &a, PauseMode::Finish, fx.clock()).unwrap();
+    approval::set_enabled_in(&fx.store, &a, true, &fx.deps(), |_| true).unwrap();
+    assert_eq!(held(&fx), Some(run), "resume keeps the hold");
+    // Re-approval of an edited automation.
+    let mut policy = Fixture::watch();
+    policy.retries = 1;
+    let draft = Fixture::auto_draft("Projects watch", &p, policy);
+    let test = fx.test(Some(&a), &draft);
+    fx.approve(Some(&a), Some(1), &draft, &test.test_id, true);
+    assert_eq!(held(&fx), Some(run), "re-approval keeps the hold");
+    assert_eq!(row(&fx, &a, T0 + 10).status.kind, StatusKind::Attention);
+    // A recheck/retry (resolve) releases it.
+    write(&fx, |c| {
+        runs::resolve(c, run, None, "Resolved in Sync by you", T0 + 20).map(|_| ())
+    });
+    assert_eq!(held(&fx), None);
 }

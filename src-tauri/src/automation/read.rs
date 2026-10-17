@@ -8,8 +8,9 @@
 //! `canRunNow` / `showReview` are UI hints - the gate checks the approval again on every run.
 //!
 //! Rules for what crosses IPC: no lease id, no MAC, no key material (the approval row is only
-//! read for its profile revision); every request type refuses unknown fields; ids, cursors, offsets
-//! and page sizes are validated before the store is touched; no path through here panics.
+//! read for its profile revision); arguments arrive flat like the P1.1 commands (Tauri ignores extra keys, so
+//! there is no unknown-field refusal on the wire); what protects the store is the validation of
+//! every value - ids, cursors, offsets and page sizes - before it is touched; no path through here panics.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -214,17 +215,18 @@ fn load_world(
         let review = match policy::verify(conn, &snapshot_keys, &a.id) {
             Ok(Verdict::Valid) => None,
             Ok(Verdict::NeedsReview(r)) => Some(r),
-            // A store failure while verifying never reads as "valid".
-            Err(_) => Some(NeedsReview::PolicyChanged),
+            // A store failure while verifying never reads as "valid"; it is shown as an
+            // unverifiable approval (generic wording), not as an edit by the user.
+            Err(_) => Some(NeedsReview::KeyUnavailable),
         };
         reviews.insert(a.id.clone(), review);
         if let Some(ap) = approvals::get(conn, &a.id)? {
             approved_revisions.insert(a.id.clone(), ap.profile_revision);
         }
     }
-    let runner_live = hosts::all(conn)?
-        .iter()
-        .any(|h| h.kind == "runner" && now_ms - h.last_beat_ms <= hosts::LIVE_WINDOW_MS);
+    let runner_live = hosts::all(conn)?.iter().any(|h| {
+        h.kind == "runner" && now_ms.saturating_sub(h.last_beat_ms) <= hosts::LIVE_WINDOW_MS
+    });
     Ok(World {
         automations,
         profiles: profile_map,
@@ -426,7 +428,9 @@ fn build(world: &World, rec: &AutomationRecord, now_ms: i64) -> Built {
     let queued = world
         .queue
         .iter()
-        .find(|q| q.profile_id == rec.profile_id)
+        // Per AUTOMATION (design 9.1: "queued entry for this automation"): another automation
+        // on the same profile that is paused, held or in review keeps its own chip.
+        .find(|q| q.automation_id == rec.id)
         .map(|_| {
             if trigger == TriggerState::Device {
                 QueueWait::Device
@@ -439,8 +443,8 @@ fn build(world: &World, rec: &AutomationRecord, now_ms: i64) -> Built {
 
     let overlap_run_active = world.blocker(&rec.profile_id, Some(&rec.id)).is_some();
     let quiet_secs = rt.as_ref().and_then(|r| r.quiet_until_ms).map(|until| {
-        let left = (until - now_ms).max(0);
-        u64::try_from((left + 999) / 1000).unwrap_or(0)
+        let left = until.saturating_sub(now_ms).max(0);
+        u64::try_from(left.saturating_add(999) / 1000).unwrap_or(0)
     });
     let attention = rt.as_ref().and_then(|r| r.attention.clone());
     let input = StatusInput {
@@ -467,8 +471,10 @@ fn build(world: &World, rec: &AutomationRecord, now_ms: i64) -> Built {
     };
     let status = status::compute(&input);
 
+    let runner_down = background && !world.runner_live;
     let (can_run_now, run_now_reason) = match (&input.review, &attention, rec.enabled) {
         (Some(r), _, _) => (false, Some(status::review_label(r))),
+        (None, _, _) if runner_down => (false, Some("Runner not running".to_string())),
         (None, Some(a), _) => (false, Some(format!("{} \u{b7} new runs held", a.text))),
         (None, None, false) => (false, Some("Paused \u{2014} resume it first".to_string())),
         (None, None, true) => (true, None),
@@ -752,6 +758,7 @@ pub fn run_ops_in(store: &Store, req: &RunOpsRequest) -> Result<RunOpsDto, Comma
     store.with_read(|conn| -> Result<RunOpsDto, CommandError> {
         let run = runs::get(conn, req.run_id)?
             .ok_or_else(|| CommandError::new("not_found", "The run does not exist"))?;
+        let stored = runs::stored_ops(conn, req.run_id)?;
         let ops = runs::ops_page(conn, req.run_id, req.offset, req.limit)?
             .into_iter()
             .map(|o| RunOpDto {
@@ -768,8 +775,8 @@ pub fn run_ops_in(store: &Store, req: &RunOpsRequest) -> Result<RunOpsDto, Comma
         Ok(RunOpsDto {
             ops,
             // The true total never shrinks below what is stored.
-            total: run.ops_total.max(runs::stored_ops(conn, req.run_id)?),
-            stored: runs::stored_ops(conn, req.run_id)?,
+            total: run.ops_total.max(stored),
+            stored,
         })
     })
 }

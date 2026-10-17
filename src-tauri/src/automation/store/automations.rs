@@ -157,8 +157,9 @@ pub fn clear_queue(conn: &Connection, automation_id: &str) -> Result<usize, Stor
 }
 
 /// Fresh runtime row after an approval or a resume: the trigger starts from scratch (a watch
-/// trigger is `watching`, a schedule `scheduled`), counters and pending flags are cleared and any
-/// attention hold is dropped (design §8.2, SP-6.4).
+/// trigger is `watching`, a schedule `scheduled`), counters and pending flags are cleared. An attention
+/// hold is KEPT: only a resolved recheck or retry releases it (RQ-10.3/10.4; design 9.2 resets the
+/// trigger state, not the hold), so approving or resuming cannot be used to walk around it.
 pub fn reset_runtime(
     conn: &Connection,
     automation_id: &str,
@@ -172,7 +173,7 @@ pub fn reset_runtime(
          ON CONFLICT(automation_id) DO UPDATE SET
            host_class = ?2, trigger_state = ?3, state_since_ms = ?4,
            quiet_until_ms = NULL, burst_started_ms = NULL, pending_rerun = 0,
-           check_reason = NULL, attention = NULL, next_occurrence_ms = NULL, updated_ms = ?4",
+           check_reason = NULL, next_occurrence_ms = NULL, updated_ms = ?4",
         params![automation_id, host_class, trigger_state, now_ms],
     )
     .map(|_| ())

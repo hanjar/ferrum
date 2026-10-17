@@ -331,8 +331,9 @@ Source of truth: `src-tauri/src/automation/{status,read,dto}.rs` + `automation/s
 `contract-fixtures/automation/automation-{list,get,history,run-ops,events}*.json`, read by both test suites.
 All five commands are **read-only**: they take no flag that could stand for a confirmation or an
 authorization, write nothing (not even `change_seq`), and never create or replace the approval key. Requests
-are flat top-level arguments; the backend assembles them into strict request types (`deny_unknown_fields`) and
-validates ids (lowercase UUID v4), cursors (>= 1), offsets and page sizes before it touches the store
+are flat top-level arguments like the P1.1 commands; Tauri ignores extra keys, so there is no unknown-field
+refusal on the wire (the internal request structs are `deny_unknown_fields` for callers that deserialize a whole
+request). What protects the store is the validation of every value: the backend validates ids (lowercase UUID v4), cursors (>= 1), offsets and page sizes before it touches the store
 (`invalid_input`); an unknown automation or run is `not_found`.
 
 | Command              | Payload                                                           | Result                            | Notes                                                                                    |

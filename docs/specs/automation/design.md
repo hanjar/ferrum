@@ -998,6 +998,19 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
 - **Events are ordered and paged by `id`** (insertion order), not `at_ms`: a clock that steps back cannot reorder
   the log or hide an entry from a page. Pruning keeps the newest 200 by `id`.
 - **Controls** older than 10 minutes, or stamped more than 60 s ahead of the reader, are ignored and swept.
+- **Queued chip is per automation** (`queue.automation_id`), as 9.1 says; the detail's `waiting` list is per
+  profile (the one entry all automations of the profile share).
+- **Attention survives approve and resume** (`reset_runtime` no longer clears it): only a resolved recheck or
+  retry releases a hold (RQ-10.3/10.4).
+- **For P1.3 (merged entries):** one entry per profile can carry triggers of another automation that was merged
+  into it. When the entry is removed because its owner is paused, held (attention) or in review, the host must
+  re-enqueue the triggers of the OTHER automations of that profile that are still enabled and verified, or the
+  merge would silently drop them. `UNIQUE(profile_id)` rules out a separate entry, and merging into an entry
+  whose owner is held cannot be refused without losing the trigger, so the re-enqueue is the host's job.
+- **`canRunNow`** is false with "Runner not running" for a background automation while the runner is down. A
+  store failure while verifying shows as "Approval key unavailable" (generic, still fail-closed).
+- **No new index on `runs`:** pages order by `id`; the existing `runs_by_auto` index still narrows by automation
+  and the table holds one row per run, so no v3 migration was added for it.
 - **Not changed:** schema v2 (no migration step); `automation_runtime.next_occurrence_ms` stays empty until P1.4.
 - **Additions to the P1.1 code:** `StoreError::Invalid`; `pause` also clears `pending_rerun` (RQ-8.2).
 

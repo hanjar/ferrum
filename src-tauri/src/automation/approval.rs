@@ -524,7 +524,7 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
             },
         )?;
         // An edited or re-approved automation starts from a clean slate: no queued entry from the
-        // old configuration, no countdown, no attention hold.
+        // old configuration, no countdown. An attention hold stays until a recheck or retry resolves it.
         automations::clear_queue(&tx, &automation_id)?;
         let trigger_state = match &validated.policy.trigger {
             model::Trigger::Schedule(_) => "scheduled",
