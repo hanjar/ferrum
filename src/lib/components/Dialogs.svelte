@@ -386,6 +386,7 @@
 
   async function submitDelete(paths: string[]) {
     busy = true;
+    if (d?.kind === 'delete') dialogs.beginDeleteRun(d);
     try {
       const report = await deleteEntries(paths, permanent);
       if (report.failed.length < report.requested) {
@@ -405,12 +406,18 @@
       activePane()?.refresh();
     } catch (e) {
       fail(e);
+    } finally {
+      dialogs.endDeleteRun();
     }
   }
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
+      // A sync-driven delete holds the folder lease through its dialog: closing the dialog
+      // settles it and releases the lease while the delete is still running (FER-549 R2-P3-3).
+      // Other dialogs keep closing on Escape as before.
+      if (busy && d?.kind === 'delete' && d.onSettled) return;
       dialogs.close();
     } else if (e.key === 'Enter' && !busy) {
       // FER-460 (review L7): in the scan offer, Enter on a focused button

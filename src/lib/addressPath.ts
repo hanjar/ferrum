@@ -7,6 +7,19 @@ export interface InputSplit {
   prefix: string;
 }
 
+/**
+ * FER-515 P3-5: a typed `\\?\C:\x` (verbatim) location is rewritten to the plain `C:\x` form at the
+ * UI boundary, so every path the panes hold (and later send to a mutating command) is one the Rust
+ * guard accepts. The guard itself stays strict: a verbatim spelling that is NOT a plain drive or
+ * UNC path (`\\?\GLOBALROOT\...`, `\\.\C:`) is left untouched and refused there.
+ */
+export function stripVerbatimPrefix(path: string): string {
+  const p = path.replace(/\//g, '\\');
+  if (/^\\\\\?\\UNC\\[^\\]+\\[^\\]+/i.test(p)) return '\\\\' + p.slice(8);
+  if (/^\\\\\?\\[A-Za-z]:(\\|$)/.test(p)) return p.slice(4);
+  return path;
+}
+
 export function splitInput(text: string): InputSplit {
   const i = Math.max(text.lastIndexOf('\\'), text.lastIndexOf('/'));
   return { folder: text.slice(0, i + 1), prefix: text.slice(i + 1) };

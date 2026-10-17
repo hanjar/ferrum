@@ -28,6 +28,7 @@ pub mod disk_usage;
 pub mod disk_usage_cache;
 pub mod domain;
 pub mod fast_scan;
+pub mod file_identity;
 pub mod file_tools;
 pub mod fs_service;
 pub mod hotlist;
@@ -48,6 +49,7 @@ pub mod preview_archive;
 pub mod preview_image;
 pub mod profile;
 pub mod properties;
+pub mod protected_dirs;
 pub mod rename_batch;
 pub mod search;
 pub mod selection_file;
@@ -258,15 +260,19 @@ pub fn run() {
         .manage(hotlist::store::Store::new())
         .manage(ai::commands::AiState::default())
         .manage(ai::approval::ApprovalLedger::new())
-        // A reload or crash recovery of the webview loses the JavaScript that holds manual sync
-        // lease tokens; release them so folders do not stay locked (Automation P0.4). Started =
-        // WebView2 ContentLoading: fires for every new document, including F5 / DevTools reload.
+        // A reload or full navigation of the webview (F5, DevTools reload) loses the JavaScript
+        // that holds manual sync lease tokens; release them so folders do not stay locked
+        // (Automation P0.4). Started = WebView2 ContentLoading: fires for every new document.
+        // There is no ProcessFailed handler: after a renderer crash nothing reloads by itself,
+        // and the leases stay until Ferrum exits (the process probe then lets the next acquire
+        // reclaim them). The hook runs on the UI thread, so it only drains the registry; the
+        // guards are dropped on a blocking worker.
         .on_page_load(|webview, payload| {
             use tauri::Manager;
             if payload.event() == tauri::webview::PageLoadEvent::Started
                 && let Some(state) = webview.try_state::<automation::commands::AutomationState>()
             {
-                automation::commands::release_manual_leases_on_page_load(&state);
+                automation::commands::release_manual_leases_on_page_load_async(&state);
             }
         })
         .setup(move |app| {
@@ -297,6 +303,26 @@ pub fn run() {
                 let _ = handle.emit("operations://progress", p);
             }));
             app.handle().manage(queue);
+            // FER-514 P3-7: the app's own state folders are off limits to the generic file ops.
+            // A folder that cannot be determined is logged, not dropped silently.
+            let protected: Vec<std::path::PathBuf> = [
+                ("config", profile::config_dir(app.handle())),
+                ("data", profile::data_dir(app.handle())),
+                ("activity", profile::activity_dir(app.handle())),
+                ("local data", profile::local_data_dir(app.handle())),
+                // The whole test-profile root when a smoke run isolates the profile (absent
+                // in a normal run, which is not worth a warning).
+                ("test profile", profile::profile_dir()),
+            ]
+            .into_iter()
+            .filter_map(|(name, dir)| {
+                if dir.is_none() && name != "test profile" {
+                    log::warn!("protected folder ({name}) could not be determined");
+                }
+                dir
+            })
+            .collect();
+            protected_dirs::register(protected);
             // FER-471: live copy-thread state for the progress dialog.
             let control_handle = app.handle().clone();
             copy_pool::set_state_sink(Box::new(move |state| {

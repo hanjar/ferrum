@@ -311,14 +311,10 @@ impl SyncBaselineStore {
 
     /// Simpan ATOMIK. Menolak root tak valid, baseline yang bukan milik pasangan ini, dan
     /// batas terlampaui (baseline lama dibiarkan).
-    /// UNGUARDED write, crate-private (a baseline is written only under a lease). Production code goes through
+    /// UNGUARDED write, private to this module (a baseline is written only under a lease). Production code goes through
     /// [`save_with_guard`] (a run) or [`save_with_lease`] (a command): only the lease holder writes
     /// a baseline (design §5.7). Integration tests use the leased path too.
-    pub(crate) fn save(
-        &self,
-        pair: &RootPair,
-        baseline: &BaselineDto,
-    ) -> Result<(), BaselineError> {
+    fn save(&self, pair: &RootPair, baseline: &BaselineDto) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {
@@ -359,9 +355,22 @@ impl SyncBaselineStore {
         write_atomic(dir, &target, &bytes).map_err(|_| err("io", "Could not write baseline"))
     }
 
-    /// Hapus baseline pasangan (kembali ke first-run). Idempotent. Crate-private like `save`:
+    /// Test-only seam for OTHER modules' tests that need a baseline on disk without taking a
+    /// lease. Production code cannot call it (it does not exist outside `cfg(test)`); `save`
+    /// itself is private to this module, so every non-test write goes through
+    /// [`save_with_lease`] or [`save_with_guard`].
+    #[cfg(test)]
+    pub(crate) fn save_unguarded_for_tests(
+        &self,
+        pair: &RootPair,
+        baseline: &BaselineDto,
+    ) -> Result<(), BaselineError> {
+        self.save(pair, baseline)
+    }
+
+    /// Hapus baseline pasangan (kembali ke first-run). Idempotent. Private like `save`:
     /// callers use [`clear_with_lease`].
-    pub(crate) fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
+    fn clear(&self, pair: &RootPair) -> Result<(), BaselineError> {
         let key = match pair_key(pair) {
             Ok(k) => k,
             Err(KeyError::Rejected) => {

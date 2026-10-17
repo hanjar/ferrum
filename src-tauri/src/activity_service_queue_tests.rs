@@ -28,6 +28,43 @@ fn record_visit_returns_before_the_worker_applies_it() {
 }
 
 #[test]
+fn flush_waits_for_a_stalled_worker_instead_of_timing_out() {
+    // FER-560: flush used to give up silently after a fixed deadline, so on a
+    // starved CI runner it returned while accepted receipts were still queued.
+    // Stall the worker on the store lock, release it from another thread after
+    // a delay, and require flush to outlast the stall.
+    let dir = tempfile::tempdir().unwrap();
+    let service = ActivityService::open(dir.path()).unwrap();
+    let store = Arc::clone(&service.store);
+    let stall = Duration::from_millis(1500);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder_store = Arc::clone(&store);
+    let holder = std::thread::spawn(move || {
+        let guard = holder_store.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(stall);
+        drop(guard);
+    });
+    locked_rx.recv().unwrap();
+    let started = std::time::Instant::now();
+    for i in 0..(VISIT_BATCH * 3) {
+        service
+            .record_visit(&format!(r"C:\Work\Stalled{i}"), VisitKind::Folder)
+            .unwrap();
+    }
+    service.flush();
+    assert!(
+        started.elapsed() >= stall,
+        "flush returned before the worker ran"
+    );
+    assert_eq!(
+        store.lock().unwrap().episode_count().unwrap(),
+        (VISIT_BATCH * 3) as u64
+    );
+    holder.join().unwrap();
+}
+
+#[test]
 fn backlog_is_applied_in_order_and_batched() {
     let dir = tempfile::tempdir().unwrap();
     let service = ActivityService::open(dir.path()).unwrap();

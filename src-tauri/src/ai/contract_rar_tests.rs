@@ -1,6 +1,6 @@
 // FER-511: the AI surface must keep having NO path to the Rar.exe settings. The model can
 // neither name a rar/prefs capability (the intent enum is closed, `deny_unknown_fields`), nor
-// smuggle a `rarExePath` into a known intent, and `archive.create` stays zip-only — so
+// smuggle a `rarExePath` into a known intent, and `archive.create` rejects format "rar" (zip only) — so
 // `archive_rar_tool_set_path` / `save_prefs` are unreachable from every AI intent, and a later
 // capability added to the enum trips these tests until someone re-checks this boundary.
 use super::*;
@@ -76,9 +76,10 @@ fn archive_create_intent_cannot_carry_a_rar_exe_path() {
 }
 
 #[test]
-fn archive_create_stays_zip_only_even_with_a_path_injected() {
-    // The legacy mutating parser keeps rejecting format "rar" — the only format the model can
-    // produce never reaches the Rar.exe code path at all.
+fn archive_create_rejects_format_rar() {
+    // No path is injected here (that case is the test above). The legacy mutating parser rejects
+    // format "rar", so the model can only ask for zip and `archive.create` never reaches the
+    // Rar.exe code path at all.
     let envelope = json!({
         "schemaVersion": 1,
         "requestId": "req_1",

@@ -1,5 +1,5 @@
 /** Single action registry shared by menus, palette, shortcuts, and keybar. */
-import { ui, type Theme } from './uiState.svelte';
+import { ui, fullPageOpen, type Theme } from './uiState.svelte';
 import { activePane, inactivePane } from './stores/panesRegistry.svelte';
 import { dialogs } from './stores/dialogStore.svelte';
 import { ops } from './stores/opsStore.svelte';
@@ -1439,6 +1439,21 @@ export function getAction(id: string): Action | undefined {
 
 export function isEnabled(action: Action): boolean {
   return !!action.run && !action.disabledReason && (action.available?.() ?? true);
+}
+
+/**
+ * FER-561: the only actions whose keyboard shortcut still runs while a full page (Activity) covers
+ * the panes. Everything else touches files or the hidden active pane and is blocked.
+ */
+export const FULL_PAGE_SHORTCUT_IDS: ReadonlySet<string> = new Set([
+  'palette.open',
+  'app.settings',
+  'activity.open',
+]);
+
+/** True when a full page is open and this action's shortcut must not run. */
+export function shortcutBlockedByFullPage(action: Action): boolean {
+  return fullPageOpen() && !FULL_PAGE_SHORTCUT_IDS.has(action.id);
 }
 
 export function runAction(action: Action): boolean {

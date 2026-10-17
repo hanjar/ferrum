@@ -195,4 +195,30 @@ describe('FER-505/511: ArchiveSettingsSection component', () => {
     expect(archiveMocks.archiveRarToolSetPath).toHaveBeenCalledWith(null);
     expect(ui.rarExePath).toBeNull();
   });
+
+  it('FER-514: the stored path prefills the draft and is shown in the status line', async () => {
+    archiveMocks.archiveRarToolStatus.mockResolvedValue(READY);
+    const { getByTestId } = render(ArchiveSettingsSection);
+    await vi.waitFor(() =>
+      expect((getByTestId('rar-exe-path-input') as HTMLInputElement).value).toBe(READY.path),
+    );
+    expect(getByTestId('rar-status-path').textContent).toBe(READY.path);
+    expect(getByTestId('rar-status').textContent).toContain('siap digunakan');
+  });
+
+  it('FER-514: a stored path does not overwrite what the user is typing', async () => {
+    let release: (v: { path: string; state: string }) => void = () => {};
+    archiveMocks.archiveRarToolStatus.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    const { getByTestId } = render(ArchiveSettingsSection);
+    const input = getByTestId('rar-exe-path-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'D:\\typed\\Rar.exe' } });
+    release(READY);
+    await tick();
+    await tick();
+    expect(input.value).toBe('D:\\typed\\Rar.exe');
+  });
 });

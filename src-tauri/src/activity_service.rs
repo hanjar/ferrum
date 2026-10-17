@@ -1076,12 +1076,25 @@ impl ActivityService {
     }
 
     /// Blocks until identity jobs queued so far are applied (tests, shutdown).
+    /// There is no deadline: a loaded machine can legitimately take longer
+    /// than any fixed bound, and returning early would hand the caller a store
+    /// that is still missing accepted receipts. It only gives up when the
+    /// worker is gone, since nothing can be applied then.
     pub fn flush(&self) {
+        const WORKER_POLL: Duration = Duration::from_millis(100);
         let (ack, wait) = sync_channel(1);
         if let Some(jobs) = &self.jobs
             && jobs.send(Job::Flush(ack)).is_ok()
         {
-            let _ = wait.recv_timeout(Duration::from_secs(10));
+            while let Err(RecvTimeoutError::Timeout) = wait.recv_timeout(WORKER_POLL) {
+                if self
+                    .worker
+                    .as_ref()
+                    .is_none_or(std::thread::JoinHandle::is_finished)
+                {
+                    break;
+                }
+            }
         }
     }
 

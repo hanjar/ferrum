@@ -1,4 +1,6 @@
-use ferrum_activity_contract::{ActivityEntity, ActivityKind, ActivityReceipt, Availability, EntityKind};
+use ferrum_activity_contract::{
+    ActivityEntity, ActivityKind, ActivityReceipt, Availability, EntityKind,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -11,7 +13,10 @@ const SEARCH_POSTINGS_PER_GRAM: i64 = 100;
 const TOKEN_MARK: char = '\u{1}';
 const TOKEN_MAX_CHARS: usize = 64;
 /// Initials entries (`Quarterly Business Review` -> `qbr`) use this mark.
-const INITIALS_MARK: char = match char::from_u32(2) { Some(c) => c, None => '?' };
+const INITIALS_MARK: char = match char::from_u32(2) {
+    Some(c) => c,
+    None => '?',
+};
 /// Query words that get a prefix seek (the rest are covered by grams).
 const SEARCH_PREFIX_WORDS: usize = 4;
 /// Seeks per query; 8 keeps 1–2-edit typos of 8-gram queries fully covered
@@ -458,11 +463,26 @@ impl ActivityStore {
             // Identity reconciliation (ACT-06). Every step is idempotent so a
             // database whose user_version was lowered by hand migrates cleanly.
             for (column, ddl) in [
-                ("locator_key", "ALTER TABLE activity_entities ADD COLUMN locator_key TEXT"),
-                ("platform_id", "ALTER TABLE activity_entities ADD COLUMN platform_id TEXT"),
-                ("identity", "ALTER TABLE activity_entities ADD COLUMN identity TEXT NOT NULL DEFAULT 'path'"),
-                ("relocated", "ALTER TABLE activity_entities ADD COLUMN relocated INTEGER NOT NULL DEFAULT 0"),
-                ("checked_utc_ms", "ALTER TABLE activity_entities ADD COLUMN checked_utc_ms INTEGER"),
+                (
+                    "locator_key",
+                    "ALTER TABLE activity_entities ADD COLUMN locator_key TEXT",
+                ),
+                (
+                    "platform_id",
+                    "ALTER TABLE activity_entities ADD COLUMN platform_id TEXT",
+                ),
+                (
+                    "identity",
+                    "ALTER TABLE activity_entities ADD COLUMN identity TEXT NOT NULL DEFAULT 'path'",
+                ),
+                (
+                    "relocated",
+                    "ALTER TABLE activity_entities ADD COLUMN relocated INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "checked_utc_ms",
+                    "ALTER TABLE activity_entities ADD COLUMN checked_utc_ms INTEGER",
+                ),
             ] {
                 let present: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('activity_entities') WHERE name = ?1",
@@ -760,8 +780,7 @@ impl ActivityStore {
                 } else {
                     *start - occurred < EPISODE_WINDOW_MS
                 }
-            })
-        {
+            }) {
             tx.execute(
                 "UPDATE activity_episodes SET last_utc_ms = MAX(last_utc_ms, ?1), start_utc_ms = MIN(start_utc_ms, ?1) WHERE id = ?2",
                 params![occurred, id],
@@ -896,7 +915,8 @@ impl ActivityStore {
         let mut result = Vec::new();
         if from < until {
             let cutoff = i64::try_from(cutoff).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let mut statement = tx.prepare(&
+            let mut statement = tx.prepare(
+                &
                 // Reads the materialized per-entity rollup (schema v9): an
                 // indexed top-N instead of aggregating every episode.
                 "SELECT e.metadata, s.last_utc_ms, s.episodes
@@ -1236,7 +1256,10 @@ impl ActivityStore {
             })?;
             for row in rows {
                 let (entity_id, day, last, count) = row?;
-                if allowed.as_ref().is_some_and(|set| !set.contains(&entity_id)) {
+                if allowed
+                    .as_ref()
+                    .is_some_and(|set| !set.contains(&entity_id))
+                {
                     continue;
                 }
                 accumulate(entity_id, day, last, count);
@@ -1364,10 +1387,8 @@ impl ActivityStore {
                         ],
                         id_column,
                     )?,
-                    None => plain.query_map(
-                        params![kind_str, gram, SEARCH_POSTINGS_PER_GRAM],
-                        id_column,
-                    )?,
+                    None => plain
+                        .query_map(params![kind_str, gram, SEARCH_POSTINGS_PER_GRAM], id_column)?,
                 };
                 for id in rows {
                     *counts.entry(id?).or_default() += 1;
@@ -1542,10 +1563,10 @@ impl ActivityStore {
                    AND last_utc_ms >= ?3 AND last_utc_ms <= ?4",
             )?;
             for id in ids {
-                let (episodes, days, last): (u64, u64, Option<i64>) = statement.query_row(
-                    params![id, kind_name(&kind), from, now],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
+                let (episodes, days, last): (u64, u64, Option<i64>) = statement
+                    .query_row(params![id, kind_name(&kind), from, now], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
                 if let Some(last) = last {
                     result.insert(
                         id.clone(),
@@ -1827,7 +1848,10 @@ impl ActivityStore {
                 [&id],
             )?;
             tx.execute("DELETE FROM activity_daily WHERE entity_id = ?1", [&id])?;
-            tx.execute("DELETE FROM activity_entity_rank WHERE entity_id = ?1", [&id])?;
+            tx.execute(
+                "DELETE FROM activity_entity_rank WHERE entity_id = ?1",
+                [&id],
+            )?;
         }
         tx.execute(
             "DELETE FROM activity_hidden WHERE entity_id NOT IN (SELECT id FROM activity_entities)",
@@ -1891,13 +1915,15 @@ impl ActivityStore {
     }
 
     pub fn identity_state(&self, entity_id: &str) -> rusqlite::Result<Option<IdentityState>> {
-        Ok(load(&self.connection, entity_id)?.map(|stored| IdentityState {
-            attached: stored.key.is_some(),
-            entity: stored.entity,
-            confidence: stored.confidence,
-            platform_id: stored.platform_id,
-            checked_utc_ms: stored.checked.and_then(|value| u64::try_from(value).ok()),
-        }))
+        Ok(
+            load(&self.connection, entity_id)?.map(|stored| IdentityState {
+                attached: stored.key.is_some(),
+                entity: stored.entity,
+                confidence: stored.confidence,
+                platform_id: stored.platform_id,
+                checked_utc_ms: stored.checked.and_then(|value| u64::try_from(value).ok()),
+            }),
+        )
     }
 
     /// Applies a rename/move/copy/delete receipt. Rename/move transfer the
@@ -1927,8 +1953,7 @@ impl ActivityStore {
             && matches!(change.kind, FsChangeKind::Rename | FsChangeKind::Move)
         {
             let to_key = locator_key(to);
-            if volume == change.from_volume_id && to_key != from_key && inside(&to_key, &from_key)
-            {
+            if volume == change.from_volume_id && to_key != from_key && inside(&to_key, &from_key) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
@@ -2428,17 +2453,17 @@ fn rank_key(days: &[(i64, u64)]) -> (f64, u64) {
     ((key * 1e9).round() / 1e9, days.len() as u64)
 }
 
-fn refresh_rank(
-    tx: &Connection,
-    entity_id: &str,
-    kind: &str,
-) -> rusqlite::Result<()> {
+fn refresh_rank(tx: &Connection, entity_id: &str, kind: &str) -> rusqlite::Result<()> {
     let days = {
         let mut query = tx.prepare_cached(
             "SELECT utc_day, episodes, last_utc_ms FROM activity_daily WHERE entity_id = ?1 AND +kind = ?2",
         )?;
         let rows = query.query_map(params![entity_id, kind], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -2495,16 +2520,20 @@ fn refresh_rank_for_purged(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<(
         "INSERT INTO activity_entity_rank(entity_id, kind, rank_key, active_days, last_utc_ms)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
-    let mut flush = |id: &str, kind: &str, days: &[(i64, u64)], last: i64| -> rusqlite::Result<()> {
-        let (key, active) = rank_key(days);
-        insert.execute(params![id, kind, key, active, last])?;
-        Ok(())
-    };
+    let mut flush =
+        |id: &str, kind: &str, days: &[(i64, u64)], last: i64| -> rusqlite::Result<()> {
+            let (key, active) = rank_key(days);
+            insert.execute(params![id, kind, key, active, last])?;
+            Ok(())
+        };
     let mut current: Option<(String, String)> = None;
     let mut days: Vec<(i64, u64)> = Vec::new();
     let mut last = 0i64;
     for (id, kind, day, count, bucket_last) in rows {
-        if current.as_ref().is_none_or(|(cid, ckind)| *cid != id || *ckind != kind) {
+        if current
+            .as_ref()
+            .is_none_or(|(cid, ckind)| *cid != id || *ckind != kind)
+        {
             if let Some((cid, ckind)) = current.take() {
                 flush(&cid, &ckind, &days, last)?;
             }
@@ -2836,8 +2865,7 @@ fn relocate_subtree(
         };
         let is_root = row.key == plan.old_root_key;
         let old_name = stored.entity.display_name.clone();
-        let changed_place =
-            key != row.key || stored.entity.volume_id != plan.new_volume;
+        let changed_place = key != row.key || stored.entity.volume_id != plan.new_volume;
         stored.entity.volume_id = plan.new_volume.to_owned();
         stored.entity.parent_path = parent_of(&locator);
         stored.entity.locator = locator.clone();
@@ -2870,10 +2898,16 @@ fn relocate_subtree(
                 [&row.id],
             )?;
         }
-        conn.execute("DELETE FROM activity_aliases WHERE entity_id = ?1", [&row.id])?;
+        conn.execute(
+            "DELETE FROM activity_aliases WHERE entity_id = ?1",
+            [&row.id],
+        )?;
         if excluded(conn, &locator)? {
             conn.execute("DELETE FROM activity_entities WHERE id = ?1", [&row.id])?;
-            conn.execute("DELETE FROM activity_hidden WHERE entity_id = ?1", [&row.id])?;
+            conn.execute(
+                "DELETE FROM activity_hidden WHERE entity_id = ?1",
+                [&row.id],
+            )?;
             forgotten += 1;
         } else {
             moved += 1;
@@ -3075,7 +3109,9 @@ fn inside(key: &str, root: &str) -> bool {
 fn parent_of(locator: &str) -> String {
     let separator = if windows_like(locator) { '\\' } else { '/' };
     match locator.rfind(separator) {
-        Some(index) if windows_like(locator) && index <= 2 => locator[..3.min(locator.len())].to_owned(),
+        Some(index) if windows_like(locator) && index <= 2 => {
+            locator[..3.min(locator.len())].to_owned()
+        }
         Some(0) => "/".to_owned(),
         Some(index) => locator[..index].to_owned(),
         None => locator.to_owned(),
@@ -3155,9 +3191,8 @@ fn search_initials(text: &str) -> BTreeSet<String> {
     if words.len() < 2 {
         return keys;
     }
-    let initials = |slice: &[&str]| -> String {
-        slice.iter().filter_map(|w| w.chars().next()).collect()
-    };
+    let initials =
+        |slice: &[&str]| -> String { slice.iter().filter_map(|w| w.chars().next()).collect() };
     keys.insert(initials(&words));
     if let Some((number, preceding)) = words.split_last()
         && !preceding.is_empty()
@@ -3198,12 +3233,7 @@ fn scope_clause(k: usize, l: usize, h: usize) -> String {
         .replace("{h}", &h.to_string())
 }
 
-fn index_name(
-    tx: &Connection,
-    id: &str,
-    kind: &str,
-    name: &str,
-) -> rusqlite::Result<()> {
+fn index_name(tx: &Connection, id: &str, kind: &str, name: &str) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM activity_search_grams WHERE entity_id = ?1",
         [id],

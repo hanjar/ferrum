@@ -17,6 +17,16 @@
 //! - FER-510: only Rar.exe 7.00+ is accepted (probed after the fingerprint gate). Older builds
 //!   search `rarlng.dll` in the working directory — the user's source folder here — which is a
 //!   DLL-planting risk.
+//! - FER-514: the path may not contain control or bidi/format characters (spoofed confirmation
+//!   text). The file is opened ONCE with a share mode that denies write/delete, hashed through
+//!   that very handle, and the handle is held until the process is spawned, so the file cannot be
+//!   swapped between hashing and `CreateProcess`. A file larger than [`MAX_RAR_EXE_BYTES`] is
+//!   refused before it is hashed.
+//! - FER-514 (DLL sideload): the Rar.exe and its folder chain must pass the same
+//!   `trusted_location` rule as agent CLIs (FER-490, with conditional ACEs judged by their
+//!   rights so the stock Program Files\WinRAR folder passes): writable only by the current user,
+//!   Administrators, SYSTEM or TrustedInstaller. Rar.exe loads helper DLLs from its own folder, so
+//!   a folder another account can write to is refused (at set_path, probe and before every spawn).
 //! - Clean execution: `env_remove("RAR")`, `CREATE_NO_WINDOW`, no shell.
 //! - Fixed whitelist arguments with `-cfg-`, `-r-` and `--`.
 //! - Rar only ever sees the explicit entries produced by `collect_sources` (the same pipeline as
@@ -34,9 +44,24 @@ use crate::prefs::RarExeFingerprint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// FER-514: a real Rar.exe is a couple of MiB. Anything above this is refused before hashing, so a
+/// configured multi-GiB file named `Rar.exe` cannot keep a worker thread busy reading it.
+pub const MAX_RAR_EXE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// FER-514 rework (P3-G): characters that can make a path look different from what it is:
+/// control, bidi/format characters, ANY whitespace other than a plain space (U+2028/U+2029, NBSP,
+/// ideographic space ...) and invisible fillers (Hangul fillers U+115F/U+1160/U+3164/U+FFA0,
+/// braille blank U+2800).
+fn is_spoofing_char(c: char) -> bool {
+    c.is_control()
+        || crate::hotlist::model::is_format_char(c)
+        || (c.is_whitespace() && c != ' ')
+        || matches!(c as u32, 0x115F | 0x1160 | 0x3164 | 0xFFA0 | 0x2800)
+}
 
 /// A `Rar.exe` that passed [`validate_confirmed_rar_exe`]. Only that function can construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +113,13 @@ pub enum RarValidationError {
     /// `rarlng.dll` in the working directory (here: the user's source folder) — a DLL-planting
     /// risk. Refused after the fingerprint gate, with the version that was found.
     VersionTooOld(String),
+    /// FER-514: control or bidi/format characters in the path (they could make the confirmation
+    /// dialog show a different path than the one that is stored and run).
+    FormatCharacters,
+    /// FER-514: the file is larger than [`MAX_RAR_EXE_BYTES`]; it is never hashed or run.
+    TooLarge(u64),
+    /// FER-514: the exe or one of its folders can be changed by another account (DLL sideload).
+    UntrustedLocation(String),
 }
 
 impl std::fmt::Display for RarValidationError {
@@ -131,6 +163,18 @@ impl std::fmt::Display for RarValidationError {
                 f,
                 "WinRAR 7.00 atau lebih baru diperlukan (ditemukan: {found})"
             ),
+            Self::FormatCharacters => write!(
+                f,
+                "Path berisi karakter kontrol atau karakter format arah (bidi) yang tidak diizinkan"
+            ),
+            Self::TooLarge(size) => write!(
+                f,
+                "Rar.exe terlalu besar ({size} byte; batas {MAX_RAR_EXE_BYTES} byte)"
+            ),
+            Self::UntrustedLocation(why) => write!(
+                f,
+                "Rar.exe harus berada di folder yang hanya bisa diubah akun Anda, Administrators atau SYSTEM (mis. C:\\Program Files\\WinRAR): {why}"
+            ),
         }
     }
 }
@@ -150,9 +194,35 @@ impl From<std::io::Error> for RarValidationError {
     }
 }
 
+/// `GetDriveTypeW` value of a network drive (`DRIVE_REMOTE`).
+const DRIVE_REMOTE: u32 = 4;
+
+/// FER-514 P3-8: a mapped network drive (`Z:` -> `\\server\share`) looks like a local drive
+/// letter; only its drive type gives it away. Pure classification of a `GetDriveTypeW` value.
+pub fn drive_type_is_remote(drive_type: u32) -> bool {
+    drive_type == DRIVE_REMOTE
+}
+
+/// True when the drive letter of `path` is a mapped network drive. Windows only; an unreadable
+/// type (`DRIVE_UNKNOWN`, `DRIVE_NO_ROOT_DIR`) is not "remote" (a missing drive fails later as
+/// NotFound).
+#[cfg(windows)]
+fn is_mapped_network_drive(path_str: &str) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let letter = path_str.as_bytes()[0].to_ascii_uppercase();
+    let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `root` is a NUL-terminated UTF-16 drive root.
+    drive_type_is_remote(unsafe { GetDriveTypeW(root.as_ptr()) })
+}
+
+#[cfg(not(windows))]
+fn is_mapped_network_drive(_path_str: &str) -> bool {
+    false
+}
+
 /// Checks whether `path` is an absolute local drive path (e.g. `C:\...` or `D:/...`).
 /// Specifically rejects UNC (`\\server\share`), device paths (`\\?\...`, `\\.\...`),
-/// relative paths, and paths containing `..`.
+/// relative paths, paths containing `..`, and (FER-514) drive letters mapped to a network share.
 pub fn is_local_drive_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     if path_str.trim().is_empty() {
@@ -169,6 +239,9 @@ pub fn is_local_drive_path(path: &Path) -> bool {
         || bytes[1] != b':'
         || (bytes[2] != b'\\' && bytes[2] != b'/')
     {
+        return false;
+    }
+    if is_mapped_network_drive(&path_str) {
         return false;
     }
     // Check components: no parent dirs (..), no device prefixes
@@ -199,6 +272,9 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
     let path_str = path.to_string_lossy();
     if path_str.trim().is_empty() {
         return Err(RarValidationError::EmptyPath);
+    }
+    if path_str.chars().any(is_spoofing_char) {
+        return Err(RarValidationError::FormatCharacters);
     }
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(RarValidationError::TraversalComponent);
@@ -238,29 +314,90 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
     Ok(())
 }
 
-/// FER-511: identity of the executable file: `{ size, modified, sha256 }`. Reading and hashing
-/// the file never runs it.
-pub fn fingerprint_exe(path: &Path) -> Result<RarExeFingerprint, RarValidationError> {
-    let meta = std::fs::metadata(path).map_err(|e| {
+/// FER-514: the exe and its folder chain must not be changeable by another account (same rule as
+/// agent CLIs, FER-490). Windows only; elsewhere there is nothing to check (Windows-only scope).
+fn check_trusted_location(path: &Path) -> Result<(), RarValidationError> {
+    // Unit tests run in %TEMP%, whose ACL depends on the machine (CI vs a developer PC with
+    // several accounts). They skip this rule unless a test opts in (`tests::real_trust_check`).
+    #[cfg(test)]
+    if !tests::real_trust_check() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        crate::ai::agent_cli::acl::trusted_location_callback_aware(path)
+            .map_err(RarValidationError::UntrustedLocation)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// FER-514: open the exe ONCE for reading with a share mode that lets others read but not write,
+/// rename or delete it (`FILE_SHARE_READ`), without following a reparse point. The returned handle
+/// is what gets hashed, and the caller keeps it alive until the process is spawned.
+fn open_locked(path: &Path) -> Result<File, RarValidationError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             RarValidationError::NotFound(path.display().to_string())
+        } else if path.is_dir() {
+            // Windows refuses to open a folder as a plain file: report what it is.
+            RarValidationError::NotRegularFile(path.display().to_string())
         } else {
             RarValidationError::Io(e)
         }
     })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let meta = file.metadata()?;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(RarValidationError::SymlinkRefused(
+                path.display().to_string(),
+            ));
+        }
+    }
+    Ok(file)
+}
+
+/// Fingerprint computed through an already open (locked) handle: size and mtime come from the
+/// handle, the hash is read from it, and never more than [`MAX_RAR_EXE_BYTES`] + 1 bytes.
+fn fingerprint_file(file: &File, path: &Path) -> Result<RarExeFingerprint, RarValidationError> {
+    use std::io::Read;
+    let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(RarValidationError::NotRegularFile(
             path.display().to_string(),
         ));
+    }
+    if meta.len() > MAX_RAR_EXE_BYTES {
+        return Err(RarValidationError::TooLarge(meta.len()));
     }
     let modified = meta
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut reader = file.take(MAX_RAR_EXE_BYTES + 1);
+    let copied = std::io::copy(&mut reader, &mut hasher)?;
+    if copied > MAX_RAR_EXE_BYTES {
+        return Err(RarValidationError::TooLarge(copied));
+    }
     let sha256: String = hasher
         .finalize()
         .iter()
@@ -273,6 +410,14 @@ pub fn fingerprint_exe(path: &Path) -> Result<RarExeFingerprint, RarValidationEr
     })
 }
 
+/// FER-511: identity of the executable file: `{ size, modified, sha256 }`. Reading and hashing
+/// the file never runs it. FER-514: through a locked handle (see [`open_locked`]); the lock is
+/// released when this returns.
+pub fn fingerprint_exe(path: &Path) -> Result<RarExeFingerprint, RarValidationError> {
+    let file = open_locked(path)?;
+    fingerprint_file(&file, path)
+}
+
 /// Validate a `Rar.exe` the user wants to RUN (FER-511): static checks of section 3.1, then the
 /// fingerprint gate — the stored fingerprint must exist and match the file on disk — and only
 /// then the probe (which executes the file). With no stored fingerprint, or on a mismatch,
@@ -282,7 +427,9 @@ pub fn validate_confirmed_rar_exe(
     stored: Option<&RarExeFingerprint>,
 ) -> Result<RarTool, RarValidationError> {
     check_rar_exe_file(path)?;
-    let actual = fingerprint_exe(path)?;
+    // FER-514: the handle stays open (write/delete denied) through the probe spawn below.
+    let held = open_locked(path)?;
+    let actual = fingerprint_file(&held, path)?;
     match stored {
         None => return Err(RarValidationError::Unconfirmed(path.display().to_string())),
         Some(expected) if expected != &actual => {
@@ -292,7 +439,11 @@ pub fn validate_confirmed_rar_exe(
         }
         _ => {}
     }
+    // After the fingerprint gate (so "unconfirmed"/"changed" keep their own messages) and
+    // before the probe, which is the first time the file is executed.
+    check_trusted_location(path)?;
     let version = probe_rar_version(path)?;
+    drop(held);
     Ok(RarTool {
         path: path.to_path_buf(),
         version,
@@ -805,9 +956,12 @@ fn run_rar(
     // TOCTOU: re-check the executable immediately before spawning it — the static file checks
     // AND the confirmed fingerprint (FER-511). A Rar.exe swapped after confirmation is refused
     // here and never spawned.
-    reverify_before_spawn(tool)
+    // FER-514: the verified handle (write/delete denied) is held across the spawn.
+    let held = reverify_before_spawn(tool)
         .map_err(|e| ArchiveError::new(ArchiveErrorCode::UnsupportedFormat, e.to_string()))?;
-    let mut child = cmd.spawn().map_err(|e| {
+    let spawned = cmd.spawn();
+    drop(held);
+    let mut child = spawned.map_err(|e| {
         ArchiveError::new(
             ArchiveErrorCode::Io,
             format!("Failed to spawn Rar.exe: {e}"),
@@ -911,15 +1065,20 @@ fn run_rar(
 /// must equal the one confirmed at `set_path` time. Any difference refuses without running
 /// anything — a spawn attempt would surface as `ProbeFailed`, so these variants themselves
 /// prove no process was started.
-fn reverify_before_spawn(tool: &RarTool) -> Result<(), RarValidationError> {
+///
+/// FER-514: returns the locked handle that was hashed; the caller keeps it until `spawn` returns,
+/// so the file cannot be replaced between the hash and the process start.
+fn reverify_before_spawn(tool: &RarTool) -> Result<File, RarValidationError> {
     check_rar_exe_file(tool.path())?;
-    let actual = fingerprint_exe(tool.path())?;
+    check_trusted_location(tool.path())?;
+    let held = open_locked(tool.path())?;
+    let actual = fingerprint_file(&held, tool.path())?;
     if actual != tool.fingerprint {
         return Err(RarValidationError::FingerprintChanged(
             tool.path().display().to_string(),
         ));
     }
-    Ok(())
+    Ok(held)
 }
 
 /// FER-511: outcome of [`set_rar_exe_path_in`].
@@ -964,6 +1123,7 @@ pub fn set_rar_exe_path_in(
     };
     let candidate = PathBuf::from(raw.trim());
     check_rar_exe_file(&candidate)?;
+    check_trusted_location(&candidate)?;
     let fingerprint = fingerprint_exe(&candidate)?;
     if !confirm(&set_path_confirm_text(&candidate)) {
         return Ok(SetPathOutcome::Cancelled);
@@ -985,9 +1145,25 @@ pub fn native_confirm(owner: isize, text: &str) -> bool {
     crate::native_dialog::confirm(owner, "Konfirmasi WinRAR", text)
 }
 
+/// FER-514: same message box for a caller that ALREADY holds the app-wide `DialogGuard` (the
+/// `archive_rar_tool_set_path` command takes it before it validates and hashes anything).
+pub fn native_confirm_held(owner: isize, text: &str) -> bool {
+    crate::native_dialog::message_box(owner, "Konfirmasi WinRAR", text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        static REAL_TRUST: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Whether `check_trusted_location` runs the real ACL rule on this test thread.
+    pub(super) fn real_trust_check() -> bool {
+        REAL_TRUST.with(Cell::get)
+    }
 
     #[test]
     fn test_build_rar_args_exact_order_and_whitelist() {
@@ -1418,5 +1594,253 @@ mod tests {
             None
         );
         assert_eq!(rar_version_tuple("RAR seven"), None);
+    }
+
+    // ---- FER-514 hardening -------------------------------------------------------------
+
+    /// A "Rar.exe" whose bytes are `bytes`, with its recorded tool identity (no probe needed:
+    /// `reverify_before_spawn` is the last gate and only hashes).
+    fn fake_tool(dir: &Path, bytes: &[u8]) -> RarTool {
+        let exe = dir.join("Rar.exe");
+        std::fs::write(&exe, bytes).unwrap();
+        RarTool {
+            fingerprint: fingerprint_exe(&exe).unwrap(),
+            path: exe,
+            version: "7.00".into(),
+        }
+    }
+
+    #[test]
+    fn reverify_accepts_the_untouched_file_and_returns_the_held_handle() {
+        let s = Scratch::new("rv-ok");
+        let tool = fake_tool(&s.0, b"MZ original");
+        let held = reverify_before_spawn(&tool).expect("unchanged file passes");
+        drop(held);
+    }
+
+    /// File swapped between validation and spawn: refused as FingerprintChanged (the variant
+    /// proves nothing was started - a spawn attempt would surface as Io/ProbeFailed).
+    #[test]
+    fn reverify_refuses_a_file_swapped_after_validation() {
+        let s = Scratch::new("rv-swap");
+        let tool = fake_tool(&s.0, b"MZ original");
+        std::fs::write(&tool.path, b"MZ replaced!").unwrap();
+        let err = reverify_before_spawn(&tool).unwrap_err();
+        assert!(
+            matches!(err, RarValidationError::FingerprintChanged(_)),
+            "{err:?}"
+        );
+        // Same length, different bytes: the hash (not just the size) catches it.
+        let tool = fake_tool(&s.0, b"MZ original");
+        std::fs::write(&tool.path, b"MZ ORIGINAL").unwrap();
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(&tool.path)
+            .and_then(|f| {
+                f.set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_nanos(tool.fingerprint.modified),
+                )
+            });
+        assert!(matches!(
+            reverify_before_spawn(&tool).unwrap_err(),
+            RarValidationError::FingerprintChanged(_)
+        ));
+    }
+
+    /// Only the modification time changes (content and size identical): still refused.
+    #[test]
+    fn reverify_refuses_an_mtime_only_change() {
+        let s = Scratch::new("rv-mtime");
+        let tool = fake_tool(&s.0, b"MZ same bytes");
+        let later = std::time::UNIX_EPOCH
+            + Duration::from_nanos(tool.fingerprint.modified)
+            + Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&tool.path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let err = reverify_before_spawn(&tool).unwrap_err();
+        assert!(
+            matches!(err, RarValidationError::FingerprintChanged(_)),
+            "{err:?}"
+        );
+    }
+
+    /// FER-514 P3-2: while the handle returned by the gate is alive nobody can write, rename or
+    /// delete the file; once it is dropped (after spawn) they can again.
+    #[cfg(windows)]
+    #[test]
+    fn the_verified_handle_blocks_swaps_until_dropped() {
+        let s = Scratch::new("rv-lock");
+        let tool = fake_tool(&s.0, b"MZ original");
+        let held = reverify_before_spawn(&tool).unwrap();
+        assert!(std::fs::write(&tool.path, b"swap").is_err(), "write denied");
+        assert!(
+            std::fs::rename(&tool.path, s.0.join("moved.exe")).is_err(),
+            "rename denied"
+        );
+        assert!(std::fs::remove_file(&tool.path).is_err(), "delete denied");
+        assert_eq!(std::fs::read(&tool.path).unwrap(), b"MZ original");
+        drop(held);
+        std::fs::write(&tool.path, b"swap").expect("released after drop");
+    }
+
+    /// The lock must not stop the process from starting: a real executable can be spawned while
+    /// the verified handle is held.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_exe_still_spawns_while_the_handle_is_held() {
+        let s = Scratch::new("rv-spawn");
+        let root = std::env::var_os("SystemRoot").expect("SystemRoot");
+        let src = Path::new(&root).join("System32").join("whoami.exe");
+        let exe = s.0.join("Rar.exe");
+        std::fs::copy(&src, &exe).unwrap();
+        let tool = RarTool {
+            fingerprint: fingerprint_exe(&exe).unwrap(),
+            path: exe.clone(),
+            version: "7.00".into(),
+        };
+        let held = reverify_before_spawn(&tool).unwrap();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.stdout(std::process::Stdio::null());
+        let mut child = cmd.spawn().expect("spawn while the handle is held");
+        drop(held);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn bidi_and_control_characters_in_the_path_are_refused() {
+        for bad in [
+            "C:\\x\u{202E}gpj\\Rar.exe",
+            "C:\\x\u{200F}\\Rar.exe",
+            "C:\\x\u{2066}\\Rar.exe",
+            "C:\\x\u{FEFF}\\Rar.exe",
+            "C:\\x\u{0007}\\Rar.exe",
+            "C:\\x\u{2028}y\\Rar.exe",
+            "C:\\x\u{2029}y\\Rar.exe",
+            "C:\\x\u{00A0}y\\Rar.exe",
+            "C:\\x\u{3000}y\\Rar.exe",
+            "C:\\x\u{3164}y\\Rar.exe",
+            "C:\\x\u{115F}y\\Rar.exe",
+            "C:\\x\u{2800}y\\Rar.exe",
+            "C:\\x\ty\\Rar.exe",
+            "C:\\x\nfake line\\Rar.exe",
+        ] {
+            let err = check_rar_exe_file(Path::new(bad)).unwrap_err();
+            assert!(
+                matches!(err, RarValidationError::FormatCharacters),
+                "{bad:?}: {err:?}"
+            );
+        }
+        // And through the confirmed set_path flow: refused before any dialog.
+        let root = Scratch::new("bidi");
+        let mut asked = false;
+        let err = set_rar_exe_path_in(&root.0, Some("C:\\x\u{202E}\\Rar.exe".to_string()), |_| {
+            asked = true;
+            true
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, RarValidationError::FormatCharacters),
+            "{err:?}"
+        );
+        assert!(!asked, "no dialog for a spoofed path");
+        assert_eq!(crate::prefs::load_from(&root.0).rar_exe_path, None);
+    }
+
+    #[test]
+    fn an_oversized_exe_is_refused_before_hashing() {
+        let s = Scratch::new("big");
+        let exe = s.0.join("Rar.exe");
+        let f = std::fs::File::create(&exe).unwrap();
+        f.set_len(MAX_RAR_EXE_BYTES + 1).unwrap();
+        drop(f);
+        let started = Instant::now();
+        let err = fingerprint_exe(&exe).unwrap_err();
+        assert!(matches!(err, RarValidationError::TooLarge(_)), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "not hashed");
+        let at_limit = s.0.join("limit.bin");
+        let f = std::fs::File::create(&at_limit).unwrap();
+        f.set_len(1024).unwrap();
+        drop(f);
+        assert!(fingerprint_exe(&at_limit).is_ok());
+    }
+
+    /// FER-514 P3-8: classification of `GetDriveTypeW` results; only DRIVE_REMOTE is a network drive.
+    #[test]
+    fn only_drive_remote_counts_as_a_network_drive() {
+        assert!(drive_type_is_remote(4));
+        for local in [0u32, 1, 2, 3, 5, 6] {
+            assert!(!drive_type_is_remote(local), "{local}");
+        }
+    }
+
+    /// The system drive is a local drive; the real-network case needs a mapped drive and is run
+    /// by hand: `FERRUM_TEST_NETWORK_DRIVE=Z:\ cargo test -- --ignored mapped_network_drive`.
+    #[cfg(windows)]
+    #[test]
+    fn the_system_drive_is_a_local_drive_path() {
+        let root = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(is_local_drive_path(Path::new(&format!("{root}\\Rar.exe"))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs a mapped network drive: set FERRUM_TEST_NETWORK_DRIVE=Z:\\"]
+    fn mapped_network_drive_is_not_a_local_drive_path() {
+        let root = std::env::var("FERRUM_TEST_NETWORK_DRIVE").expect("FERRUM_TEST_NETWORK_DRIVE");
+        assert!(!is_local_drive_path(Path::new(&format!("{root}Rar.exe"))));
+    }
+
+    /// FER-514 DLL sideload: a folder another account can write to (Everyone: Modify) is
+    /// refused at set_path (before the dialog), at the probe gate and before every spawn. Only
+    /// the refusing half is asserted: whether a plain %TEMP% folder passes depends on the machine.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_writable_by_everyone_is_refused() {
+        let sc = Scratch::new("sideload");
+        let dir = sc.0.join("WinRAR");
+        std::fs::create_dir(&dir).unwrap();
+        let exe = dir.join("Rar.exe");
+        std::fs::write(&exe, b"MZ not a real program").unwrap();
+        let cfg = sc.0.join("cfg");
+        std::fs::create_dir(&cfg).unwrap();
+        let grant = std::process::Command::new("icacls")
+            .arg(&dir)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)M", "/T", "/C", "/Q"])
+            .output();
+        if !matches!(grant, Ok(ref o) if o.status.success()) {
+            eprintln!("icacls unavailable; skipping the untrusted half");
+            return;
+        }
+        REAL_TRUST.with(|c| c.set(true));
+        let mut asked = false;
+        let err = set_rar_exe_path_in(&cfg, Some(s(&exe)), |_| {
+            asked = true;
+            true
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, RarValidationError::UntrustedLocation(_)),
+            "{err:?}"
+        );
+        assert!(!asked, "refused before the dialog");
+        // The probe/spawn gates apply the same rule.
+        let fp = fingerprint_exe(&exe).unwrap();
+        assert!(matches!(
+            validate_confirmed_rar_exe(&exe, Some(&fp)).unwrap_err(),
+            RarValidationError::UntrustedLocation(_)
+        ));
+        let tool = RarTool {
+            path: exe,
+            version: "7.00".into(),
+            fingerprint: fp,
+        };
+        assert!(matches!(
+            reverify_before_spawn(&tool).unwrap_err(),
+            RarValidationError::UntrustedLocation(_)
+        ));
     }
 }
