@@ -323,3 +323,50 @@ u64le(configRev) ‖ u64le(approvedMs))`, compared in constant time. The key is 
   removed on success). `usedBy` in `sync_profile_list` now counts automations.
 - A lease id never appears in any automation DTO (only `sync_lease_acquire` hands one to its
   requester); a source test and a fixture scan hold that.
+
+## Automations: queue, status and history (automation P1.2)
+
+Source of truth: `src-tauri/src/automation/{status,read,dto}.rs` + `automation/store/{queue,runtime,runs,events,controls}.rs`
+(Tauri-free cores) + `automation/commands.rs` (wrappers) + `src/lib/ipc/automation.ts`; fixtures
+`contract-fixtures/automation/automation-{list,get,history,run-ops,events}*.json`, read by both test suites.
+All five commands are **read-only**: they take no flag that could stand for a confirmation or an
+authorization, write nothing (not even `change_seq`), and never create or replace the approval key. Requests
+are flat top-level arguments; the backend assembles them into strict request types (`deny_unknown_fields`) and
+validates ids (lowercase UUID v4), cursors (>= 1), offsets and page sizes before it touches the store
+(`invalid_input`); an unknown automation or run is `not_found`.
+
+| Command              | Payload                                                           | Result                            | Notes                                                                                    |
+| -------------------- | ----------------------------------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `automation_list`    | -                                                                 | `AutomationRow[]`                 | by name; status from `status::compute` (design 9.1); one consistent snapshot             |
+| `automation_get`     | `{ id }`                                                          | `AutomationDetail`                | pipeline, quiet countdown, current run, waiting entries, 4 recent runs, 14 events        |
+| `automation_history` | `{ filter: 'all' \| 'attention', automationId?, before?, limit }` | `{ runs: Run[], next? }`          | newest first; `before` = run id cursor; `limit` 1..=100; `attention` = runs a hold names |
+| `automation_run_ops` | `{ runId, offset, limit }`                                        | `{ ops: RunOp[], total, stored }` | `limit` 1..=200, `offset` 0..=5000; `total` = true count, `stored` = rows (first 5 000)  |
+| `automation_events`  | `{ id, before?, limit }`                                          | `{ events: Event[], next? }`      | newest first; `before` = event id cursor; `limit` 1..=50                                 |
+
+- **Status chip** (`{ kind, label, sub? }`): `kind` is one of `watching quiet checking device recheck unsupported
+scheduled queued pending running paused completed partial cancelled skipped attention review warn`. Precedence
+  (first match wins): Needs review, Runner not running (background only), Running, Queued / Waiting for device,
+  Needs attention, Paused, trigger state. The verdict for "Needs review" is `policy::verify` of the stored
+  approval - the `enabled` flag only decides "Paused" and is never an authorization; `canRunNow` is a hint (the
+  gate checks the approval again on every run). Labels and sub-lines are built by the backend
+  (`Running 3/6`, `Waiting for quiet · 7 s`, `Waits for "<run>" — same folders`, `<text> · new runs held`).
+- **Run result chips:** Completed -> `completed`; Partial -> `partial`; Conflict held -> `attention`
+  "Conflict held"; Failed -> `attention` "Failed"; Cancelled -> `cancelled`; Interrupted -> `cancelled`
+  "Interrupted"; Skipped -> `skipped`. Counts are file operations, never filesystem events.
+- **Pagination:** a page has `next` only when more rows exist; pass it back as `before`.
+- **Queue (store, RQ-3):** one entry per profile (`UNIQUE(profile_id)`); a second trigger merges into it (count +
+  distinct reasons, at most 10); entries start FIFO per host class and a blocked entry does not hold up a later one;
+  the queue is stored and survives a restart; pause, edit, profile change and delete remove it.
+- **Runs (store):** `runs.id` is `AUTOINCREMENT` (never reused); `run_ops` keeps the first 5 000 operations per run
+  while `ops_total` and `counts` stay exact; Partial, Conflict held and Failed set the attention hold in the
+  statement that ends the run, Interrupted and Cancelled never do (RQ-9.1/9.2); a run that is running or named by
+  an attention hold is never deleted (OP-2; a hold that no longer parses protects every run of its automation).
+- **Events (store):** the newest 200 per automation are kept (pruned on insert, ordered by insertion), text <= 512
+  characters.
+- **Controls (store, design 3.5):** a request older than 10 minutes (or stamped more than a minute in the future)
+  is ignored and swept; a control is a request, never an authorization - the host runs the same gate.
+- **Rules for the read side:** no lease id, MAC or key in any DTO; the approval key is loaded at most once per read
+  and never created; the store closure never calls the engine or `KeyedAuth` (the store mutex is not re-entrant).
+- Not yet built (later packages): the scheduler's next occurrence (`next` stays "No upcoming run" until P1.4, then
+  the label gets the zone name), the host loop that writes runtime state, runs and events (P1.3), the
+  `automation://changed` event, and the control commands (`automation_run_now`, `automation_stop_run`, ...).

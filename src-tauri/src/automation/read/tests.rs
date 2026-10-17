@@ -375,7 +375,14 @@ fn quiet_countdown_and_pending_rerun_of_a_watch() {
     assert_eq!(status(&fx, &a, T0).0, StatusKind::Quiet);
     let run = start(&fx, &other, "Other on the same folders", &p, T0);
     assert_eq!(status(&fx, &a, T0).0, StatusKind::Pending);
-    end(&fx, run, Outcome::Completed, RunCounts::default(), 0, T0 + 5);
+    end(
+        &fx,
+        run,
+        Outcome::Completed,
+        RunCounts::default(),
+        0,
+        T0 + 5,
+    );
     assert_eq!(status(&fx, &a, T0 + 10).0, StatusKind::Quiet);
 }
 
@@ -413,11 +420,7 @@ fn attention_holds_the_automation_and_shows_in_the_history() {
     assert_eq!((att.kind, att.run_id), (AttentionKind::Partial, run));
     let last = r.last_run.unwrap();
     assert_eq!(
-        (
-            last.run_id,
-            last.result.kind,
-            last.result.label.as_str()
-        ),
+        (last.run_id, last.result.kind, last.result.label.as_str()),
         (run, StatusKind::Partial, "Partial")
     );
     assert_eq!(

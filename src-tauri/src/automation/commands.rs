@@ -1323,11 +1323,9 @@ pub async fn automation_get(
 ) -> Result<dto::AutomationDetailDto, CommandError> {
     let store = state.store.clone();
     let keys = state.keys.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        read::get_in(&store, keys.as_ref(), now_ms(), &id)
-    })
-    .await
-    .map_err(|_| internal())?
+    tauri::async_runtime::spawn_blocking(move || read::get_in(&store, keys.as_ref(), now_ms(), &id))
+        .await
+        .map_err(|_| internal())?
 }
 
 /// Run history, newest first, paged by run id (MH-6). Read-only.

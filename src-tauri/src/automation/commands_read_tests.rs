@@ -30,8 +30,14 @@ fn every_request_fixture_names_exactly_the_command_parameters() {
     }
     // `automation_list` takes nothing.
     assert!(wire_keys("automation_list").is_empty());
-    assert_eq!(wire_keys("automation_history"), ["automationId", "before", "filter", "limit"]);
-    assert_eq!(wire_keys("automation_run_ops"), ["limit", "offset", "runId"]);
+    assert_eq!(
+        wire_keys("automation_history"),
+        ["automationId", "before", "filter", "limit"]
+    );
+    assert_eq!(
+        wire_keys("automation_run_ops"),
+        ["limit", "offset", "runId"]
+    );
     assert_eq!(wire_keys("automation_events"), ["before", "id", "limit"]);
     assert_eq!(wire_keys("automation_get"), ["id"]);
 }
@@ -48,7 +54,9 @@ fn read_commands_take_no_authorization_flag() {
     ] {
         for key in wire_keys(command) {
             let lower = key.to_lowercase();
-            for forbidden in ["confirm", "approved", "force", "native", "skip", "ack", "enabled"] {
+            for forbidden in [
+                "confirm", "approved", "force", "native", "skip", "ack", "enabled",
+            ] {
                 assert!(
                     !lower.contains(forbidden),
                     "{command}: parameter {key} looks like an authorization flag"
@@ -98,7 +106,11 @@ fn result_fixtures_round_trip_through_the_dtos() {
     let kinds: Vec<StatusKind> = rows.iter().map(|r| r.status.kind).collect();
     assert_eq!(
         kinds,
-        [StatusKind::Scheduled, StatusKind::Review, StatusKind::Attention]
+        [
+            StatusKind::Scheduled,
+            StatusKind::Review,
+            StatusKind::Attention
+        ]
     );
     assert!(rows.iter().all(|r| model::is_profile_id(&r.id)));
     // Run now is dimmed exactly when something holds the automation.
@@ -130,7 +142,10 @@ fn fixture_labels_are_what_status_produces() {
         ok: 6,
         ..Default::default()
     };
-    assert_eq!(last.result, status::outcome_chip(Outcome::Completed, &ok6, 6, None));
+    assert_eq!(
+        last.result,
+        status::outcome_chip(Outcome::Completed, &ok6, 6, None)
+    );
     let partial = RunCounts {
         ok: 4,
         failed: 1,
@@ -152,16 +167,18 @@ fn fixture_labels_are_what_status_produces() {
     );
     assert_eq!(
         rows[1].status.sub.as_deref(),
-        Some(status::review_label(&crate::automation::policy::NeedsReview::ProfileChanged { from: 3, to: 4 }).as_str())
+        Some(
+            status::review_label(&crate::automation::policy::NeedsReview::ProfileChanged {
+                from: 3,
+                to: 4
+            })
+            .as_str()
+        )
     );
     let d: AutomationDetailDto = roundtrip("automation-get.json");
     assert_eq!(
         d.current_run.as_ref().unwrap().result.label,
-        status::running_label(
-            crate::automation::store::runs::Phase::Sync,
-            2,
-            6
-        )
+        status::running_label(crate::automation::store::runs::Phase::Sync, 2, 6)
     );
 }
 
@@ -183,9 +200,12 @@ fn the_read_side_sources_carry_no_lease_id_and_no_writes() {
     assert!(!code.contains("with_write"));
     // The read side verifies approvals but never signs, creates or replaces the key.
     for forbidden in ["load_or_create", "create_if_missing(", "compute_mac("] {
-        let uses = code.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| {
-            l.contains(forbidden) && !l.contains("fn ") && !l.trim_start().starts_with("///")
-        });
+        let uses = code
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .any(|l| {
+                l.contains(forbidden) && !l.contains("fn ") && !l.trim_start().starts_with("///")
+            });
         assert!(!uses, "read.rs must not call {forbidden}");
     }
 }

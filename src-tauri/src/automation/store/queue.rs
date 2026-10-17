@@ -305,10 +305,10 @@ pub fn remove(conn: &Connection, id: i64) -> Result<bool, StoreError> {
 
 /// The first entry of `fifo` (already in FIFO order) that is not blocked. A blocked entry waits
 /// without holding up later ones (RQ-3.3: "when they can").
-pub fn first_startable<'a>(
-    fifo: &'a [QueueEntry],
+pub fn first_startable(
+    fifo: &[QueueEntry],
     blocked: impl Fn(&QueueEntry) -> bool,
-) -> Option<&'a QueueEntry> {
+) -> Option<&QueueEntry> {
     fifo.iter().find(|e| !blocked(e))
 }
 
