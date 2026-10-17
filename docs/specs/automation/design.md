@@ -859,8 +859,8 @@ RootsUnavailable` before it plans. The manual `sync_baseline_*` commands only ho
   manual store. Each pair has a save counter in the store (`baseline_gen`); the file holds the
   counter it was written under (covered by the MAC) and loads only if it equals the current one, so
   a replayed older authentic file is `Untrusted`.
-- **Approval key rules (rework 1).** Only an approval creates the key (never baseline signing);
-  a key is replaced only when its blob was read in full and DPAPI refused it (`Unusable`), after
+- **Approval key rules (rework 1).** Only an approval REPLACES the key; baseline signing may create it
+  only when no key file exists at all (same lock, atomic create, same events). A key is replaced only when its blob was read in full and DPAPI refused it (`Unusable`), after
   the old blob was copied to `approval.key.bak`; an I/O error, sharing violation, reparse point or
   oversized file (`Unreadable`) never rotates it. Creation and replacement hold the
   `approval.key.lock` file lock across processes, and a created or replaced key writes a `warn`

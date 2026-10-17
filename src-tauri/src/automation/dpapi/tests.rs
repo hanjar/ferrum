@@ -204,3 +204,33 @@ fn a_held_lock_blocks_creation() {
     assert_eq!(keys.load_or_create(), Err(KeyError));
     assert!(!keys.path().exists());
 }
+
+/// Signing's path (`create_if_missing`): creates when there is no file, and otherwise never
+/// touches the file - not an unusable blob (no backup, no replacement), not an unreadable one.
+#[test]
+fn create_if_missing_only_creates_never_replaces() {
+    if !windows_only() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let keys = DpapiKeyFile::new(dir.path());
+    let made = keys.create_if_missing().unwrap();
+    assert_eq!(keys.load(), KeyLoad::Key(made.clone()));
+    assert!(keys.take_rotation_notice());
+    // An existing usable key is returned as is.
+    assert_eq!(keys.create_if_missing().unwrap(), made);
+    assert!(!keys.take_rotation_notice());
+
+    // An unusable blob stays byte for byte, with no backup and no notice.
+    std::fs::write(keys.path(), b"not a dpapi blob").unwrap();
+    assert_eq!(keys.create_if_missing(), Err(KeyError));
+    assert_eq!(std::fs::read(keys.path()).unwrap(), b"not a dpapi blob");
+    assert!(!dir.path().join(KEY_BACKUP_FILE).exists());
+    assert!(!keys.take_rotation_notice());
+
+    // So does an unreadable one (a directory in its place).
+    std::fs::remove_file(keys.path()).unwrap();
+    std::fs::create_dir(keys.path()).unwrap();
+    assert_eq!(keys.create_if_missing(), Err(KeyError));
+    assert!(keys.path().is_dir());
+}

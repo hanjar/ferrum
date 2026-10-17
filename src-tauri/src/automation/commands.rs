@@ -2123,13 +2123,29 @@ pub(crate) mod tests {
     /// slow root, another store user is served at once.
     #[test]
     fn a_slow_readiness_probe_does_not_hold_the_store_lock() {
-        struct SlowProbe;
-        impl RootProbe for SlowProbe {
+        use std::sync::mpsc;
+        // Deterministic: the probe announces that it is inside the (blocked) probe and then waits
+        // for an explicit release, so no sleep or timing threshold decides the outcome. If the
+        // store lock were held during the probe, the store read below would never be served and
+        // the bounded wait would fail the test.
+        struct BlockedProbe {
+            entered: std::sync::Mutex<Option<mpsc::Sender<()>>>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+        }
+        impl RootProbe for BlockedProbe {
             fn canonical(
                 &self,
                 path: &str,
             ) -> Result<String, crate::sync_engine::roots::RootError> {
-                std::thread::sleep(Duration::from_millis(700));
+                if let Some(tx) = self.entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                    // Wait for the release (or give up after a long bound so a failure cannot hang).
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30));
+                }
                 crate::sync_engine::roots::canonical(path)
             }
             fn identity(
@@ -2142,19 +2158,32 @@ pub(crate) mod tests {
         let (dir, store) = store();
         let d = temp_draft(&dir, "Slow");
         let profile = saved(save_in(&store, create_request(d), &probe(), |_| true, 1_000).unwrap());
-        let slow: ProbeArc<dyn RootProbe> = Arc::new(SlowProbe);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let slow: ProbeArc<dyn RootProbe> = Arc::new(BlockedProbe {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        });
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| get_in(&store, &profile.id, &slow));
-            std::thread::sleep(Duration::from_millis(150));
-            let started = std::time::Instant::now();
-            store
-                .with_read(profiles::list)
+            entered_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the probe was entered");
+            // The probe is blocked right now: another store user must be served.
+            let (done_tx, done_rx) = mpsc::channel();
+            let store_ref = &store;
+            let other = scope.spawn(move || {
+                let out = store_ref.with_read(profiles::list);
+                let _ = done_tx.send(());
+                out
+            });
+            let served = done_rx.recv_timeout(Duration::from_secs(20)).is_ok();
+            let _ = release_tx.send(());
+            assert!(served, "the store was blocked while a probe was running");
+            other
+                .join()
+                .unwrap()
                 .expect("store readable while a probe runs");
-            assert!(
-                started.elapsed() < Duration::from_millis(400),
-                "the store was blocked for {:?}",
-                started.elapsed()
-            );
             assert!(reader.join().unwrap().is_ok());
         });
     }

@@ -309,12 +309,13 @@ u64le(configRev) ‖ u64le(approvedMs))`, compared in constant time. The key is 
   `sync_profile_run` and `automation_test` use this store, so manual profile runs start from a
   first run once after this change.
   Each pair also has a save counter (`baseline_gen`) inside the signed file, so a replayed older
-  file is `untrusted` too. Signing needs the approval key and never creates it: a baseline is
-  saved only after the first approval made the key.
+  file is `untrusted` too. Signing may create the approval key only when no key file exists at all
+  (a first manual profile run before any approval); it never replaces an existing, unusable or
+  unreadable key.
 - **Delete guard:** `maxPercent` is 1..99 (100 could never stop a run; `guard_percent_range`). A
   guard that cannot trip counts as off for the native confirmation of a profile save, and every
   approval dialog states the guard thresholds (or "off").
-- **Approval key:** created or replaced only by an approval (replaced only when DPAPI refused a
+- **Approval key:** replaced only by an approval (and only when DPAPI refused a
   blob that was read in full; never after an I/O error), under a cross-process file lock, with the
   old blob kept as `approval.key.bak`; every automation then logs a `warn` event.
 - **Schema v2** adds `automations`, `approvals`, `automation_runtime`, `queue`, `runs`, `run_ops`,

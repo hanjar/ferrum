@@ -571,7 +571,7 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
 
 /// One `warn` event per automation: the approval key was made again, so earlier approvals no
 /// longer verify (Needs review) and must be approved again.
-fn note_key_rotation(store: &Store, clock: Clock<'_>) -> Result<(), CommandError> {
+pub(crate) fn note_key_rotation(store: &Store, clock: Clock<'_>) -> Result<(), CommandError> {
     store.with_write(|conn| -> Result<(), CommandError> {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

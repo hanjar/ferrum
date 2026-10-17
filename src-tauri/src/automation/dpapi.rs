@@ -109,6 +109,10 @@ pub trait ApprovalKeys: Send + Sync {
     /// The key, creating it when there is none and replacing it when it is `Unusable`. For an
     /// approval only.
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError>;
+    /// The key, creating it ONLY when there is no key file at all (`Missing`). An existing key,
+    /// whether usable or not, is never replaced here and an unreadable file is an error. For
+    /// baseline signing, so a first manual profile run does not have to wait for an approval.
+    fn create_if_missing(&self) -> Result<ApprovalKey, KeyError>;
     /// True once after a key was created or replaced: earlier approvals no longer verify and the
     /// approval records an event for them.
     fn take_rotation_notice(&self) -> bool {
@@ -267,6 +271,22 @@ impl ApprovalKeys for DpapiKeyFile {
     }
 
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError> {
+        self.obtain(true)
+    }
+
+    fn create_if_missing(&self) -> Result<ApprovalKey, KeyError> {
+        self.obtain(false)
+    }
+
+    fn take_rotation_notice(&self) -> bool {
+        self.rotated.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl DpapiKeyFile {
+    /// Shared create path: lock, judge under the lock, create atomically; `allow_replace` lets an
+    /// approval replace an `Unusable` blob (after a backup), signing never may.
+    fn obtain(&self, allow_replace: bool) -> Result<ApprovalKey, KeyError> {
         let _one = self.create_lock.lock().unwrap_or_else(|p| p.into_inner());
         // Across processes: nobody else creates or replaces the key while we decide.
         let dir = self.path.parent().ok_or(KeyError)?;
@@ -277,6 +297,8 @@ impl ApprovalKeys for DpapiKeyFile {
             // Possibly transient: never rotate on it.
             Inspect::Unreadable => return Err(KeyError),
             Inspect::Missing => None,
+            // Signing never replaces an existing key.
+            Inspect::Unusable(_) if !allow_replace => return Err(KeyError),
             Inspect::Unusable(old) => Some(old),
         };
         let mut bytes = [0u8; KEY_LEN];
@@ -305,10 +327,6 @@ impl ApprovalKeys for DpapiKeyFile {
         );
         self.rotated.store(true, Ordering::SeqCst);
         Ok(made)
-    }
-
-    fn take_rotation_notice(&self) -> bool {
-        self.rotated.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -382,6 +400,10 @@ impl ApprovalKeys for NoKeys {
     fn load_or_create(&self) -> Result<ApprovalKey, KeyError> {
         Err(KeyError)
     }
+
+    fn create_if_missing(&self) -> Result<ApprovalKey, KeyError> {
+        Err(KeyError)
+    }
 }
 
 /// An in-memory key source (tests of code that signs and verifies but is not about DPAPI).
@@ -429,6 +451,20 @@ impl ApprovalKeys for MemoryKeys {
                 self.rotated.store(true, Ordering::SeqCst);
                 Ok(key)
             }
+        }
+    }
+
+    fn create_if_missing(&self) -> Result<ApprovalKey, KeyError> {
+        let mut guard = self.key.lock().unwrap();
+        match &*guard {
+            KeyLoad::Key(key) => Ok(key.clone()),
+            KeyLoad::Missing => {
+                let key = ApprovalKey::for_tests(7);
+                *guard = KeyLoad::Key(key.clone());
+                self.rotated.store(true, Ordering::SeqCst);
+                Ok(key)
+            }
+            _ => Err(KeyError),
         }
     }
 

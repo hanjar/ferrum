@@ -17,7 +17,8 @@
 //! - each pair has a save COUNTER in the automation store (`baseline_gen`); the file holds the
 //!   counter it was written under (covered by the MAC) and loads only when it equals the current
 //!   one, so an older authentic file put back over a newer one is refused (replay);
-//! - signing never creates or replaces the approval key; only an approval does.
+//! - signing may create the approval key only when no key file exists at all; it never replaces
+//!   an existing, unusable or unreadable one (only an approval does, after a backup).
 //!
 //! Tauri-free.
 
@@ -51,10 +52,23 @@ impl KeyedAuth {
 
 impl BaselineAuth for KeyedAuth {
     fn sign(&self, payload: &[u8]) -> Option<String> {
-        // Signing NEVER creates or replaces the approval key (FER-522 rework 1): only an approval
-        // does. Without a usable key a baseline simply cannot be signed, so it is not saved.
-        let KeyLoad::Key(key) = self.keys.load() else {
-            return None;
+        // Signing may make the key only when there is NO key file at all (a first manual profile
+        // run before any approval); it never replaces an existing, unusable or unreadable one -
+        // that is the approval's job, after a backup (FER-522 rework 1).
+        let key = match self.keys.load() {
+            KeyLoad::Key(key) => key,
+            KeyLoad::Missing => {
+                let key = self.keys.create_if_missing().ok()?;
+                if self.keys.take_rotation_notice() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let _ = crate::automation::approval::note_key_rotation(&self.store, &|| now);
+                }
+                key
+            }
+            KeyLoad::Unusable | KeyLoad::Unreadable => return None,
         };
         let sub = policy::derive_subkey(&key, SUBKEY_PURPOSE)?;
         policy::hmac_hex(&sub, payload)

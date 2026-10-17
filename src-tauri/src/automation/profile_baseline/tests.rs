@@ -463,25 +463,33 @@ fn the_generation_counts_per_pair_and_is_signed() {
     );
 }
 
-/// Signing never makes or replaces the approval key: with no key the save fails and no key appears.
+/// Signing may make the key when there is no key file at all (a first manual profile run before
+/// any approval) - and the baseline is then saved and trusted.
 #[test]
-fn signing_never_creates_the_key() {
+fn signing_creates_the_key_when_it_is_missing() {
     let (tmp, left, right) = dirs();
     let keys = Arc::new(MemoryKeys::missing());
     let store = store_in(tmp.path(), keys.clone());
     let p = pair(&left, &right);
-    assert!(
-        store
-            .engine_store()
-            .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
-            .is_err()
-    );
-    assert_eq!(keys.load(), KeyLoad::Missing);
-    assert!(!keys.take_rotation_notice());
+    store
+        .engine_store()
+        .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
+        .unwrap();
+    assert!(matches!(keys.load(), KeyLoad::Key(_)));
     assert_eq!(
         verify_profile_baseline(&store, &p).unwrap(),
-        BaselineTrust::Absent
+        BaselineTrust::Trusted
     );
+}
+
+/// Signing NEVER replaces an existing key: an unusable or unreadable one makes the save fail and
+/// leaves the key state exactly as it was.
+#[test]
+fn signing_never_replaces_an_existing_key() {
+    let (tmp, left, right) = dirs();
+    let keys = Arc::new(MemoryKeys::missing());
+    let store = store_in(tmp.path(), keys.clone());
+    let p = pair(&left, &right);
     for state in [KeyLoad::Unusable, KeyLoad::Unreadable] {
         keys.set(state.clone());
         assert!(
@@ -491,5 +499,10 @@ fn signing_never_creates_the_key() {
                 .is_err()
         );
         assert_eq!(keys.load(), state);
+        assert!(!keys.take_rotation_notice());
     }
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Absent
+    );
 }
