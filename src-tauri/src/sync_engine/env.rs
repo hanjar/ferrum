@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::archive_extract::publish::{self, DirHandle, MoveError};
-use crate::copy_engine::{self, ConflictPolicy, CopyOptions};
+use crate::copy_engine::{self, ConflictPolicy, CopyOptions, ReplaceGuard};
 use crate::domain::FsError;
 use crate::ops::CancelToken;
 use crate::sync_engine::errors::{Classified, classify_fs};
@@ -35,6 +35,10 @@ pub trait Copier: Send + Sync {
     /// `overwrite` replaces an existing destination file; otherwise an existing destination
     /// makes that source fail to copy (it is neither done nor failed: the caller treats it as
     /// "target appeared"). `durable` flushes each file to disk before it is published.
+    ///
+    /// FER-564: with `overwrite` and a `guard`, an existing destination is replaced only through
+    /// the guard (which re-checks it right before the swap); without a guard the copy engine's
+    /// own replace is used (only the tests of other copiers pass `None` with `overwrite`).
     fn copy(
         &self,
         sources: &[String],
@@ -42,6 +46,7 @@ pub trait Copier: Send + Sync {
         overwrite: bool,
         durable: bool,
         cancel: &CancelToken,
+        guard: Option<&dyn ReplaceGuard>,
     ) -> CopyReport;
 }
 
@@ -56,6 +61,7 @@ impl Copier for EngineCopier {
         overwrite: bool,
         durable: bool,
         cancel: &CancelToken,
+        guard: Option<&dyn ReplaceGuard>,
     ) -> CopyReport {
         let policy = if overwrite {
             ConflictPolicy::Overwrite
@@ -70,14 +76,19 @@ impl Copier for EngineCopier {
             durable,
             ..CopyOptions::default()
         };
-        let out = copy_engine::run_copy_with_options(
-            sources,
-            dest_dir,
-            policy,
-            options,
-            cancel,
-            &|_progress| {},
-        );
+        let out = match guard {
+            Some(guard) if overwrite => {
+                copy_engine::run_copy_with_guard(sources, dest_dir, policy, options, cancel, guard)
+            }
+            _ => copy_engine::run_copy_with_options(
+                sources,
+                dest_dir,
+                policy,
+                options,
+                cancel,
+                &|_progress| {},
+            ),
+        };
         let mut report = CopyReport {
             cancelled: out.cancelled,
             ..CopyReport::default()
@@ -366,6 +377,9 @@ pub trait Hooks: Send + Sync {
     /// Operation `index` passed its just-in-time check and is about to act (the gap the
     /// handle-level checks of delete and move close).
     fn after_jit(&self, _index: usize, _name: &str) {}
+    /// FER-564: an in-place overwrite has copied its staged file and is about to re-check the
+    /// target and swap it in (the gap the commit-time check closes).
+    fn before_commit(&self, _index: usize, _name: &str) {}
     /// Called right before operation `index` (after the stop checks, before its just-in-time check).
     fn before_op(&self, _index: usize, _name: &str) {}
 }

@@ -243,6 +243,7 @@ impl Copier for ScriptedCopier {
         overwrite: bool,
         durable: bool,
         cancel: &CancelToken,
+        guard: Option<&dyn crate::copy_engine::ReplaceGuard>,
     ) -> CopyReport {
         self.calls.lock().unwrap().push(sources.to_vec());
         let mut failed: Vec<(String, Classified)> = Vec::new();
@@ -271,7 +272,8 @@ impl Copier for ScriptedCopier {
         let mut report = if pass.is_empty() {
             CopyReport::default()
         } else {
-            self.inner.copy(&pass, dest_dir, overwrite, durable, cancel)
+            self.inner
+                .copy(&pass, dest_dir, overwrite, durable, cancel, guard)
         };
         report.failed.extend(failed);
         report
@@ -440,6 +442,7 @@ pub struct TestHooks {
     pub after_gate: Mutex<Option<Box<dyn Fn() + Send>>>,
     pub before_op: Mutex<Option<OpHook>>,
     pub after_jit: Mutex<Option<OpHook>>,
+    pub before_commit: Mutex<Option<OpHook>>,
 }
 
 impl Hooks for TestHooks {
@@ -460,6 +463,11 @@ impl Hooks for TestHooks {
     }
     fn after_jit(&self, index: usize, name: &str) {
         if let Some(f) = self.after_jit.lock().unwrap().as_ref() {
+            f(index, name);
+        }
+    }
+    fn before_commit(&self, index: usize, name: &str) {
+        if let Some(f) = self.before_commit.lock().unwrap().as_ref() {
             f(index, name);
         }
     }
