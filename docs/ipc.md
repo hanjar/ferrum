@@ -424,7 +424,7 @@ Behaviour the contract relies on:
 - **Merged triggers** (design §9.5): when the owner of a merged queue entry is paused, edited, deleted, held or in review,
   the merged triggers move to the first other healthy automation of the profile.
 
-**Automatic runs are off.** While `UNATTENDED_RUNS_ENABLED` is false (the shipped state) the host starts the engine
+**Automatic runs** are ON since FER-525 (P1.4: `UNATTENDED_RUNS_ENABLED = true`, a separate commit that can be reverted alone). While `UNATTENDED_RUNS_ENABLED` is false (the state before that commit) the host starts the engine
 only for a Run now or Retry the user asked for. A queue entry of any other kind (schedule, watch, catch-up, pending
 rerun, "folder is back") is not started: it stays in the queue, `automation_list` shows `Queued` with the sub-line
 "Waiting - run it with Run now", and one event says so. An entry the gate kept waiting (device, conditions, busy

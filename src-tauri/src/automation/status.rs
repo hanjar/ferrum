@@ -90,7 +90,8 @@ pub enum QueueWait {
     Battery,
     /// OP-1: on a metered network.
     Metered,
-    /// Nothing blocks it, but automatic runs are switched off (`host::UNATTENDED_RUNS_ENABLED`):
+    /// Nothing blocks it, but automatic runs are switched off (`host::UNATTENDED_RUNS_ENABLED`,
+    /// on since FER-525; kept for a build or a test that turns it off):
     /// only the user's Run now starts it.
     RunNowOnly,
     /// Nothing blocks it; the host starts it next.

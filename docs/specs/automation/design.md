@@ -1080,7 +1080,7 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   logged with the OS error.
 - **Engine.** A run asks `lease.covers()` at least every 2 s (P0.2 review P3-12) in addition to `is_lost()`, between
   operations and from the watcher that cancels a copy in flight.
-- **Automatic runs are OFF (`host::UNATTENDED_RUNS_ENABLED = false`, decision after the P1.3 review).**
+- **Automatic runs were OFF in P1.3 (`host::UNATTENDED_RUNS_ENABLED = false`, decision after the P1.3 review); FER-525 (P1.4) turns them ON in its own, revertible commit. The text below describes the OFF behaviour, which tests still exercise per thread.**
   The engine runs only when the user asks at that moment (Run now, Retry). Parked, not run: pending reruns, the
   fresh comparison after a folder came back (`Available`), entries of triggers (schedule, watch, catch-up, startup),
   entries the gate kept waiting (device, conditions, busy folders) that would start later by themselves, and the

@@ -76,17 +76,18 @@ mod tests_schedule;
 
 /// The host refreshes its row this often (design §3.3: every 5 s).
 pub const BEAT_EVERY_MS: i64 = 5_000;
-/// **Automatic runs are OFF.** While this is `false` the engine runs only when the user asks at
-/// that moment (Run now, Retry). Everything that would start it on its own is parked: pending
-/// reruns, the fresh comparison after a folder came back (`Available`), entries of triggers
-/// (schedule, watch, catch-up, startup), entries the gate kept waiting (device, conditions,
-/// busy folders) that would run later by themselves, and the move of merged triggers to a
-/// sibling. A parked entry stays in the queue and says "Waiting - run it with Run now".
+/// **Automatic runs.** While this is `false` the engine runs only when the user asks at that
+/// moment (Run now, Retry). Everything that would start it on its own is parked: pending reruns,
+/// the fresh comparison after a folder came back (`Available`), entries of triggers (schedule,
+/// watch, catch-up, startup), entries the gate kept waiting (device, conditions, busy folders)
+/// that would run later by themselves, and the move of merged triggers to a sibling. A parked
+/// entry stays in the queue and says "Waiting - run it with Run now".
 ///
-/// AUTO-P0.2c (P0.2 review P3-2 and P3-3: re-check the target at the commit of an in-place
-/// overwrite; restore the old target when a versioning overwrite fails or is cancelled) is
-/// REQUIRED before this is switched on.
-pub const UNATTENDED_RUNS_ENABLED: bool = false;
+/// Switched ON by FER-525 (P1.4), once the scheduler exists, AUTO-P0.2c (P0.2 review P3-2 and
+/// P3-3, FER-564) is in and the schedule hook's entries are gated like every other entry. It is
+/// a separate commit so it can be reverted alone; with it off the schedule still queues, and
+/// the entries are parked.
+pub const UNATTENDED_RUNS_ENABLED: bool = true;
 
 #[cfg(test)]
 thread_local! {
