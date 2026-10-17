@@ -283,6 +283,18 @@ fn schedule_preview(
         .collect()
 }
 
+/// SC-1 / SC-2 rules that need the clock and the zone database (Once date range, time passed,
+/// unknown zone), enforced by the backend at test and approve as well as at validate.
+fn schedule_rules(policy: &model::AutomationPolicy, now_ms: i64) -> Result<(), CommandError> {
+    let mut errors = Vec::new();
+    schedule_preview(policy, now_ms, &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(field_error(&errors))
+    }
+}
+
 fn draft_name_errors(draft: &AutomationDraft) -> Vec<model::FieldError> {
     let name = draft.name.trim();
     let mut errors = Vec::new();
@@ -339,6 +351,7 @@ pub fn test_in(
         .draft
         .validate(&profile.policy)
         .map_err(|e| field_error(&e))?;
+    schedule_rules(&req.draft.policy, clock())?;
     // The hash covers the automation id, so a NEW automation gets its id now; approve takes it
     // from this record and the webview never chooses an id.
     let automation_id = match (&req.id, &existing) {
@@ -440,6 +453,7 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
         .draft
         .validate(&profile.policy)
         .map_err(|e| field_error(&e))?;
+    schedule_rules(&req.draft.policy, (deps.clock)())?;
     if let Some(row) = &existing
         && req.expected_config_rev != Some(row.config_rev)
     {

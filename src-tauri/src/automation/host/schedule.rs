@@ -38,6 +38,17 @@ use crate::automation::store::{StoreError, events, profiles, runtime};
 
 use super::request::{self, RequestError};
 
+/// A `last_fired` further ahead of the clock than this cannot come from a zone offset or a DST
+/// shift (both are under a day): the clock was set far forward and back. It is clamped to `now`.
+const MAX_LAST_FIRED_AHEAD_MS: i64 = 26 * 3_600_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs between the read and the write of a pass, to change the rows under it.
+    pub(super) static BETWEEN: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The persisted cursor is refreshed at most this often when nothing else happens.
 const CURSOR_EVERY_MS: i64 = 60_000;
 /// The pass looks again at least this often (the spec's `min(next - now, 60 s)`).
@@ -83,7 +94,11 @@ struct Job {
     config_rev: i64,
     schedule: Schedule,
     missed: MissedPolicy,
+    /// What the rows hold (compare and set) and what the pass evaluated from (`last_fired`
+    /// clamped when it lies absurdly far ahead of the clock).
+    stored: SchedState,
     state: SchedState,
+    clamped: bool,
     stored_next: Option<i64>,
     eval: Evaluation,
 }
@@ -140,6 +155,12 @@ pub(super) fn pass<D: HostDeps>(inner: &Arc<Inner<D>>, now: i64) {
             wake = wake.min(next.max(now));
         }
     }
+    #[cfg(test)]
+    BETWEEN.with(|b| {
+        if let Some(f) = b.borrow().as_ref() {
+            f();
+        }
+    });
     let work: Vec<&Job> = jobs.iter().filter(|j| needs_write(j, now)).collect();
     if !work.is_empty() {
         let text = why_text(inner.class, why);
@@ -189,9 +210,20 @@ fn read_jobs(
             // An unknown zone never fires; the editor refuses it before it is approved.
             continue;
         };
-        let state = SchedState {
+        let stored = SchedState {
             cursor_ms: rt.schedule_cursor_ms,
             last_fired_ms: rt.last_fired_occurrence_ms,
+        };
+        let clamped = stored
+            .last_fired_ms
+            .is_some_and(|l| l > now.saturating_add(MAX_LAST_FIRED_AHEAD_MS));
+        let state = SchedState {
+            last_fired_ms: if clamped {
+                Some(now)
+            } else {
+                stored.last_fired_ms
+            },
+            ..stored
         };
         let eval = schedule.evaluate(state, now, trigger.missed);
         out.push(Job {
@@ -202,7 +234,9 @@ fn read_jobs(
             config_rev: rec.config_rev,
             schedule,
             missed: trigger.missed,
+            stored,
             state,
+            clamped,
             stored_next: rt.next_occurrence_ms,
             eval,
         });
@@ -214,7 +248,8 @@ fn read_jobs(
 /// host does not touch the store (or bump `change_seq`) every second.
 fn needs_write(job: &Job, now: i64) -> bool {
     let e = &job.eval;
-    e.fire.is_some()
+    job.clamped
+        || e.fire.is_some()
         || e.catch_up
         || !e.missed.is_empty()
         || !e.gaps.is_empty()
@@ -244,14 +279,23 @@ fn apply<D: HostDeps>(
     if !rec.enabled
         || rec.policy != job.policy_json
         || rec.config_rev != job.config_rev
-        || rt.schedule_cursor_ms != job.state.cursor_ms
-        || rt.last_fired_occurrence_ms != job.state.last_fired_ms
+        || rt.schedule_cursor_ms != job.stored.cursor_ms
+        || rt.last_fired_occurrence_ms != job.stored.last_fired_ms
     {
         return Ok(false);
     }
     let e = &job.eval;
     let keys = inner.deps.keys();
 
+    if job.clamped {
+        events::add_event(
+            conn,
+            &job.id,
+            now,
+            EventKind::Warn,
+            "The clock moved back past the last scheduled run; the schedule continues from now",
+        )?;
+    }
     for gap in &e.gaps {
         skipped_entry(conn, inner, job, &gap.text, now)?;
     }

@@ -1087,6 +1087,56 @@ fn validate_enforces_the_once_rules_with_the_codes_the_editor_maps() {
 }
 
 #[test]
+fn test_and_approve_enforce_the_once_and_zone_rules_in_the_backend() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Once rules");
+    // T0 = 2025-10-09T08:53:20Z = 15:53 on the 9th in Jakarta.
+    let once = |date: &str, time: &str| {
+        with_trigger(
+            &draft,
+            model::Freq::Once { date: date.into() },
+            time,
+            "Asia/Jakarta",
+        )
+    };
+    let good = once("2025-10-10", "09:00");
+    let result = fx.test(None, &good);
+    assert!(result.passed);
+    for bad in [
+        once("2025-10-09", "15:00"), // time passed
+        once("2025-10-08", "23:00"), // date passed
+        once("2025-10-23", "09:00"), // 14 days ahead
+        with_trigger(&draft, model::Freq::Daily {}, "10:00", "Mars/Olympus"),
+    ] {
+        let tested = with_test_deps(|deps| {
+            test_in(
+                &fx.store,
+                &fx.ledger,
+                TestRequest {
+                    id: None,
+                    draft: bad.clone(),
+                },
+                deps,
+                fx.clock(),
+            )
+        });
+        assert_eq!(tested.unwrap_err().code, "invalid_input");
+        let approved = approve_in(
+            &fx.store,
+            ApproveRequest {
+                id: None,
+                expected_config_rev: None,
+                draft: bad.clone(),
+                test_id: result.test_id.clone(),
+            },
+            &fx.deps(),
+            |_| true,
+        );
+        assert_eq!(approved.unwrap_err().code, "invalid_input");
+    }
+}
+
+#[test]
 fn test_in_records_the_hash_and_names_the_id_of_a_new_automation() {
     let fx = Fixture::new();
     let (profile, revision, draft) = draft_of(&fx, "Nightly");

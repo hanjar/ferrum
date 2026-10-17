@@ -457,6 +457,166 @@ fn a_host_runs_only_schedules_of_its_own_class() {
     assert_eq!(rt(&rig, &a).schedule_cursor_ms, None, "untouched");
 }
 
+// ── A clock that jumped far forward and came back (review S1) ──
+
+#[test]
+fn a_clock_set_a_year_ahead_and_back_does_not_silence_the_schedule() {
+    let rig = Rig::new();
+    let (a, _) = scheduled(&rig, "Year", MissedPolicy::Skip);
+    let host = rig.host(1, HostClass::App);
+    tick(&host);
+    // The clock is wrongly set 365 days ahead: the 10:00 of that day fires (once) and the days
+    // in between are one Skipped entry.
+    set_clock(&rig, OCC1 + 365 * DAY + 5 * SEC);
+    tick(&host);
+    assert_eq!(rig.world.calls().len(), 1);
+    assert_eq!(
+        rt(&rig, &a).last_fired_occurrence_ms,
+        Some(OCC1 + 365 * DAY)
+    );
+    // The user corrects it: back to the evening before the next real occurrence.
+    set_clock(&rig, OCC1 + DAY - HOUR);
+    host.recompute_schedules(Recompute::TimeChanged);
+    tick(&host);
+    assert!(
+        rig.event_texts(&a)
+            .iter()
+            .any(|t| t.contains("clock moved back past the last scheduled run"))
+    );
+    assert!(rt(&rig, &a).last_fired_occurrence_ms.unwrap() <= rig.now());
+    assert_eq!(rt(&rig, &a).next_occurrence_ms, Some(OCC1 + DAY));
+    // The next real occurrence runs, once.
+    set_clock(&rig, OCC1 + DAY + 5 * SEC);
+    tick(&host);
+    assert_eq!(rig.world.calls().len(), 2);
+    for _ in 0..3 {
+        rig.advance(30 * SEC);
+        tick(&host);
+    }
+    assert_eq!(rig.world.calls().len(), 2, "no double run");
+}
+
+fn reset(rig: &Rig, a: &str) {
+    rig.fx
+        .store
+        .with_write(|c| -> Result<(), StoreError> {
+            automations::reset_runtime(c, a, "app", "scheduled", rig.now())?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn approve_and_resume_pull_a_future_mark_back_and_start_the_cursor_at_now() {
+    let rig = Rig::new();
+    let (a, _) = scheduled(&rig, "Reset", MissedPolicy::Skip);
+    set_state(&rig, &a, Some(OCC1 + 300 * DAY), Some(OCC1 + 300 * DAY));
+    reset(&rig, &a);
+    let row = rt(&rig, &a);
+    assert_eq!(row.schedule_cursor_ms, Some(rig.now()));
+    assert_eq!(row.last_fired_occurrence_ms, Some(rig.now()));
+    // A mark in the past is left alone.
+    set_state(&rig, &a, None, Some(T0 - DAY));
+    reset(&rig, &a);
+    assert_eq!(rt(&rig, &a).last_fired_occurrence_ms, Some(T0 - DAY));
+}
+
+// ── Compare and set (review S2) ──
+
+fn due_host(rig: &Rig, name: &str) -> (String, super::Host<FakeDeps>) {
+    let (a, _) = scheduled(rig, name, MissedPolicy::RunOnce);
+    let host = rig.host(1, HostClass::App);
+    tick(&host);
+    set_clock(rig, OCC1 + 5 * SEC);
+    (a, host)
+}
+
+fn between(f: impl Fn() + 'static) {
+    super::schedule::BETWEEN.with(|b| *b.borrow_mut() = Some(Box::new(f)));
+}
+
+fn tick_with_hook(host: &super::Host<FakeDeps>) {
+    host.tick();
+    settle(host);
+    super::schedule::BETWEEN.with(|b| *b.borrow_mut() = None);
+}
+
+fn nothing_happened(rig: &Rig) {
+    assert_eq!(rig.queue_len(), 0, "no queue entry");
+    assert!(rig.runs().is_empty(), "no history row");
+    assert!(rig.world.calls().is_empty());
+}
+
+#[test]
+fn a_second_writer_that_handled_the_occurrence_first_wins() {
+    let rig = Rig::new();
+    let (a, host) = due_host(&rig, "Two writers");
+    let store = rig.fx.store.clone();
+    let id = a.clone();
+    // Another pass (another process) fired it between our read and our write.
+    between(move || {
+        store
+            .with_write(|c| -> Result<(), StoreError> {
+                runtime::set_schedule(c, &id, Some(OCC1 + 4 * SEC), Some(OCC1), None, OCC1)?;
+                Ok(())
+            })
+            .unwrap();
+    });
+    tick_with_hook(&host);
+    nothing_happened(&rig);
+    assert_eq!(rt(&rig, &a).last_fired_occurrence_ms, Some(OCC1));
+    // The next pass reads the other writer's state: the occurrence is handled, not repeated.
+    rig.advance(10 * SEC);
+    tick(&host);
+    nothing_happened(&rig);
+}
+
+#[test]
+fn a_pause_between_read_and_write_queues_nothing() {
+    let rig = Rig::new();
+    let (a, host) = due_host(&rig, "Pause between");
+    let store = rig.fx.store.clone();
+    let id = a.clone();
+    between(move || {
+        store
+            .with_write(|c| -> Result<(), StoreError> {
+                automations::set_enabled(c, &id, false, OCC1)?;
+                Ok(())
+            })
+            .unwrap();
+    });
+    tick_with_hook(&host);
+    nothing_happened(&rig);
+    assert_eq!(
+        rt(&rig, &a).last_fired_occurrence_ms,
+        None,
+        "nothing consumed"
+    );
+}
+
+#[test]
+fn an_edit_between_read_and_write_queues_nothing() {
+    let rig = Rig::new();
+    let (a, host) = due_host(&rig, "Edit between");
+    let store = rig.fx.store.clone();
+    let id = a.clone();
+    between(move || {
+        store
+            .with_write(|c| -> Result<(), StoreError> {
+                c.execute(
+                    "UPDATE automations SET config_rev = config_rev + 1 WHERE id = ?1",
+                    [&id],
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                Ok(())
+            })
+            .unwrap();
+    });
+    tick_with_hook(&host);
+    nothing_happened(&rig);
+    assert_eq!(rt(&rig, &a).last_fired_occurrence_ms, None);
+}
+
 // ── Condition 2: a merged trigger cannot make a stale Run now eligible again ──
 
 fn enqueue_at(rig: &Rig, a: &str, p: &str, kind: TriggerKind, text: &str, at: i64) {

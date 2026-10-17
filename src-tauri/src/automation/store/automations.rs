@@ -173,7 +173,9 @@ pub fn reset_runtime(
          ON CONFLICT(automation_id) DO UPDATE SET
            host_class = ?2, trigger_state = ?3, state_since_ms = ?4,
            quiet_until_ms = NULL, burst_started_ms = NULL, pending_rerun = 0,
-           check_reason = NULL, next_occurrence_ms = NULL, schedule_cursor_ms = NULL,
+           check_reason = NULL, next_occurrence_ms = NULL, schedule_cursor_ms = ?4,
+           last_fired_occurrence_ms = CASE WHEN last_fired_occurrence_ms > ?4 THEN ?4
+                                           ELSE last_fired_occurrence_ms END,
            updated_ms = ?4",
         params![automation_id, host_class, trigger_state, now_ms],
     )
