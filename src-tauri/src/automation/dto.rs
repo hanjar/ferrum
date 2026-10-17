@@ -144,6 +144,47 @@ pub enum PauseMode {
     Stop,
 }
 
+// ── Controls (P1.3, design §7.2): Run now, Stop, Recheck, Retry ──
+
+/// What a request to run turned into (the toasts of RQ-4). `requested` = a control was written
+/// for the host that owns the automation (the background runner); it answers through the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueueStatus {
+    Queued,
+    Waiting,
+    Merged,
+    Device,
+    Requested,
+}
+
+/// The answer of `automation_run_now` and `automation_retry`. `waits_for` names the automation
+/// whose run uses the same folders, for `waiting`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueResultDto {
+    pub status: QueueStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits_for: Option<String>,
+}
+
+/// The answer of `automation_stop_run` and `automation_recheck`: the request was recorded and the
+/// host that owns the run will act on it. The outcome shows up in the run and in
+/// `automation://changed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum RequestedDto {
+    Requested,
+}
+
+/// Payload of the event `automation://changed`: `meta.change_seq` moved - re-read what is on
+/// screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedEventDto {
+    pub seq: i64,
+}
+
 // ── Read side (P1.2, design §7.2): list, detail, history, operations, events ──
 
 pub use crate::automation::status::{StatusDto, StatusKind};

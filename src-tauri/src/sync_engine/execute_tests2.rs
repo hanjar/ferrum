@@ -533,6 +533,63 @@ fn a_lost_lease_stops_the_run_and_the_baseline_is_not_saved() {
     ));
 }
 
+// FER-524 (P0.2 review P3-12): `is_lost` only flips when the holder's own heartbeat notices. A
+// lease whose heartbeat stalled (here: its clock moved on and nothing beat) no longer COVERS the
+// folders, and the run must stop before the next operation instead of working on folders another
+// holder may have taken.
+#[test]
+fn a_lease_that_stopped_covering_the_folders_stops_the_run_even_if_it_never_noticed() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let mut rig = Rig::new();
+    let clock = Arc::new(AtomicI64::new(5_000_000));
+    rig.lease_env = LeaseEnv {
+        clock: {
+            let c = clock.clone();
+            Arc::new(move || c.load(Ordering::SeqCst))
+        },
+        probe: Arc::new(crate::automation::store::leases::OsProcessProbe),
+        holder: crate::automation::store::leases::Holder::current(),
+        // The heartbeat never gets to run in this test: `is_lost` stays false.
+        beat_every: Duration::from_secs(3600),
+        max_manual_hold_ms: crate::automation::lease::MAX_MANUAL_HOLD_MS,
+    };
+    for i in 0..4 {
+        write(&rig.left.join(format!("d{i}")).join("f.txt"), b"data");
+    }
+    let profile = rig.profile(one_way(), DeletePolicy::Permanent);
+    let lease = rig.lease(&profile);
+    let hooks = Arc::new(TestHooks::default());
+    let clock_for_hook = clock.clone();
+    *hooks.before_op.lock().unwrap() = Some(Box::new(move |index, _| {
+        if index == 2 {
+            // 40 s pass without a beat: the row is stale, but nobody told the guard.
+            clock_for_hook.fetch_add(40_000, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(2_300));
+        }
+    }));
+    let mut env = test_env();
+    env.hooks = hooks;
+    let sink = Recorder::default();
+    let mut req = EngineRequest::new(&profile, &rig.baselines, &sink, &env);
+    req.lease = Some(&lease);
+    let report = run(&req);
+    assert!(!lease.is_lost(), "the guard never noticed anything");
+    match report.outcome {
+        EngineOutcome::Interrupted { why, counts } => {
+            assert_eq!(why, InterruptReason::LeaseLost);
+            assert!(counts.done >= 1 && counts.not_started >= 1, "{counts:?}");
+        }
+        other => panic!("expected Interrupted, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            rig.baselines.load(&pair_of(&profile)).unwrap(),
+            LoadResult::FirstRun { .. }
+        ),
+        "no baseline was saved on a lease that does not cover the folders"
+    );
+}
+
 // ── Indexer path (IX-1) ──
 
 mod indexer {

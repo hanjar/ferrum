@@ -67,9 +67,13 @@ pub use requeue::requeue_siblings;
 mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_flows;
 
 /// The host refreshes its row this often (design §3.3: every 5 s).
 pub const BEAT_EVERY_MS: i64 = 5_000;
+/// A process that does not host asks for the role this often.
+pub const CLAIM_RETRY_MS: i64 = 1_000;
 /// The host looks at `meta.change_seq` this often (MH-10: views follow within 2 s).
 pub const POLL_EVERY_MS: i64 = 2_000;
 /// A queue entry that the gate kept waiting is tried again after this long.
@@ -413,9 +417,16 @@ impl<D: HostDeps> Host<D> {
         let inner = &self.inner;
         {
             let state = inner.lock();
+            // The host refreshes its row every 5 s; a process that does not host looks again
+            // every second, so a dead host is replaced within a second of its 15 s window.
+            let gap = if state.hosting {
+                BEAT_EVERY_MS
+            } else {
+                CLAIM_RETRY_MS
+            };
             if state
                 .last_claim_ms
-                .is_some_and(|t| now.saturating_sub(t) < BEAT_EVERY_MS && now >= t)
+                .is_some_and(|t| now.saturating_sub(t) < gap && now >= t)
             {
                 return state.hosting;
             }

@@ -266,7 +266,11 @@ pub fn run() {
             automation::commands::automation_get,
             automation::commands::automation_history,
             automation::commands::automation_run_ops,
-            automation::commands::automation_events
+            automation::commands::automation_events,
+            automation::commands::automation_run_now,
+            automation::commands::automation_stop_run,
+            automation::commands::automation_recheck,
+            automation::commands::automation_retry
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())
@@ -380,10 +384,20 @@ pub fn run() {
             // schema opens read-only (LC-3).
             app.handle().manage(automation::commands::AutomationState::open());
             app.handle().manage(automation::manual_run::PreviewBoard::default());
+            // The in-app automation host (P1.3, RT-4): elects one instance per user, passes every
+            // run through the gate, records history. Its loop is its own thread.
+            automation::commands::start_host(app.handle());
             Ok(())
         })
-        .run(context)
-        .expect("error while building tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // LC-2: a run in progress stops after its current file and is recorded as
+            // Interrupted; the host role is released so another instance takes over at once.
+            if let tauri::RunEvent::Exit = event {
+                automation::commands::stop_host(app);
+            }
+        });
 }
 
 /// FER-559: no archive entry may land in a Windows Startup folder (see `startup_guard`).

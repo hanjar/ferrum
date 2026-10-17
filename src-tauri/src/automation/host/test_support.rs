@@ -297,6 +297,20 @@ pub fn cancelled(done: u32, total: u32) -> EngineReport {
     )
 }
 
+pub fn interrupted(
+    done: u32,
+    total: u32,
+    why: crate::sync_engine::InterruptReason,
+) -> EngineReport {
+    report(
+        EngineOutcome::Interrupted {
+            counts: counts(total, done, 0, total - done, 0),
+            why,
+        },
+        vec![],
+    )
+}
+
 pub fn failed(code: &'static str, text: &str) -> EngineReport {
     report(
         EngineOutcome::Failed {
@@ -435,6 +449,55 @@ impl Rig {
                         left: left.to_string_lossy().into_owned(),
                         right: right.to_string_lossy().into_owned(),
                         mode: WireMode::Mirror,
+                        from: Some(WireSide::Left),
+                        propagate_deletes: None,
+                        delete_policy: WireDeletePolicy::RecycleBin,
+                        versioning_root: None,
+                        compare: WireCompare::SizeAndDate,
+                        include: vec![],
+                        exclude: vec![],
+                        guard: DraftGuard {
+                            enabled: true,
+                            max_count: 50,
+                            max_percent: 20,
+                        },
+                    },
+                },
+            },
+            &probe,
+            |_| true,
+            self.now(),
+        )
+        .unwrap();
+        let profile = match saved {
+            SaveResultDto::Saved { profile } => profile.id,
+            other => panic!("expected saved, got {other:?}"),
+        };
+        let id = self.fx.new_automation(name, &profile, Fixture::daily());
+        (id, profile)
+    }
+
+    /// A new approved automation on a profile that shares its LEFT folder with another one (the
+    /// folders overlap, so their runs wait for each other).
+    pub fn overlapping_automation(&self, name: &str, left: &str) -> (String, String) {
+        use crate::automation::commands::{SaveRequest, SaveResultDto};
+        use crate::automation::model::{
+            Draft, DraftGuard, PolicyDraft, WireCompare, WireDeletePolicy, WireMode, WireSide,
+        };
+        let right = self.fx.tmp.path().join(format!("{name}-overlap-right"));
+        std::fs::create_dir_all(&right).unwrap();
+        let probe: Arc<dyn crate::sync_engine::roots::RootProbe> = Arc::new(FsProbe);
+        let saved = crate::automation::commands::save_in(
+            &self.fx.store,
+            SaveRequest {
+                id: None,
+                expected_revision: None,
+                draft: Draft {
+                    name: format!("Overlap of {name}"),
+                    policy: PolicyDraft {
+                        left: left.to_string(),
+                        right: right.to_string_lossy().into_owned(),
+                        mode: WireMode::OneWay,
                         from: Some(WireSide::Left),
                         propagate_deletes: None,
                         delete_policy: WireDeletePolicy::RecycleBin,
