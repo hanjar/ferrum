@@ -102,6 +102,26 @@ pub fn run_move(
             });
             continue;
         }
+        // FER-563: the lexical test above misses aliases (8.3 names, letter case, hard links).
+        // Compare identities before ANY destructive step: the fallback deletes the source.
+        if crate::file_identity::is_same_or_inside(&target, &s)
+            && fs::symlink_metadata(&s).is_ok_and(|m| m.is_dir())
+        {
+            out.failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: "Cannot move a folder into itself".into(),
+            });
+            continue;
+        }
+        if dest.exists() && crate::file_identity::same_entry(&s, &dest) {
+            out.failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: "Source and destination are the same file".into(),
+            });
+            continue;
+        }
         if dest.exists() && matches!(policy, ConflictPolicy::Ask | ConflictPolicy::Skip) {
             // Ask: planning surfaced it; Skip: explicit skip.
             out.skipped += 1;
@@ -541,5 +561,135 @@ mod tests {
         assert_eq!(ev, vec!["flush", "commit", "dirflush"]);
         assert!(!root.join("a").join("x.txt").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- FER-563: identity (alias) guards -------------------------------------------------
+
+    /// Short (8.3) form of an existing path, when the volume generates one.
+    #[cfg(windows)]
+    fn short_path(p: &Path) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        if n == 0 || n as usize >= buf.len() {
+            return None;
+        }
+        Some(PathBuf::from(std::ffi::OsString::from_wide(
+            &buf[..n as usize],
+        )))
+    }
+
+    fn all_policies() -> [ConflictPolicy; 5] {
+        [
+            ConflictPolicy::Ask,
+            ConflictPolicy::Skip,
+            ConflictPolicy::Overwrite,
+            ConflictPolicy::OverwriteOlder,
+            ConflictPolicy::RenameAuto,
+        ]
+    }
+
+    /// Moving `file` into `alias_dir` (another spelling of the file's own folder) must never
+    /// lose the data, for every policy and both the rename and the fallback paths.
+    fn assert_self_move_is_safe(file: &Path, alias_dir: &Path) {
+        for policy in all_policies() {
+            for force in [false, true] {
+                write(file, b"ONLY-COPY");
+                let out = mv(
+                    std::slice::from_ref(&file.to_path_buf()),
+                    alias_dir,
+                    policy,
+                    force,
+                );
+                assert!(
+                    file.exists() && fs::read(file).unwrap() == b"ONLY-COPY",
+                    "data lost: policy {policy:?} force {force}: {out:?}"
+                );
+                assert_eq!(out.moved, 0, "{policy:?} force {force}: {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fer563_move_into_own_folder_via_case_alias_keeps_the_file() {
+        let root = temp("case-alias");
+        let file = root.join("MixedCase").join("a.txt");
+        write(&file, b"ONLY-COPY");
+        assert_self_move_is_safe(&file, &root.join("mixedcase"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fer563_move_into_own_folder_via_short_name_keeps_the_file() {
+        let root = temp("short-alias");
+        let long = root.join("a-rather-long-folder-name");
+        let file = long.join("a.txt");
+        write(&file, b"ONLY-COPY");
+        let Some(short) = short_path(&long).filter(|s| s != &long) else {
+            eprintln!("8.3 names disabled on this volume; short-name variant skipped");
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
+        assert_self_move_is_safe(&file, &short);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fer563_move_onto_a_hardlink_of_itself_keeps_the_file() {
+        let root = temp("hardlink");
+        let a = root.join("a.txt");
+        write(&a, b"ONLY-COPY");
+        let dir = root.join("other");
+        fs::create_dir(&dir).unwrap();
+        fs::hard_link(&a, dir.join("a.txt")).unwrap();
+        for policy in all_policies() {
+            for force in [false, true] {
+                let out = mv(std::slice::from_ref(&a), &dir, policy, force);
+                assert!(
+                    a.exists() && fs::read(&a).unwrap() == b"ONLY-COPY",
+                    "source lost: {policy:?} force {force}: {out:?}"
+                );
+                assert!(
+                    dir.join("a.txt").exists()
+                        && fs::read(dir.join("a.txt")).unwrap() == b"ONLY-COPY",
+                    "link lost: {policy:?} force {force}: {out:?}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fer563_folder_into_itself_via_case_alias_is_refused() {
+        let root = temp("case-nested");
+        write(&root.join("Src/a.txt"), b"a");
+        fs::create_dir_all(root.join("Src/inner")).unwrap();
+        let out = mv(
+            &[root.join("Src")],
+            &root.join("src").join("inner"),
+            ConflictPolicy::Overwrite,
+            false,
+        );
+        assert_eq!(out.moved, 0, "{out:?}");
+        assert!(root.join("Src/a.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fer563_normal_moves_still_work_with_all_policies() {
+        for policy in all_policies() {
+            let root = temp("normal");
+            write(&root.join("src/f.txt"), b"data");
+            let dest = root.join("out");
+            fs::create_dir(&dest).unwrap();
+            let out = mv(&[root.join("src/f.txt")], &dest, policy, false);
+            assert_eq!(out.moved, 1, "{policy:?} {out:?}");
+            assert_eq!(fs::read(dest.join("f.txt")).unwrap(), b"data");
+            assert!(!root.join("src/f.txt").exists());
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 }

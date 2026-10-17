@@ -322,7 +322,11 @@ pub fn plan_copy(sources: &[String], target_dir: &str) -> Result<CopyPlan, FsErr
             return Err(err(ErrorCode::NotFound, "Source not found").with_path(src));
         }
         // Rejections that make no sense to ask about (task 11 tests).
-        if is_within(target, &s) {
+        // FER-559: plain/verbatim spellings, case and `/` (path keys); FER-563: also aliases
+        // (8.3 names, ...) of the source folder, by file identity.
+        if is_within(target, &s)
+            || (s.is_dir() && crate::file_identity::is_same_or_inside(target, &s))
+        {
             return Err(
                 err(ErrorCode::InvalidPath, "Cannot copy a folder into itself").with_path(src),
             );
@@ -890,6 +894,16 @@ fn walk_sources(sh: &Shared, sources: &[String], target: &Path, policy: Conflict
             Resolved::Rename(dest) => {
                 sh.out.lock().unwrap().renamed += 1;
                 (dest, false)
+            }
+            Resolved::Overwrite(p) if crate::file_identity::same_entry(&s, &p) => {
+                // FER-563: replacing a file with itself (alias spelling of the same path or a
+                // hard link) is never meaningful; a move built on this deletes the source next.
+                sh.out.lock().unwrap().failures.push(FailedCopy {
+                    source: src.clone(),
+                    code: ErrorCode::InvalidPath,
+                    message: "Source and destination are the same file".into(),
+                });
+                continue;
             }
             Resolved::Overwrite(p) => {
                 sh.out.lock().unwrap().overwritten += 1;
@@ -2774,5 +2788,41 @@ mod tests {
         });
         assert!(!d.exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fer563_copy_onto_itself_via_case_alias_or_hardlink_is_refused_and_keeps_the_data() {
+        let root = temp("fer563-copy");
+        let file = root.join("MixedCase").join("a.txt");
+        write(&file, b"ONLY-COPY");
+        let alias = root.join("mixedcase");
+        let hl_dir = root.join("other");
+        fs::create_dir(&hl_dir).unwrap();
+        fs::hard_link(&file, hl_dir.join("a.txt")).unwrap();
+        for target in [&alias, &hl_dir] {
+            let out = run_copy(
+                &[file.to_string_lossy().into_owned()],
+                &target.to_string_lossy(),
+                ConflictPolicy::Overwrite,
+                &no_cancel(),
+                &silent,
+            );
+            assert_eq!(out.failures.len(), 1, "{out:?}");
+            assert_eq!(out.copied_files, 0, "{out:?}");
+            assert_eq!(fs::read(&file).unwrap(), b"ONLY-COPY");
+        }
+        // Duplicating next to itself with auto-rename must keep working.
+        let out = run_copy(
+            &[file.to_string_lossy().into_owned()],
+            &file.parent().unwrap().to_string_lossy(),
+            ConflictPolicy::RenameAuto,
+            &no_cancel(),
+            &silent,
+        );
+        assert!(out.failures.is_empty(), "{out:?}");
+        assert_eq!(
+            fs::read(file.with_file_name("a (2).txt")).unwrap(),
+            b"ONLY-COPY"
+        );
     }
 }

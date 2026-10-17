@@ -164,11 +164,21 @@ fn purge_keeps_rank_summary_daily_hidden_vocabulary_and_grams_consistent() {
         (
             "mixed",
             "Mixed Reports",
-            &[DAY + 1, 2 * DAY + 1, 11 * DAY + 7, 12 * DAY + 9, 12 * DAY + 20],
+            &[
+                DAY + 1,
+                2 * DAY + 1,
+                11 * DAY + 7,
+                12 * DAY + 9,
+                12 * DAY + 20,
+            ],
         ),
         ("fresh", "Fresh Notes", &[10 * DAY, 11 * DAY, 20 * DAY]),
         ("hiddenold", "Hidden Past", &[DAY]),
-        ("hiddenmixed", "Hidden Mixed", &[DAY + 3, 15 * DAY, 16 * DAY]),
+        (
+            "hiddenmixed",
+            "Hidden Mixed",
+            &[DAY + 3, 15 * DAY, 16 * DAY],
+        ),
     ];
     for (id, name, times) in plan {
         for at in *times {
@@ -189,13 +199,21 @@ fn purge_keeps_rank_summary_daily_hidden_vocabulary_and_grams_consistent() {
     // old: 3, mixed: 2, hiddenold: 1, hiddenmixed: 1
     assert_eq!(removed, 7);
     assert_eq!(store.episode_count().unwrap(), total - 7);
-    assert_eq!(store.privacy_epoch().unwrap(), epoch, "purge does not bump epoch");
+    assert_eq!(
+        store.privacy_epoch().unwrap(),
+        epoch,
+        "purge does not bump epoch"
+    );
 
     let connection = Connection::open(&path).unwrap();
     assert_consistent(&connection);
     assert_eq!(
         rows(&connection, "SELECT id FROM activity_entities ORDER BY id"),
-        vec!["Text(\"fresh\")", "Text(\"hiddenmixed\")", "Text(\"mixed\")"]
+        vec![
+            "Text(\"fresh\")",
+            "Text(\"hiddenmixed\")",
+            "Text(\"mixed\")"
+        ]
     );
     assert_eq!(
         rows(
@@ -228,7 +246,10 @@ fn purge_keeps_rank_summary_daily_hidden_vocabulary_and_grams_consistent() {
         ),
         0
     );
-    assert_eq!(count(&connection, "SELECT COUNT(*) FROM activity_daily"), 3 + 2 + 2);
+    assert_eq!(
+        count(&connection, "SELECT COUNT(*) FROM activity_daily"),
+        3 + 2 + 2
+    );
     // hidden flag of a surviving entity is preserved; query surface still works
     assert_eq!(
         count(
@@ -258,7 +279,11 @@ fn purge_keeps_rank_summary_daily_hidden_vocabulary_and_grams_consistent() {
         "activity_vocabulary",
         "activity_search_grams",
     ] {
-        assert_eq!(count(&connection, &format!("SELECT COUNT(*) FROM {table}")), 0, "{table}");
+        assert_eq!(
+            count(&connection, &format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
     }
 }
 
@@ -272,7 +297,12 @@ fn purge_with_receipts_and_cascades_leaves_no_orphans() {
         let id = format!("e{index:02}");
         for slot in 0..4u64 {
             store
-                .record(&receipt(&id, &format!("Entity {index:02}"), (index % 5 + slot * 3) * DAY + 1, epoch))
+                .record(&receipt(
+                    &id,
+                    &format!("Entity {index:02}"),
+                    (index % 5 + slot * 3) * DAY + 1,
+                    epoch,
+                ))
                 .unwrap();
         }
     }
@@ -386,16 +416,34 @@ fn run_purge_perf(receipts: bool, whole: bool, limit_secs: u64) {
     let start = Instant::now();
     let removed = store.purge_before(cutoff).unwrap();
     let elapsed = start.elapsed();
-    println!("purge_before removed {removed} of {} episodes in {elapsed:?}", entities * 10);
+    println!(
+        "purge_before removed {removed} of {} episodes in {elapsed:?}",
+        entities * 10
+    );
     assert_eq!(removed as u64, entities * 10 / 2);
     let connection = Connection::open(&path).unwrap();
     let survivors = if whole { entities / 2 } else { entities } as i64;
-    assert_eq!(count(&connection, "SELECT COUNT(*) FROM activity_entities"), survivors);
-    assert_eq!(count(&connection, "SELECT COUNT(*) FROM activity_entity_summary"), survivors);
-    assert_eq!(count(&connection, "SELECT COUNT(*) FROM activity_entity_rank"), survivors);
-    assert_eq!(count(&connection, "SELECT COUNT(*) FROM activity_vocabulary"), survivors);
     assert_eq!(
-        count(&connection, "SELECT COUNT(*) FROM activity_daily WHERE last_utc_ms < 45 * 86400000"),
+        count(&connection, "SELECT COUNT(*) FROM activity_entities"),
+        survivors
+    );
+    assert_eq!(
+        count(&connection, "SELECT COUNT(*) FROM activity_entity_summary"),
+        survivors
+    );
+    assert_eq!(
+        count(&connection, "SELECT COUNT(*) FROM activity_entity_rank"),
+        survivors
+    );
+    assert_eq!(
+        count(&connection, "SELECT COUNT(*) FROM activity_vocabulary"),
+        survivors
+    );
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM activity_daily WHERE last_utc_ms < 45 * 86400000"
+        ),
         0
     );
     if receipts {

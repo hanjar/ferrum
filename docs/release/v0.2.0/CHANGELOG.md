@@ -50,6 +50,7 @@ Everything in the RC1 [CHANGELOG](../rc1/CHANGELOG.md) is still part of the prod
 - **Shortcuts** (#27): file shortcuts (F2, F5, F6, F7, F8, Shift+F8, Enter, Ctrl+A and the rest) no longer act on the hidden pane while the Activity page is open. Only Ctrl+K, Ctrl+, and the Activity toggle still work there.
 - **Hotlist** (#11): moving items in the Configure tree, and putting an item into an empty submenu, now works.
 - **Disk Usage** (#14): a block was labelled 1.0% when it was 99.8% of its parent. Labels are now relative to the focused folder.
+- **Move** (#30): moving a file into its own folder through another spelling of that folder (different letter case, an 8.3 short name or a hard link) with Overwrite could delete the only copy. Ferrum now compares the files' identity and refuses.
 
 ## CI and tooling
 
