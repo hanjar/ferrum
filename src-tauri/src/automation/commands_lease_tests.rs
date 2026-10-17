@@ -325,6 +325,37 @@ fn page_load_releases_the_manual_leases() {
     ));
 }
 
+/// R2-P3-1: the UI-thread hook only drains; the guards are dropped on a worker, after which the
+/// folders are free again.
+#[test]
+fn async_page_load_hook_frees_the_folders_off_thread() {
+    let (dir, store) = store();
+    let state = AutomationState {
+        store: store.clone(),
+        leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+    };
+    let (left, right) = folders(&dir, "left", "right");
+    let LeaseAcquireDto::Acquired(_) =
+        lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap()
+    else {
+        panic!("acquired");
+    };
+    assert_eq!(release_manual_leases_on_page_load_async(&state), 1);
+    assert_eq!(state.leases.held_count(), 0, "drained at once");
+    let mut freed = false;
+    for _ in 0..200 {
+        if matches!(
+            lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap(),
+            LeaseAcquireDto::Acquired(_)
+        ) {
+            freed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(freed, "the worker released the lease");
+}
+
 /// RQ-2 / SP-1.5: a junction and its target are the same folder, so a lease on one makes the
 /// other busy. Skipped (with a message) where a junction cannot be created.
 #[test]

@@ -1443,7 +1443,8 @@ fn benchmark_100k_entities_1m_episodes_query_p95() {
                 }
                 // Word-token prefix entries, as index_name() writes them (schema v13).
                 for word in lower.split(' ') {
-                    gram.execute(params![format!("{}{word}", char::from(1u8)), id]).unwrap();
+                    gram.execute(params![format!("{}{word}", char::from(1u8)), id])
+                        .unwrap();
                 }
                 let base = 90 * 86_400_000u64;
                 for slot in 0..EPISODES_PER_ENTITY {
@@ -1642,7 +1643,11 @@ fn frequent_rank_table_matches_bruteforce_and_follows_purge_and_forget() {
         assert_eq!(rows.len(), want.len());
         for (row, (id, score)) in rows.iter().zip(want) {
             assert_eq!(row.entity.id, id);
-            assert!((row.score - score).abs() < 1e-9, "{id}: {} vs {score}", row.score);
+            assert!(
+                (row.score - score).abs() < 1e-9,
+                "{id}: {} vs {score}",
+                row.score
+            );
         }
     };
     check(&mut store, &[]);
@@ -1712,10 +1717,18 @@ fn short_and_prefix_queries_are_served_by_token_index_not_gram_sampling() {
 #[test]
 fn recall_fixture_typos_and_abbreviations_still_resolve() {
     let mut store = ActivityStore::in_memory().unwrap();
-    store.record(&named_receipt("inv", "Invoice", 1, 0)).unwrap();
-    store.record(&named_receipt("prj", "project", 2, 0)).unwrap();
-    store.record(&named_receipt("doc", "documents", 3, 0)).unwrap();
-    store.record(&named_receipt("i26", "Invoice 2026", 4, 0)).unwrap();
+    store
+        .record(&named_receipt("inv", "Invoice", 1, 0))
+        .unwrap();
+    store
+        .record(&named_receipt("prj", "project", 2, 0))
+        .unwrap();
+    store
+        .record(&named_receipt("doc", "documents", 3, 0))
+        .unwrap();
+    store
+        .record(&named_receipt("i26", "Invoice 2026", 4, 0))
+        .unwrap();
     assert!(candidates(&mut store, "invoce", 0).contains(&"inv".to_string()));
     assert!(candidates(&mut store, "proejct", 0).contains(&"prj".to_string()));
     assert!(candidates(&mut store, "documemts", 0).contains(&"doc".to_string()));
@@ -1900,7 +1913,9 @@ fn entity_popularity_counts_episodes_inside_the_window_only() {
     visit_at(&mut store, "q", "C:\\Work\\q", "Q", 5 * D);
     let ids = vec!["p".to_string(), "q".to_string(), "missing".to_string()];
     let kind = ActivityKind::FolderVisit;
-    let all = store.entity_popularity(&ids, kind.clone(), 0, 6 * D).unwrap();
+    let all = store
+        .entity_popularity(&ids, kind.clone(), 0, 6 * D)
+        .unwrap();
     assert_eq!(all["p"].episodes, 3);
     assert_eq!(all["p"].active_days, 2);
     assert_eq!(all["p"].last_utc_ms, 5 * D + 120_000);
@@ -1958,7 +1973,10 @@ fn utc_day_boundary_controls_frequent_score_and_window() {
         .frequent(day - 39_999, day + 10_000, kind, 0, 10)
         .unwrap()
         .unwrap();
-    assert!(excluded.is_empty(), "one bucket left, below two active days");
+    assert!(
+        excluded.is_empty(),
+        "one bucket left, below two active days"
+    );
 }
 
 #[test]

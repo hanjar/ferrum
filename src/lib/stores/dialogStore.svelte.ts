@@ -320,6 +320,18 @@ function settleDelete(d: Dialog | null): void {
 class DialogStore {
   private _current = $state<Dialog | null>(null);
   queue = $state<Dialog[]>([]);
+  /** The delete dialog whose confirmed delete is running right now (see `beginDeleteRun`). */
+  private runningDelete: Dialog | null = null;
+
+  /** Mark `d` (the current delete dialog) as running: `open()` queues other dialogs instead of
+   *  replacing it, so its `onSettled` (a lease release) cannot fire before the delete ends. */
+  beginDeleteRun(d: Dialog): void {
+    this.runningDelete = d;
+  }
+
+  endDeleteRun(): void {
+    this.runningDelete = null;
+  }
 
   get current(): Dialog | null {
     return this._current;
@@ -357,6 +369,14 @@ class DialogStore {
       item?.kind === 'password' || item?.kind === 'fastScanOffer';
 
     if (isPrompt(d)) {
+      this.queue.push(d);
+      return;
+    }
+
+    // FER-549: a delete that holds a lease (onSettled) is running; replacing its dialog would
+    // settle it - and release the lease - mid-delete. Queue the newcomer; it appears when the
+    // delete dialog closes.
+    if (this._current === this.runningDelete && this.runningDelete?.kind === 'delete') {
       this.queue.push(d);
       return;
     }

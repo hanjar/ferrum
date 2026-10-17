@@ -12,7 +12,7 @@
 //! folders locked for the rest of the session. A process that dies stops beating by itself.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -232,6 +232,9 @@ pub enum ManualAcquire {
     Busy(BusyHolder),
     /// The process already holds [`MAX_MANUAL_LEASES`] manual leases.
     TooMany,
+    /// The webview reloaded while this acquire was running (see [`LeaseRegistry::take_all`]):
+    /// the token would go to a dead page, so the lease was released instead of registered.
+    Reloaded,
 }
 
 /// The manual leases of this process, by token. The webview holds only the token; the guard
@@ -240,6 +243,9 @@ pub enum ManualAcquire {
 pub struct LeaseRegistry {
     env: LeaseEnv,
     held: Mutex<HashMap<String, LeaseGuard>>,
+    /// Bumped (under the `held` lock) every time the registry is drained for a webview reload.
+    /// An acquire that started before the bump and finishes after it belongs to the old page.
+    epoch: AtomicU64,
 }
 
 impl LeaseRegistry {
@@ -247,6 +253,7 @@ impl LeaseRegistry {
         Self {
             env,
             held: Mutex::new(HashMap::new()),
+            epoch: AtomicU64::new(0),
         }
     }
 
@@ -279,6 +286,8 @@ impl LeaseRegistry {
         store: &Arc<Store>,
         roots: &[String],
     ) -> Result<ManualAcquire, StoreError> {
+        // Read before anything slow: a reload that lands while the acquire runs bumps the epoch.
+        let started_epoch = self.epoch.load(Ordering::SeqCst);
         self.prune_lost();
         if self.held_count() >= MAX_MANUAL_LEASES {
             return Ok(ManualAcquire::TooMany);
@@ -297,16 +306,23 @@ impl LeaseRegistry {
         let lease_id = guard.id().to_string();
         let overflow = {
             let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
-            if held.len() >= MAX_MANUAL_LEASES {
-                Some(guard)
+            if self.epoch.load(Ordering::SeqCst) != started_epoch {
+                Err(guard)
+            } else if held.len() >= MAX_MANUAL_LEASES {
+                Ok(Some(guard))
             } else {
                 held.insert(lease_id.clone(), guard);
-                None
+                Ok(None)
             }
         };
         // Dropping releases the row; done outside the registry lock.
-        if overflow.is_some() {
-            return Ok(ManualAcquire::TooMany);
+        match overflow {
+            Err(orphan) => {
+                drop(orphan);
+                return Ok(ManualAcquire::Reloaded);
+            }
+            Ok(Some(_)) => return Ok(ManualAcquire::TooMany),
+            Ok(None) => {}
         }
         Ok(ManualAcquire::Acquired { lease_id })
     }
@@ -328,13 +344,21 @@ impl LeaseRegistry {
     /// more and they must not keep folders locked for the rest of the session. Returns how many
     /// were released.
     pub fn release_all(&self) -> usize {
-        let all: Vec<LeaseGuard> = {
-            let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
-            held.drain().map(|(_, g)| g).collect()
-        };
+        let all = self.take_all();
         let n = all.len();
         drop(all);
         n
+    }
+
+    /// Drain the registry for a webview reload and bump the epoch, without releasing anything:
+    /// dropping the guards joins heartbeat threads and deletes rows (up to the store's busy
+    /// timeout each), which must not run on the UI thread. The caller drops the returned guards
+    /// on a worker thread. An acquire still in flight during the drain is refused on insert
+    /// ([`ManualAcquire::Reloaded`]), so no guard is left behind for a page that no longer exists.
+    pub fn take_all(&self) -> Vec<LeaseGuard> {
+        let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        held.drain().map(|(_, g)| g).collect()
     }
 }
 
@@ -799,6 +823,63 @@ mod tests {
             registry
                 .acquire_manual(&rig.store, &roots(&[r"C:", r"D:"]))
                 .unwrap(),
+            ManualAcquire::Acquired { .. }
+        ));
+    }
+
+    /// R2-P3-1: `take_all` only drains; rows stay until the caller drops the guards (so the UI
+    /// thread never waits on thread joins or row deletes).
+    #[test]
+    fn take_all_drains_without_releasing_until_dropped() {
+        let rig = rig();
+        let registry = LeaseRegistry::new(rig.env.clone());
+        let ManualAcquire::Acquired { lease_id } = registry
+            .acquire_manual(&rig.store, &roots(&[r"C:\t1", r"D:\t1"]))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let guards = registry.take_all();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(registry.held_count(), 0);
+        assert!(row_beat(&rig, &lease_id).is_some(), "row kept until drop");
+        drop(guards);
+        assert_eq!(row_beat(&rig, &lease_id), None, "row deleted on drop");
+    }
+
+    /// R2-P3-2: an acquire that is in flight when the page reloads must not leave a guard for
+    /// the dead page. The reload is simulated from inside the clock, which the acquire reads
+    /// after it has recorded its epoch and before it registers the guard.
+    #[test]
+    fn an_acquire_overtaken_by_a_reload_is_released_not_registered() {
+        let rig = rig();
+        let slot: Arc<Mutex<Option<Arc<LeaseRegistry>>>> = Arc::new(Mutex::new(None));
+        let armed = Arc::new(AtomicBool::new(false));
+        let env = LeaseEnv {
+            clock: {
+                let (c, slot, armed) = (rig.clock.clone(), slot.clone(), armed.clone());
+                Arc::new(move || {
+                    if armed.swap(false, Ordering::SeqCst) {
+                        let reg = slot.lock().unwrap().clone().unwrap();
+                        drop(reg.take_all());
+                    }
+                    c.load(Ordering::SeqCst)
+                })
+            },
+            ..rig.env.clone()
+        };
+        let registry = Arc::new(LeaseRegistry::new(env));
+        *slot.lock().unwrap() = Some(registry.clone());
+        let list = roots(&[r"C:\race", r"D:\race"]);
+        armed.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            registry.acquire_manual(&rig.store, &list).unwrap(),
+            ManualAcquire::Reloaded
+        ));
+        assert_eq!(registry.held_count(), 0, "nothing registered");
+        // The orphan row is gone, so the folders are free for the new page.
+        assert!(matches!(
+            registry.acquire_manual(&rig.store, &list).unwrap(),
             ManualAcquire::Acquired { .. }
         ));
     }

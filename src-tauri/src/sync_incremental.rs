@@ -633,7 +633,7 @@ mod tests {
         b.left_root = l.clone();
         b.right_root = r.clone();
         b.journal = Some(Box::new(marks.clone()));
-        store.save(&pair, &b).unwrap();
+        store.save_unguarded_for_tests(&pair, &b).unwrap();
         let ok = || Ok([complete(150, vec![cd("x", false)]), complete(250, vec![])]);
         let mut f = Fake {
             answer: ok(),
@@ -697,7 +697,7 @@ mod tests {
         let mut moved = marks.clone();
         moved.left.path = r"Q:\elsewhere".into();
         b.journal = Some(Box::new(moved));
-        store.save(&pair, &b).unwrap();
+        store.save_unguarded_for_tests(&pair, &b).unwrap();
         let mut f = Fake {
             answer: ok(),
             asked: None,

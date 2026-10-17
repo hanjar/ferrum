@@ -3,7 +3,7 @@ use ferrum_activity_contract::{
     ReceiptSource,
 };
 use ferrum_activity_store::{
-    AliasOutcome, ActivityStore, ChangeOutcome, ExternalCandidate, FsChange, FsChangeKind,
+    ActivityStore, AliasOutcome, ChangeOutcome, ExternalCandidate, FsChange, FsChangeKind,
     IdentityConfidence, MountOutcome, ReconcileOutcome, RecordOutcome, SCHEMA_VERSION,
     UnresolvedReason, ValidationOutcome, ValidationProbe,
 };
@@ -188,7 +188,10 @@ fn folder_move_relocates_subtree_on_segment_boundaries() {
         ))
         .unwrap();
     assert_eq!(outcome, ChangeOutcome::Relocated { entities: 3 });
-    let new_root = store.entity_at_locator("V1", "C:\\B\\foo").unwrap().unwrap();
+    let new_root = store
+        .entity_at_locator("V1", "C:\\B\\foo")
+        .unwrap()
+        .unwrap();
     let new_sub = store
         .entity_at_locator("V1", "c:\\b\\FOO\\sub dir")
         .unwrap()
@@ -208,10 +211,7 @@ fn folder_move_relocates_subtree_on_segment_boundaries() {
     assert_eq!(new_file.parent_path, "C:\\B\\foo\\Sub Dir");
     assert_eq!(new_file.display_name, "Report.TXT");
     // `foobar` and `foo2` share the textual prefix but are different segments.
-    for (entity, locator) in [
-        (&sibling, "C:\\A\\foobar"),
-        (&other_case, "C:\\A\\foo2\\x"),
-    ] {
+    for (entity, locator) in [(&sibling, "C:\\A\\foobar"), (&other_case, "C:\\A\\foo2\\x")] {
         let still = store.entity_at_locator("V1", locator).unwrap().unwrap();
         assert_eq!(still.id, entity.id);
         assert_eq!(still.locator, locator);
@@ -327,7 +327,10 @@ fn change_receipts_are_idempotent_and_unknown_sources_are_not_tracked() {
         store.apply_change(&rename).unwrap(),
         ChangeOutcome::Relocated { entities: 1 }
     );
-    assert_eq!(store.apply_change(&rename).unwrap(), ChangeOutcome::Duplicate);
+    assert_eq!(
+        store.apply_change(&rename).unwrap(),
+        ChangeOutcome::Duplicate
+    );
     assert_eq!(
         store
             .apply_change(&change(
@@ -412,7 +415,12 @@ fn windows_paths_fold_case_but_posix_paths_do_not() {
     let first = visit(&mut store, "V1", "C:\\Work\\Reports", 10_000);
     // Same location spelled differently: same entity, no identity conflict.
     store
-        .record(&visit_kind("V1", "c:/work/REPORTS/", 50_000, EntityKind::Folder))
+        .record(&visit_kind(
+            "V1",
+            "c:/work/REPORTS/",
+            50_000,
+            EntityKind::Folder,
+        ))
         .unwrap();
     let again = store
         .entity_at_locator("V1", "C:\\WORK\\reports")
@@ -487,7 +495,10 @@ fn availability_states_are_distinct_and_lazily_validated() {
         let state = store.identity_state(&entity.id).unwrap().unwrap();
         assert_eq!(state.entity.availability, expected);
         assert_eq!(state.checked_utc_ms, Some(now));
-        assert!(state.attached, "validation never detaches a locator by itself");
+        assert!(
+            state.attached,
+            "validation never detaches a locator by itself"
+        );
         // Visible through ordinary queries as well.
         let row = store
             .recent(0, 100 * DAY, ActivityKind::FolderVisit, 0, 10)
@@ -525,17 +536,23 @@ fn platform_id_is_learned_then_a_mismatch_ends_the_identity() {
     let probe = |id: &str| ValidationProbe::Present {
         platform_id: Some(id.into()),
     };
-    store.apply_validation(&entity.id, &probe("F-7"), 20_000).unwrap();
+    store
+        .apply_validation(&entity.id, &probe("F-7"), 20_000)
+        .unwrap();
     let state = store.identity_state(&entity.id).unwrap().unwrap();
     assert_eq!(state.platform_id.as_deref(), Some("F-7"));
     assert_eq!(state.confidence, IdentityConfidence::Verified);
     assert_eq!(
-        store.apply_validation(&entity.id, &probe("F-7"), 21_000).unwrap(),
+        store
+            .apply_validation(&entity.id, &probe("F-7"), 21_000)
+            .unwrap(),
         ValidationOutcome::Updated(Availability::Available)
     );
     // Same path now holds another object (recycled name): never reuse history.
     assert_eq!(
-        store.apply_validation(&entity.id, &probe("F-99"), 22_000).unwrap(),
+        store
+            .apply_validation(&entity.id, &probe("F-99"), 22_000)
+            .unwrap(),
         ValidationOutcome::IdentityMismatch
     );
     let state = store.identity_state(&entity.id).unwrap().unwrap();
@@ -546,7 +563,9 @@ fn platform_id_is_learned_then_a_mismatch_ends_the_identity() {
     assert_ne!(reborn.id, entity.id);
     // A detached entity is not re-attached by a later present probe either.
     assert_eq!(
-        store.apply_validation(&entity.id, &probe("F-7"), 31_000).unwrap(),
+        store
+            .apply_validation(&entity.id, &probe("F-7"), 31_000)
+            .unwrap(),
         ValidationOutcome::IdentityMismatch
     );
 }
@@ -559,7 +578,10 @@ fn volume_unavailable_and_returning_volume_do_not_mark_files_deleted() {
     assert_eq!(store.unmount_volume("V1").unwrap(), 1);
     let state = store.identity_state(&entity.id).unwrap().unwrap();
     assert_eq!(state.entity.availability, Availability::Offline);
-    assert!(state.attached, "offline keeps the locator for when it returns");
+    assert!(
+        state.attached,
+        "offline keeps the locator for when it returns"
+    );
     let outcome = store.mount_volume("V1", "E:", 20_000).unwrap();
     assert_eq!(
         outcome,
@@ -680,7 +702,12 @@ fn recycled_platform_id_after_delete_is_never_merged_with_the_dead_entity() {
         )
         .unwrap();
     store
-        .apply_change(&change(FsChangeKind::Delete, "V1", "C:\\Work\\old.dat", None))
+        .apply_change(&change(
+            FsChangeKind::Delete,
+            "V1",
+            "C:\\Work\\old.dat",
+            None,
+        ))
         .unwrap();
     // The filesystem hands id F-7 to a different, newer file.
     let newer = visit_file(&mut store, "V1", "C:\\Work\\new.dat", 20_000);
@@ -760,7 +787,11 @@ fn external_rename_with_platform_evidence_is_reconciled_with_history() {
     assert_eq!(merged.id, entity.id);
     assert_eq!(merged.availability, Availability::Available);
     assert_eq!(
-        store.identity_state(&entity.id).unwrap().unwrap().confidence,
+        store
+            .identity_state(&entity.id)
+            .unwrap()
+            .unwrap()
+            .confidence,
         IdentityConfidence::Verified
     );
     // Descendants follow the folder but are not claimed verified.
@@ -788,14 +819,13 @@ fn external_rename_without_sufficient_evidence_is_not_merged() {
     store
         .apply_validation(&weak.id, &ValidationProbe::NotFound, 20_000)
         .unwrap();
-    let candidate = |volume: &str, locator: &str, kind: EntityKind, pid: Option<&str>| {
-        ExternalCandidate {
+    let candidate =
+        |volume: &str, locator: &str, kind: EntityKind, pid: Option<&str>| ExternalCandidate {
             volume_id: volume.into(),
             locator: locator.into(),
             kind,
             platform_id: pid.map(str::to_owned),
-        }
-    };
+        };
     let none = candidate("V1", "C:\\Work\\report v2.docx", EntityKind::File, None);
     assert_eq!(
         store.reconcile_external(&weak.id, &none, 30_000).unwrap(),
@@ -811,9 +841,16 @@ fn external_rename_without_sufficient_evidence_is_not_merged() {
             .is_none()
     );
     // Candidate carries an id but the entity never learned one.
-    let only_candidate = candidate("V1", "C:\\Work\\report v2.docx", EntityKind::File, Some("F-1"));
+    let only_candidate = candidate(
+        "V1",
+        "C:\\Work\\report v2.docx",
+        EntityKind::File,
+        Some("F-1"),
+    );
     assert_eq!(
-        store.reconcile_external(&weak.id, &only_candidate, 30_001).unwrap(),
+        store
+            .reconcile_external(&weak.id, &only_candidate, 30_001)
+            .unwrap(),
         ReconcileOutcome::Unresolved(UnresolvedReason::NoPlatformEvidence)
     );
 
@@ -846,7 +883,9 @@ fn external_rename_without_sufficient_evidence_is_not_merged() {
     ];
     for (attempt, expected) in attempts {
         assert_eq!(
-            store.reconcile_external(&strong.id, &attempt, 43_000).unwrap(),
+            store
+                .reconcile_external(&strong.id, &attempt, 43_000)
+                .unwrap(),
             ReconcileOutcome::Unresolved(expected)
         );
         assert!(
@@ -957,7 +996,10 @@ fn recycled_entity_id_after_a_move_gets_a_fresh_entity() {
         .record(&visit_kind("V1", "C:\\Work\\P", 20_000, EntityKind::Folder))
         .unwrap();
     assert_eq!(outcome, RecordOutcome::NewEpisode);
-    let recreated = store.entity_at_locator("V1", "C:\\Work\\P").unwrap().unwrap();
+    let recreated = store
+        .entity_at_locator("V1", "C:\\Work\\P")
+        .unwrap()
+        .unwrap();
     assert_ne!(recreated.id, first.id);
     assert_eq!(
         store
@@ -971,7 +1013,10 @@ fn recycled_entity_id_after_a_move_gets_a_fresh_entity() {
     visit(&mut store, "V1", "C:\\Work\\Q", 100_000);
     let rows = recent_ids(&mut store);
     assert_eq!(rows.iter().find(|(id, _)| *id == first.id).unwrap().1, 2);
-    assert_eq!(rows.iter().find(|(id, _)| *id == recreated.id).unwrap().1, 1);
+    assert_eq!(
+        rows.iter().find(|(id, _)| *id == recreated.id).unwrap().1,
+        1
+    );
 }
 
 // ---- aliases ---------------------------------------------------------
@@ -989,7 +1034,12 @@ fn verified_aliases_resolve_to_the_same_entity() {
         AliasOutcome::AlreadyLinked
     );
     store
-        .record(&visit_kind("V1", "C:\\Links\\Docs", 50_000, EntityKind::Folder))
+        .record(&visit_kind(
+            "V1",
+            "C:\\Links\\Docs",
+            50_000,
+            EntityKind::Folder,
+        ))
         .unwrap();
     assert_eq!(recent_ids(&mut store), vec![(real.id.clone(), 2)]);
     // The canonical locator is not overwritten by the alias spelling.
@@ -1080,7 +1130,11 @@ fn migrates_version_ten_and_backfills_locator_keys() {
         .unwrap();
     assert_eq!(found.id, entity.id);
     assert_eq!(
-        store.identity_state(&entity.id).unwrap().unwrap().confidence,
+        store
+            .identity_state(&entity.id)
+            .unwrap()
+            .unwrap()
+            .confidence,
         IdentityConfidence::Path
     );
     assert_eq!(recent_ids(&mut store), vec![(entity.id.clone(), 2)]);
@@ -1142,7 +1196,12 @@ fn same_id_on_another_volume_without_evidence_is_refused() {
     // V1 is not registered as unmounted: nothing proves the letter changed hands.
     assert!(
         store
-            .record(&visit_kind("V2", "D:\\Work\\Plans", 20_000, EntityKind::Folder))
+            .record(&visit_kind(
+                "V2",
+                "D:\\Work\\Plans",
+                20_000,
+                EntityKind::Folder
+            ))
             .is_err()
     );
     assert_eq!(store.episode_count().unwrap(), 1);

@@ -235,7 +235,17 @@ unknown` and `holder.runId` is present for runs. The backend heartbeats the leas
   hold it through the run and the baseline settle, and release it after the settle, on cancel, on
   error and on close. If the folders are busy nothing is compared or enqueued and the panel shows
   that they are in use.
-- When the webview (re)loads its page (F5, DevTools reload, crash recovery) the backend releases
+- When the webview (re)loads its page (F5, DevTools reload, full navigation) the backend releases
   every manual lease of the process, because the JavaScript that held the tokens is gone. The
+  hook only drains the registry on the UI thread and drops the guards on a blocking worker; an
+  acquire that was in flight during the reload is refused and released (epoch check). There is no
+  handler for a renderer crash (WebView2 `ProcessFailed`): nothing reloads by itself, so after a
+  crash the leases stay until Ferrum exits, when the process probe lets the next acquire reclaim
+  them; the backend stops refreshing a manual lease after the 12 h hold limit
+  (`MAX_MANUAL_HOLD_MS`), so it also goes stale by itself then.
+  Known edge: the epoch only covers an acquire that began BEFORE the reload event. A
+  `sync_lease_acquire` sent by the old page but started by the backend after the event reads the
+  new epoch and registers a lease for a page that no longer exists; it stays until the next
+  reload or the 12 h limit. The
   Synchronize Dirs lease also covers the delete phase (confirmation dialog and deletes) and is
   released only when both the baseline settle and that phase have ended.
