@@ -149,6 +149,8 @@ class UiState {
   activityOpen: boolean = $state(false);
   /** Sync & Backup > Sync profiles page (Automation P0.5), a full page like Activity. */
   syncProfilesOpen: boolean = $state(false);
+  /** Sync & Backup > Automation page (Automation P1.5); reachable only behind the feature flag. */
+  automationOpen: boolean = $state(false);
   /** Global "show hidden files" (D08) — one switch for both panes. */
   showHidden: boolean = $state(false);
   /** Comments column (F2-27 Show > Comments) — one switch for both panes. */
@@ -255,5 +257,5 @@ export const ui = new UiState();
  * Add future full pages (for example Sync profiles) here, in this one place.
  */
 export function fullPageOpen(): boolean {
-  return ui.activityOpen || ui.syncProfilesOpen;
+  return ui.activityOpen || ui.syncProfilesOpen || ui.automationOpen;
 }

@@ -14,6 +14,8 @@
   import { initProviderSetup } from './lib/ai/providerSettings';
   import ActivityPage from './lib/components/ActivityPage.svelte';
   import SyncProfilesPage from './lib/components/sync/SyncProfilesPage.svelte';
+  import AutomationPage from './lib/components/automation/AutomationPage.svelte';
+  import { automationUiEnabled } from './lib/featureFlags';
   import ChatPanel from './lib/components/ai/ChatPanel.svelte';
   import { aiChatHost } from './lib/ai/aiChatHost.svelte';
   import { aiRuntime } from './lib/ai/aiRuntime';
@@ -202,6 +204,9 @@
     <Toast />
     {#if ui.activityOpen}
       <ActivityPage onclose={() => (ui.activityOpen = false)} />
+    {/if}
+    {#if automationUiEnabled && ui.automationOpen}
+      <AutomationPage onclose={() => (ui.automationOpen = false)} />
     {/if}
     {#if ui.syncProfilesOpen}
       <SyncProfilesPage onclose={() => (ui.syncProfilesOpen = false)} />

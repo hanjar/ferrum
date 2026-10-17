@@ -13,6 +13,8 @@
   import { shellOpen, type ActivityFavoriteDto, type ActivityItemDto } from '../ipc/activity';
   import FileIcon from './FileIcon.svelte';
   import { kindOf } from '../kind';
+  import { automationUiEnabled } from '../featureFlags';
+  import { automation } from '../stores/automationStore.svelte';
 
   // Favorites collapse (ACT-05): show the first five pins; the rest hide
   // behind "Tampilkan semua" with an internal scroll when expanded.
@@ -38,6 +40,8 @@
       });
     // Privacy changes made in other windows invalidate these lists at once.
     void activity.startSync();
+    // MH-9: the Automation badge needs the list; only when the (default-off) automation UI is on.
+    if (automationUiEnabled && isInTauri()) void automation.load();
   });
 
   function openActivityItem(item: ActivityItemDto) {
@@ -241,17 +245,35 @@
             <span class="label">Sync profiles</span>
           </span>
         </button>
-        <button
-          class="item"
-          disabled
-          aria-disabled="true"
-          title="Automation arrives in a later release"
-        >
-          <span class="row">
-            <span class="itemIcon"><Icon name="clock" size={15} /></span>
-            <span class="label">Automation</span>
-          </span>
-        </button>
+        {#if automationUiEnabled}
+          <button class="item" onclick={() => (ui.automationOpen = true)}>
+            <span class="row">
+              <span class="itemIcon"><Icon name="clock" size={15} /></span>
+              <span class="label">Automation</span>
+              {#if automation.attentionCount > 0}
+                <span
+                  class="autoBadge"
+                  data-testid="automation-badge"
+                  aria-label="{automation.attentionCount} need attention"
+                >
+                  {automation.attentionCount}
+                </span>
+              {/if}
+            </span>
+          </button>
+        {:else}
+          <button
+            class="item"
+            disabled
+            aria-disabled="true"
+            title="Automation arrives in a later release"
+          >
+            <span class="row">
+              <span class="itemIcon"><Icon name="clock" size={15} /></span>
+              <span class="label">Automation</span>
+            </span>
+          </button>
+        {/if}
       </div>
     </nav>
   {/if}
@@ -432,5 +454,16 @@
     padding: 5px 8px;
     font-size: 11.5px;
     color: var(--text3);
+  }
+  .autoBadge {
+    margin-left: auto;
+    min-width: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--redSoft);
+    color: var(--redInk);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
   }
 </style>
