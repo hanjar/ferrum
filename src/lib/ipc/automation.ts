@@ -168,6 +168,16 @@ export interface AutomationBackend {
   pause(id: string, mode: PauseMode): Promise<{ status: 'paused' }>;
   /** Delete; the caller confirms in its own dialog (safe direction). */
   delete(id: string): Promise<{ status: 'deleted' }>;
+  /** Every automation with status, last result and button flags (read-only). */
+  list(): Promise<AutomationRow[]>;
+  /** The detail page of one automation (read-only). */
+  get(id: string): Promise<AutomationDetail>;
+  /** Run history, newest first; page with `next` (read-only). */
+  history(query: HistoryQuery): Promise<HistoryPage>;
+  /** Stored operations of one run, paged (read-only). */
+  runOps(runId: number, offset: number, limit: number): Promise<RunOpsPage>;
+  /** The event log of one automation, newest first; page with `next` (read-only). */
+  events(id: string, before: number | undefined, limit: number): Promise<EventsPage>;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -211,6 +221,26 @@ const tauriBackend: AutomationBackend = {
   async delete(id) {
     return call<{ status: 'deleted' }>('automation_delete', { id });
   },
+  async list() {
+    return call<AutomationRow[]>('automation_list');
+  },
+  async get(id) {
+    return call<AutomationDetail>('automation_get', { id });
+  },
+  async history(query) {
+    return call<HistoryPage>('automation_history', {
+      filter: query.filter,
+      automationId: query.automationId ?? null,
+      before: query.before ?? null,
+      limit: query.limit,
+    });
+  },
+  async runOps(runId, offset, limit) {
+    return call<RunOpsPage>('automation_run_ops', { runId, offset, limit });
+  },
+  async events(id, before, limit) {
+    return call<EventsPage>('automation_events', { id, before: before ?? null, limit });
+  },
 };
 
 /** Browser-dev / test fallback: nothing can be approved or enabled outside the desktop app. */
@@ -233,6 +263,21 @@ const inertBackend: AutomationBackend = {
   async delete() {
     throw new AutomationError('unsupported');
   },
+  async list() {
+    throw new AutomationError('unsupported');
+  },
+  async get() {
+    throw new AutomationError('unsupported');
+  },
+  async history() {
+    throw new AutomationError('unsupported');
+  },
+  async runOps() {
+    throw new AutomationError('unsupported');
+  },
+  async events() {
+    throw new AutomationError('unsupported');
+  },
 };
 
 function pick(): AutomationBackend {
@@ -248,6 +293,11 @@ export function defaultBackend(): AutomationBackend {
     setEnabled: (id, e) => pick().setEnabled(id, e),
     pause: (id, m) => pick().pause(id, m),
     delete: (id) => pick().delete(id),
+    list: () => pick().list(),
+    get: (id) => pick().get(id),
+    history: (q) => pick().history(q),
+    runOps: (r, o, l) => pick().runOps(r, o, l),
+    events: (id, b, l) => pick().events(id, b, l),
   };
 }
 
@@ -265,4 +315,215 @@ export function reviewLabel(review: NeedsReview): string {
     case 'unsupportedVersion':
       return 'Approved by a different Ferrum version · held';
   }
+}
+
+// ── Read side (P1.2, design §7.2): list, detail, history, operations, events ──
+
+/** Chip kinds of requirements §1; the StatusChip draws an icon and a label for each, never colour alone. */
+export type AutomationStatusKind =
+  | 'watching'
+  | 'quiet'
+  | 'checking'
+  | 'device'
+  | 'recheck'
+  | 'unsupported'
+  | 'scheduled'
+  | 'queued'
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'partial'
+  | 'cancelled'
+  | 'skipped'
+  | 'attention'
+  | 'review'
+  | 'warn';
+
+/** A chip: kind, label and an optional sub-line, all built by the backend (`status::compute`). */
+export interface AutomationStatus {
+  kind: AutomationStatusKind;
+  label: string;
+  sub?: string;
+}
+
+/** File operations of one run (never filesystem events). */
+export interface RunCounts {
+  ok: number;
+  failed: number;
+  notStarted: number;
+  held: number;
+  skippedChanged: number;
+}
+
+/** The hold that keeps new runs of an automation back until the run is resolved (RQ-9.1). */
+export interface AttentionHold {
+  kind: 'partial' | 'conflict' | 'failed';
+  runId: number;
+  text: string;
+}
+
+export interface LastRun {
+  runId: number;
+  startedMs: number;
+  endedMs: number;
+  result: AutomationStatus;
+}
+
+/** One row of the automation list (MH-2). `canRunNow` is a hint; the backend checks again on every run. */
+export interface AutomationRow {
+  id: string;
+  name: string;
+  kind: 'schedule' | 'watch';
+  profileId: string;
+  profileName: string;
+  /** The profile's CURRENT revision. */
+  profileRevision: number;
+  /** The revision the stored approval covers. */
+  approvedRevision?: number;
+  enabled: boolean;
+  configRev: number;
+  status: AutomationStatus;
+  trigger: string;
+  runtime: 'app' | 'background';
+  runtimeNote: string;
+  lastRun?: LastRun;
+  canRunNow: boolean;
+  /** Why Run now is dimmed. */
+  runNowReason?: string;
+  /** The row offers "Review changes" instead of Resolve. */
+  showReview: boolean;
+  review?: NeedsReview;
+  attention?: AttentionHold;
+}
+
+export interface RecheckInfo {
+  state: 'running' | 'inSync' | 'remaining' | 'conflict';
+  remaining: number;
+  text: string;
+  atMs: number;
+}
+
+export type RunPhase = 'gate' | 'compare' | 'plan' | 'sync' | 'settle' | 'done';
+export type RunOutcome =
+  'completed' | 'partial' | 'conflict' | 'failed' | 'cancelled' | 'interrupted' | 'skipped';
+
+/** One run: a history row, the current run or a recent run. */
+export interface AutomationRun {
+  id: number;
+  /** Absent for a manual profile run. */
+  automationId?: string;
+  /** The name when the run started. */
+  automationName?: string;
+  profileId: string;
+  profileRevision: number;
+  host: 'app' | 'background' | 'manual';
+  triggerKind: string;
+  triggerText: string;
+  mergedCount: number;
+  retryOf?: number;
+  startedMs: number;
+  endedMs?: number;
+  phase: RunPhase;
+  /** Absent while the run is going. */
+  outcome?: RunOutcome;
+  opsTotal: number;
+  counts: RunCounts;
+  result: AutomationStatus;
+  errorText?: string;
+  note?: string;
+  resolvedBy?: number;
+  resolvedText?: string;
+  recheck?: RecheckInfo;
+  /** The automation's hold names this run right now. */
+  needsAttention: boolean;
+}
+
+export type HistoryFilter = 'all' | 'attention';
+
+export interface HistoryQuery {
+  filter: HistoryFilter;
+  automationId?: string;
+  /** Cursor: the `next` of the previous page. */
+  before?: number;
+  /** 1..=100 */
+  limit: number;
+}
+
+export interface HistoryPage {
+  runs: AutomationRun[];
+  next?: number;
+}
+
+export interface RunOp {
+  seq: number;
+  kind:
+    | 'copyNew'
+    | 'update'
+    | 'createFolder'
+    | 'copyFolder'
+    | 'delete'
+    | 'deleteToVersions'
+    | 'conflict';
+  /** The target side. */
+  side: 'left' | 'right';
+  relPath: string;
+  size?: number;
+  status: 'pending' | 'inProgress' | 'done' | 'failed' | 'notStarted' | 'held' | 'changed';
+  errorCode?: string;
+  errorText?: string;
+}
+
+export interface RunOpsPage {
+  ops: RunOp[];
+  /** The run's true number of operations. */
+  total: number;
+  /** How many have rows (the first 5 000); paging runs over this. */
+  stored: number;
+}
+
+export interface AutomationEvent {
+  id: number;
+  atMs: number;
+  kind: 'ok' | 'warn' | 'bad' | 'mute' | 'info';
+  text: string;
+  runId?: number;
+}
+
+export interface EventsPage {
+  events: AutomationEvent[];
+  next?: number;
+}
+
+export interface QueueEntry {
+  id: number;
+  automationId: string;
+  automationName?: string;
+  triggerKind: string;
+  triggerText: string;
+  mergedCount: number;
+  mergedReasons: string[];
+  enqueuedMs: number;
+  retryOf?: number;
+  hostClass: 'app' | 'background';
+  /** The run that uses the same folders, when that is what it waits for. */
+  waitsFor?: string;
+}
+
+export interface AutomationDetail {
+  automation: AutomationRow;
+  policy: AutomationPolicy;
+  profile: { id: string; name: string; revision: number; left: string; right: string };
+  pipeline: { steps: string[]; current?: number };
+  quiet?: { untilMs: number; remainingSecs: number; idleSecs: number };
+  pendingRerun: boolean;
+  currentRun?: AutomationRun;
+  waiting: QueueEntry[];
+  recentRuns: AutomationRun[];
+  events: EventsPage;
+}
+
+/** MH-9: automations that need a review or hold new runs - the sidebar badge. */
+export function attentionBadge(rows: readonly AutomationRow[]): number {
+  return rows.filter((r) => r.showReview || r.attention !== undefined).length;
 }

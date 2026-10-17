@@ -30,7 +30,7 @@ use crate::automation::model::{
 use crate::automation::policy::{self, HASH_VERSION, MacInput, Verdict};
 use crate::automation::store::approvals::{self, ApprovalRecord};
 use crate::automation::store::automations::{self, ApprovedAutomation, EventKind};
-use crate::automation::store::{Store, StoreError, profiles};
+use crate::automation::store::{Store, StoreError, profiles, runtime};
 use crate::automation::test_run::{self, TestDeps, TestLedger, TestRecord};
 
 /// Clock seam: milliseconds since the Unix epoch.
@@ -524,7 +524,7 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
             },
         )?;
         // An edited or re-approved automation starts from a clean slate: no queued entry from the
-        // old configuration, no countdown, no attention hold.
+        // old configuration, no countdown. An attention hold stays until a recheck or retry resolves it.
         automations::clear_queue(&tx, &automation_id)?;
         let trigger_state = match &validated.policy.trigger {
             model::Trigger::Schedule(_) => "scheduled",
@@ -719,6 +719,8 @@ fn disable(
         automations::set_enabled(&tx, id, false, now)?;
         // Queued entries are cancelled; the run part (finish or stop) arrives with the host (P1.3).
         automations::clear_queue(&tx, id)?;
+        // RQ-8.2: pausing also drops the pending rerun.
+        runtime::set_pending_rerun(&tx, id, false, now)?;
         let text = match forced {
             Some(PauseMode::Stop) => "Paused \u{b7} the current run is stopped",
             Some(PauseMode::Finish) => "Paused \u{b7} the current run finishes first",

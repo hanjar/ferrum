@@ -9,10 +9,18 @@
 pub mod approvals;
 pub mod automations;
 pub mod baseline_gen;
+pub mod controls;
+pub mod events;
 pub mod hosts;
 pub mod leases;
 pub mod migrate;
 pub mod profiles;
+pub mod queue;
+pub mod runs;
+pub mod runtime;
+
+#[cfg(test)]
+mod p12_tests;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -38,6 +46,9 @@ pub enum StoreError {
     Stale,
     /// The profile is referenced by an automation (SP-9.5).
     InUse,
+    /// A value outside its closed set or range reached the store layer (a caller bug, never user
+    /// text: commands validate first).
+    Invalid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

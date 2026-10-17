@@ -1,0 +1,31 @@
+{
+  "ops": [
+    {
+      "seq": 0,
+      "kind": "copyNew",
+      "side": "right",
+      "relPath": "docs\report.docx",
+      "size": 48213,
+      "status": "done"
+    },
+    {
+      "seq": 1,
+      "kind": "update",
+      "side": "right",
+      "relPath": "docs\budget.xlsx",
+      "size": 1048576,
+      "status": "failed",
+      "errorCode": "access_denied",
+      "errorText": "Access is denied"
+    },
+    {
+      "seq": 2,
+      "kind": "createFolder",
+      "side": "right",
+      "relPath": "docs\u0007rchive",
+      "status": "notStarted"
+    }
+  ],
+  "total": 6,
+  "stored": 6
+}
