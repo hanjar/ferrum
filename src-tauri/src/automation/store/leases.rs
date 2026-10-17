@@ -392,14 +392,23 @@ pub fn acquire(
 /// Delete every lease whose holder process is gone or whose heartbeat is stale (LC-6). The
 /// host calls this when it takes over, so a crashed host's lease is visibly gone at once instead
 /// of at the next acquire. Returns how many rows went.
+///
+/// A holder whose process still exists keeps its row until it has been silent for `living_grace_ms`
+/// (a stalled host is not a dead one; the row is the evidence that it still claims its run). An
+/// ACQUIRER reclaims any lease stale for more than 30 s regardless (design 3.4), and the stalled
+/// holder stops writing at its next cover check - that fail-safe does not depend on this pass.
 pub fn reclaim_dead(
     conn: &Connection,
     now_ms: i64,
     probe: &dyn ProcessProbe,
+    living_grace_ms: i64,
 ) -> Result<usize, StoreError> {
     let mut removed = 0;
     for row in read_rows(conn)? {
-        if stale(now_ms, row.beat_ms) || !probe.is_alive(row.holder) {
+        let alive = probe.is_alive(row.holder);
+        let silent_too_long = now_ms.saturating_sub(row.beat_ms) > living_grace_ms
+            || row.beat_ms.saturating_sub(now_ms) > FUTURE_SKEW_MS;
+        if !alive || (stale(now_ms, row.beat_ms) && silent_too_long) {
             removed += conn
                 .execute("DELETE FROM leases WHERE id = ?1", [&row.id])
                 .map_err(unavailable)?;
@@ -1101,5 +1110,48 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// FER-524 rework 2: the recovery pass keeps the row of a living holder for the grace period
+    /// and removes dead holders at once; staleness alone is not enough.
+    #[test]
+    fn reclaim_dead_keeps_living_holders_within_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), "0.2.0");
+        let probe = FakeProbe::default();
+        let wanted = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (alive, dead) = (Holder { pid: 1, created: 1 }, Holder { pid: 2, created: 2 });
+        for (holder, root) in [(alive, r"C:live"), (dead, r"C:\dead")] {
+            let roots = wanted(&[root]);
+            store
+                .with_write(|c| {
+                    acquire(
+                        c,
+                        &AcquireRequest {
+                            kind: HolderKind::App,
+                            holder,
+                            run_id: Some(1),
+                            roots: &roots,
+                        },
+                        1_000,
+                        &probe,
+                    )
+                })
+                .unwrap();
+        }
+        probe.kill(dead);
+        // 2 minutes later: both beats are stale (> 30 s), only the dead holder's row goes.
+        let removed = store
+            .with_write(|c| reclaim_dead(c, 121_000, &probe, 5 * 60 * 1000))
+            .unwrap();
+        assert_eq!(removed, 1);
+        let left = store.with_read(all).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].holder, alive);
+        // Silent for longer than the grace: gone too.
+        let removed = store
+            .with_write(|c| reclaim_dead(c, 1_000 + 6 * 60 * 1000, &probe, 5 * 60 * 1000))
+            .unwrap();
+        assert_eq!(removed, 1);
     }
 }

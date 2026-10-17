@@ -43,11 +43,39 @@ pub fn requeue_siblings_if(
     removed: &[QueueEntry],
     now_ms: i64,
 ) -> Result<usize, StoreError> {
-    if !enabled {
-        return Ok(0);
-    }
     let mut moved = 0;
     for entry in removed.iter().filter(|e| !e.merged_from.is_empty()) {
+        let before = moved;
+        if enabled {
+            moved += move_to_sibling(conn, keys, entry, now_ms)?;
+        }
+        // Nobody took it over: the automations whose Run now was merged into this entry must
+        // hear that it did not happen.
+        if moved == before && entry.merged_reasons.iter().any(|r| r == "Run now") {
+            for id in &entry.merged_from {
+                if automations::get(conn, id)?.is_some() {
+                    automations::add_event(
+                        conn,
+                        id,
+                        now_ms,
+                        EventKind::Warn,
+                        "Your Run now was not done \u{2014} run it again",
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(moved)
+}
+
+fn move_to_sibling(
+    conn: &Connection,
+    keys: &dyn ApprovalKeys,
+    entry: &QueueEntry,
+    now_ms: i64,
+) -> Result<usize, StoreError> {
+    let mut moved = 0;
+    {
         let siblings: Vec<_> = automations::list(conn)?
             .into_iter()
             .filter(|a| a.profile_id == entry.profile_id && a.id != entry.automation_id)

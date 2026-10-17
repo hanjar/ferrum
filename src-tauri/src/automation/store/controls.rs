@@ -225,6 +225,25 @@ pub fn mark_handled(
     .map_err(unavailable)
 }
 
+/// Controls nobody handled that are now older than [`TTL_MS`] (before a sweep removes them).
+pub fn expired_unhandled(conn: &Connection, now_ms: i64) -> Result<Vec<Control>, StoreError> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {COLUMNS} FROM controls WHERE handled_ms IS NULL AND created_ms < ?1 ORDER BY id"
+        ))
+        .map_err(unavailable)?;
+    let rows = stmt
+        .query_map([now_ms.saturating_sub(TTL_MS)], row_to_control)
+        .map_err(unavailable)?;
+    let mut out = Vec::new();
+    for row in rows {
+        if let Some(c) = row.map_err(unavailable)? {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
 /// Delete every control that is out of its window (older than [`TTL_MS`] or stamped in the far
 /// future), handled or not. Returns how many went.
 pub fn sweep(conn: &Connection, now_ms: i64) -> Result<usize, StoreError> {

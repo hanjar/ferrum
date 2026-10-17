@@ -330,6 +330,13 @@ CREATE INDEX events_by_auto ON events(automation_id, at_ms DESC);
 CREATE INDEX runs_by_auto ON runs(automation_id, started_ms DESC);
 ```
 
+**Additive column without a version bump (LC-5 note).** `queue.merged_from` (JSON array of the ids of OTHER
+automations whose trigger was merged into the entry, default `'[]'`) was added by FER-524 after schema v2 shipped. It
+is created on open with `ALTER TABLE queue ADD COLUMN ... DEFAULT '[]'` when `pragma_table_info` does not list it
+(idempotent; the loser of a race for it accepts "duplicate column"), exactly like `baseline_gen`. The schema version
+stays 2 and no migration backup is taken: the change is additive, an older binary that ignores the column reads and
+writes the same table, and a store that never saw the column gets it at the first open of a binary that knows it.
+
 Caps: `run_ops` stores the first 5 000 operations per run (MH-8), `events` the newest 200 per automation (pruned
 on insert), `profile_revisions` the newest 50 per profile. A run row is never deleted while it is referenced by an
 `attention` (OP-2).
@@ -1076,6 +1083,15 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   policy with `skipOnMetered` waits until OP-1 ships.
 - **Guard (B-a).** A count of 0 is percent-only and still protects; `DeleteGuard::effective()` is false only for a
   disabled guard or a percent of 100 or more, in the engine, the dialog and `confirm_needed` alike.
+- **Rework 2.** With automatic runs off, a user request (Run now / Retry) the gate answers with "keep" (device,
+  conditions, busy folders, changed approval) is REMOVED from the queue with one event ("Waiting - run it with Run now"),
+  so no later host (takeover, restart) can start it unasked; the in-memory "already asked" bookkeeping and its
+  dependence on `merged_count` are gone. A user request older than 10 minutes is dropped with an event. Merged automatic
+  triggers can never turn an entry into a user request (only a Run now / Retry merge does, by changing its kind).
+  When an entry is removed and nobody takes over its merged triggers, each automation whose Run now was merged into it
+  gets "Your Run now was not done - run it again". A Recheck or Retry control that expires unanswered is announced
+  before it is swept. The recovery pass keeps the lease row of a living holder for 5 minutes; an acquirer still
+  reclaims any lease stale for 30 s (design 3.4) and the stalled holder stops at its next cover check.
 - **Not done here (open entry criteria of P0.2 review 2).** P3-2 (re-check the target at the commit of an in-place
   overwrite) and P3-3 (restore the old target when a versioning overwrite fails or is cancelled) touch the copy engine
   and the versioning tree; they are tracked separately. Until they land, the only trigger that can reach the engine is

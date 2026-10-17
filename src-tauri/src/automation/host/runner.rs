@@ -75,16 +75,10 @@ impl<D: HostDeps> Drop for RecheckGuard<'_, D> {
 /// rerun waits for the folders to settle.)
 pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64, unattended: bool) -> bool {
     if !unattended {
-        // Automatic runs are off: only the user's Run now / Retry may start the engine, and
-        // the gate is asked about such an entry once per request (a merged Run now asks again).
-        if !is_user_request(entry.kind) {
-            return false;
-        }
-        if state
-            .attempted
-            .get(&entry.id)
-            .is_some_and(|(merged, enq)| *enq == entry.enqueued_ms && entry.merged_count <= *merged)
-        {
+        // Automatic runs are off: only the user's Run now / Retry may start the engine, and only
+        // while the request is fresh. (An entry the gate answers with "keep" is REMOVED, so no
+        // later host - after a restart or a takeover - can start it unasked.)
+        if !is_user_request(entry.kind) || user_request_expired(entry, now) {
             return false;
         }
     }
@@ -98,6 +92,46 @@ pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64, unattended: 
         return false;
     }
     true
+}
+
+/// A user request older than this is not carried out any more (the same life as a control).
+pub(super) const USER_REQUEST_TTL_MS: i64 = 10 * 60 * 1000;
+
+fn user_request_expired(entry: &QueueEntry, now: i64) -> bool {
+    now >= entry.enqueued_ms && now - entry.enqueued_ms > USER_REQUEST_TTL_MS
+}
+
+/// With automatic runs off: a user request that nobody could start in time is dropped with an
+/// event, instead of starting hours later when a host finally comes up.
+pub(super) fn expire_user_requests<D: HostDeps>(
+    inner: &Arc<Inner<D>>,
+    entries: &[QueueEntry],
+    now: i64,
+) {
+    let old: Vec<&QueueEntry> = entries
+        .iter()
+        .filter(|e| is_user_request(e.kind) && user_request_expired(e, now))
+        .collect();
+    if old.is_empty() {
+        return;
+    }
+    let _ = inner.write(|conn| {
+        for e in &old {
+            if queue::remove(conn, e.id)? {
+                add_event_once(
+                    conn,
+                    &e.automation_id,
+                    now,
+                    EventKind::Warn,
+                    "Your Run now was not started in time \u{2014} run it again",
+                )?;
+            }
+        }
+        Ok(())
+    });
+    for e in old {
+        forget_entry(inner, e.id);
+    }
 }
 
 /// A trigger the user asked for at that moment.
@@ -145,7 +179,6 @@ pub(super) fn park_unattended<D: HostDeps>(
 fn forget_entry<D: HostDeps>(inner: &Arc<Inner<D>>, id: i64) {
     let mut state = inner.lock();
     state.logged_refusal.remove(&id);
-    state.attempted.remove(&id);
     state.parked_logged.remove(&id);
     state.next_try.remove(&id);
 }
@@ -176,7 +209,6 @@ pub(super) fn start_cycle<D: HostDeps>(inner: &Arc<Inner<D>>) {
         let live: std::collections::HashSet<i64> = entries.iter().map(|e| e.id).collect();
         state.next_try.retain(|id, _| live.contains(id));
         state.logged_refusal.retain(|id, _| live.contains(id));
-        state.attempted.retain(|id, _| live.contains(id));
         state.parked_logged.retain(|id, _| live.contains(id));
     }
     for entry in entries {
@@ -208,13 +240,6 @@ fn attempt<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, now: i64) -> 
         trigger: entry.kind,
         retry_of: entry.retry_of,
     };
-    if !inner.unattended {
-        // Asked once per request; whatever the answer, a kept entry does not try again by itself.
-        inner
-            .lock()
-            .attempted
-            .insert(entry.id, (entry.merged_count, entry.enqueued_ms));
-    }
     match gate(&ctx, &entry.automation_id, kind) {
         Ok(proof) => run_entry(inner, entry, proof),
         Err(refusal) => refuse(inner, entry, refusal, now),
@@ -261,6 +286,28 @@ fn refuse<D: HostDeps>(
 ) -> Attempt {
     let code = refusal.code();
     // A kept entry is logged once per reason, and asked again after a short gap.
+    if refusal.keeps_entry()
+        && !inner.unattended
+        && is_user_request(entry.kind)
+        && !matches!(refusal, GateRefusal::Store(_))
+    {
+        // Automatic runs are off: the user's request was asked once and the answer is "not now".
+        // The entry is REMOVED (not just remembered as asked): the memory dies with the process,
+        // and a host that starts later must not run a request nobody repeated.
+        forget_entry(inner, entry.id);
+        let _ = record_kept(inner, entry, &refusal, now);
+        let _ = inner.write(|conn| {
+            queue::remove(conn, entry.id)?;
+            add_event_once(
+                conn,
+                &entry.automation_id,
+                now,
+                EventKind::Info,
+                "Waiting \u{2014} run it with Run now (automatic runs are off)",
+            )
+        });
+        return Attempt::Gone;
+    }
     if refusal.keeps_entry() {
         let mut state = inner.lock();
         state
@@ -271,17 +318,6 @@ fn refuse<D: HostDeps>(
         drop(state);
         if first {
             let _ = record_kept(inner, entry, &refusal, now);
-            if !inner.unattended {
-                let _ = inner.write(|conn| {
-                    add_event_once(
-                        conn,
-                        &entry.automation_id,
-                        now,
-                        EventKind::Info,
-                        "Waiting \u{2014} run it with Run now (automatic runs are off)",
-                    )
-                });
-            }
         }
         return Attempt::Kept;
     }

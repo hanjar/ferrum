@@ -1421,12 +1421,9 @@ fn with_automatic_runs_off_a_kept_run_now_is_not_retried_by_itself() {
         tick(&host);
     }
     assert!(rig.world.calls().is_empty());
-    assert_eq!(rig.queue_len(), 1);
-    // Asking again does (the second Run now merges and is looked at once more).
-    assert_eq!(
-        request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()),
-        Ok(QueueAnswer::Merged)
-    );
+    assert_eq!(rig.queue_len(), 0, "the answered request left the queue");
+    // Asking again does.
+    assert!(request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).is_ok());
     tick(&host);
     assert_eq!(rig.world.calls().len(), 1);
 }
@@ -1830,4 +1827,146 @@ fn a_conflict_run_never_offers_retry_even_when_a_recheck_finds_work() {
         request::retry_command(&rig.fx.store, rig.fx.keys.as_ref(), id, rig.now()),
         Err(RequestError::NotReady("recheck_first"))
     );
+}
+
+// ── Rework 2 ──
+
+/// P2-R1: with automatic runs off, a user request the gate answers with "keep" is REMOVED, so a
+/// host that takes over (or a restart) cannot run it unasked once the device is back.
+#[test]
+fn a_kept_user_request_does_not_survive_a_takeover_or_a_restart() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Handover off");
+    let h1 = rig.host(1, HostClass::App);
+    let right = rig.fx.profile_policy(&p).right.path;
+    let away = format!("{right}-away");
+    std::fs::rename(&right, &away).unwrap();
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&h1);
+    assert!(h1.is_hosting());
+    assert_eq!(rig.queue_len(), 0, "the request was answered and dropped");
+    assert_eq!(rig.status_kind(&a), StatusKind::Device);
+    assert_eq!(parked_text(&rig, &a), 1);
+    // The device comes back; host 1 dies without releasing; host 2 takes over after 15 s.
+    std::fs::rename(&away, &right).unwrap();
+    rig.advance(15_001);
+    let h2 = rig.host(2, HostClass::App);
+    tick(&h2);
+    assert!(h2.is_hosting());
+    // And a restart of the whole app (a new Host over the same store).
+    let h3 = rig.host(3, HostClass::App);
+    rig.advance(20_000);
+    tick(&h3);
+    tick(&h2);
+    assert!(
+        rig.world.calls().is_empty(),
+        "nobody ran a request nobody repeated"
+    );
+    // Asking again runs it.
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    let hosting = if h3.is_hosting() { &h3 } else { &h2 };
+    tick(hosting);
+    assert_eq!(rig.world.calls().len(), 1);
+}
+
+#[test]
+fn a_user_request_nobody_could_start_in_time_expires() {
+    let rig = parked_rig();
+    let (a, _) = rig.automation("Stale request");
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    rig.advance(11 * 60 * 1000);
+    let host = rig.host(1, HostClass::App);
+    tick(&host);
+    assert!(rig.world.calls().is_empty());
+    assert_eq!(rig.queue_len(), 0);
+    assert!(
+        rig.event_texts(&a)
+            .iter()
+            .any(|e| e.contains("not started in time")),
+        "{:?}",
+        rig.event_texts(&a)
+    );
+}
+
+/// P3-R2: merged automatic triggers never turn an entry into something the engine will run.
+#[test]
+fn merged_automatic_triggers_never_start_the_engine_with_automatic_runs_off() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Merging");
+    let host = rig.host(1, HostClass::App);
+    rig.enqueue(&a, &p, TriggerKind::Schedule, HostClass::App);
+    for kind in [
+        TriggerKind::Watch,
+        TriggerKind::Schedule,
+        TriggerKind::CatchUp,
+    ] {
+        rig.enqueue(&a, &p, kind, HostClass::App);
+        rig.advance(20_000);
+        tick(&host);
+    }
+    assert!(rig.world.calls().is_empty());
+    assert_eq!(rig.queue_len(), 1);
+    assert_eq!(
+        rig.fx.store.with_read(queue::all).unwrap()[0].kind,
+        TriggerKind::Schedule
+    );
+}
+
+/// P3 UX: B's Run now was merged into A's entry and A is refused: B hears about it.
+#[test]
+fn a_run_now_merged_into_a_refused_entry_is_reported_to_its_automation() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Owner A");
+    let b = rig.automation_on("Requester B", &p);
+    let host = rig.host(1, HostClass::App);
+    rig.enqueue(&a, &p, TriggerKind::Schedule, HostClass::App);
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &b, rig.now()).unwrap();
+    set_attention(&rig, &a, 4);
+    tick(&host);
+    assert!(rig.world.calls().is_empty());
+    assert_eq!(rig.queue_len(), 0);
+    assert!(
+        rig.event_texts(&b)
+            .iter()
+            .any(|e| e.contains("Your Run now was not done")),
+        "{:?}",
+        rig.event_texts(&b)
+    );
+}
+
+/// P3: a Recheck nobody could answer within the control's life is announced, not swept silently.
+#[test]
+fn an_unanswered_recheck_that_expires_is_announced() {
+    let rig = Rig::new();
+    let (a, pa) = rig.automation("Slow recheck");
+    let host = rig.host(1, HostClass::App);
+    rig.world.set_script(script(|_, call| {
+        if call.dry_run {
+            dry_run(0, 0)
+        } else {
+            partial(1, 1, 0)
+        }
+    }));
+    rig.enqueue(&a, &pa, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    let run_a = rig.runs()[0].id;
+    let left = rig.fx.profile_policy(&pa).left.path;
+    let (b, _) = rig.overlapping_automation("Long runner", &left);
+    rig.world
+        .set_script(blocking(Arc::new(AtomicBool::new(false)), 0, 2));
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &b, rig.now()).unwrap();
+    host.tick();
+    wait_until("B active", || !host.active_runs().is_empty());
+    request::recheck_command(&rig.fx.store, run_a, rig.now()).unwrap();
+    host.tick();
+    rig.advance(11 * 60 * 1000);
+    host.tick();
+    assert!(
+        rig.event_texts(&a)
+            .iter()
+            .any(|e| e.contains("Recheck of run") && e.contains("not done in time")),
+        "{:?}",
+        rig.event_texts(&a)
+    );
+    host.shutdown(Duration::from_secs(10));
 }

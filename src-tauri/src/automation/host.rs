@@ -246,10 +246,6 @@ pub(crate) struct State {
     pub logged_refusal: HashMap<i64, &'static str>,
     /// Automation id → pending reruns chained in a row.
     pub rerun_streak: HashMap<String, u32>,
-    /// Queue entry id -> (`merged_count`, `enqueued_ms`) when the gate last looked at it (the
-    /// time tells a reused row id from the entry it once was). With automatic runs off an
-    /// entry is asked once, and again only when the user merges another Run now into it.
-    pub attempted: HashMap<i64, (i64, i64)>,
     /// Entries already announced as parked ("Waiting - run it with Run now").
     pub parked_logged: HashMap<i64, i64>,
     pub last_recovery_ms: Option<i64>,
@@ -554,7 +550,11 @@ impl<D: HostDeps> Host<D> {
             }
             // Only after the runs were judged: a stale row is the evidence that a holder still
             // exists, and deleting it first would erase that.
-            leases::reclaim_dead(conn, now, probe.as_ref())?;
+            // A lease older than the 30 s staleness window is reclaimable by any acquirer (design
+            // 3.4) and its stalled holder stops at its next cover check; the recovery pass itself
+            // only deletes the rows of dead processes and of holders silent for more than the
+            // grace, so the evidence for a run claim survives that long.
+            leases::reclaim_dead(conn, now, probe.as_ref(), LIVE_HOLDER_GRACE_MS)?;
             Ok(())
         });
     }
@@ -574,9 +574,37 @@ impl<D: HostDeps> Host<D> {
             due
         };
         if sweep {
-            let _ = inner
-                .store
-                .with_write(|conn| -> Result<usize, StoreError> { controls::sweep(conn, now) });
+            // A Recheck or Retry nobody answered in time is announced before it is swept away.
+            let _ = inner.write(|conn| {
+                for c in controls::expired_unhandled(conn, now)? {
+                    if !matches!(c.action, Action::Recheck | Action::Retry) {
+                        continue;
+                    }
+                    let Some(run_id) = c.run_id else { continue };
+                    let Some(run) = runs::get(conn, run_id)? else {
+                        continue;
+                    };
+                    if let Some(aid) = &run.automation_id {
+                        crate::automation::store::events::add_event_for_run(
+                            conn,
+                            aid,
+                            now,
+                            crate::automation::store::automations::EventKind::Warn,
+                            &format!(
+                                "{} of run #{run_id} was not done in time \u{2014} ask again",
+                                if c.action == Action::Recheck {
+                                    "Recheck"
+                                } else {
+                                    "Retry"
+                                }
+                            ),
+                            Some(run_id),
+                        )?;
+                    }
+                }
+                controls::sweep(conn, now)?;
+                Ok(())
+            });
         }
         let Ok(pending) = inner
             .store
@@ -792,10 +820,10 @@ impl<D: HostDeps> Host<D> {
             // Bookkeeping of entries that are gone (a row id can be reused by a later entry).
             let mut state = inner.lock();
             let live: HashSet<i64> = entries.iter().map(|e| e.id).collect();
-            state.attempted.retain(|id, _| live.contains(id));
             state.parked_logged.retain(|id, _| live.contains(id));
         }
         if !inner.unattended {
+            runner::expire_user_requests(inner, &entries, now);
             runner::park_unattended(inner, &entries, now);
         }
         {
