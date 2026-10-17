@@ -145,6 +145,8 @@ struct FakeWatch {
     id: usize,
     root: String,
     sink: Sink,
+    /// Set by `die`: the handle then reports itself as not alive (a watch whose worker ended).
+    dead: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The only source of change events in the watch tests (design §9.2). `watch` records the roots it
@@ -162,9 +164,14 @@ pub struct FakeFactory {
 struct FakeHandle {
     id: usize,
     watches: Arc<Mutex<Vec<FakeWatch>>>,
+    dead: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl WatchHandle for FakeHandle {}
+impl WatchHandle for FakeHandle {
+    fn alive(&self) -> bool {
+        !self.dead.load(Ordering::SeqCst)
+    }
+}
 
 impl Drop for FakeHandle {
     fn drop(&mut self) {
@@ -179,14 +186,17 @@ impl WatchFactory for FakeFactory {
             return Err(WatchError::Failed);
         }
         let id = self.next.fetch_add(1, Ordering::SeqCst);
+        let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.watches.lock().unwrap().push(FakeWatch {
             id,
             root: root.to_string(),
             sink,
+            dead: dead.clone(),
         });
         Ok(Box::new(FakeHandle {
             id,
             watches: self.watches.clone(),
+            dead,
         }))
     }
 }
@@ -204,6 +214,25 @@ impl FakeFactory {
             .collect();
         for sink in sinks {
             sink(event.clone());
+        }
+    }
+
+    /// The watches of `root` die the way a real one does: they stop being alive and (when
+    /// `say_so`) report `Failed` first. `say_so = false` is the silent death a health check finds.
+    pub fn die(&self, root: &str, say_so: bool) {
+        let sinks: Vec<Sink> = {
+            let watches = self.watches.lock().unwrap();
+            watches
+                .iter()
+                .filter(|w| w.root.eq_ignore_ascii_case(root))
+                .inspect(|w| w.dead.store(true, Ordering::SeqCst))
+                .map(|w| w.sink.clone())
+                .collect()
+        };
+        if say_so {
+            for sink in sinks {
+                sink(RawEvent::Failed);
+            }
         }
     }
 

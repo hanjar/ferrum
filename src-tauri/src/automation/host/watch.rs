@@ -1036,7 +1036,8 @@ fn step<D: HostDeps>(
     };
 
     let keys = inner.deps.keys();
-    let handles_short = t.handles.len() < t.expected_handles();
+    let handles_short =
+        t.handles.len() < t.expected_handles() || t.handles.iter().any(|h| !h.alive());
     let result = inner.write_quiet(|conn| {
         apply(
             conn,
@@ -1222,6 +1223,12 @@ fn apply(
         // Still waiting; whatever the watchers said while a folder was missing means nothing.
         return Ok(out);
     }
+    if i.drained.failed && i.report.as_ref().is_some_and(|r| r.missing.is_none()) {
+        // A watch reported that it is gone while the folders are there and are the approved ones
+        // (FER-565: the own backend says so; `notify` could not): put it back now. The events it
+        // may have missed are compared below (section 2), or by the comparison that is running.
+        out.rebuild_handles = true;
+    }
     if i.initial && i.handles_short && i.report.as_ref().is_some_and(|r| r.missing.is_none()) {
         // The first look found the folders; the watches were not made on a guess (S4): make them.
         out.rebuild_handles = true;
@@ -1261,6 +1268,11 @@ fn apply(
             EventKind::Warn,
             "Watcher missed events \u{2014} full comparison when safe",
         )?;
+    } else if lost && state == TriggerState::Checking {
+        // The comparison that is running may have walked past what was lost: count it as a noted
+        // change, so an "in sync" answer goes through one more countdown and comparison (S1).
+        let mut ctx = t.shared.ctx();
+        ctx.noted = ctx.noted.saturating_add(1);
     }
 
     // ── 3. The PC woke up (WA-7.2): one fresh comparison, the countdown is moot ──

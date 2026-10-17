@@ -15,6 +15,7 @@ pub mod model;
 pub mod policy;
 pub mod power;
 pub mod profile_baseline;
+pub mod rdcw;
 pub mod read;
 pub mod scheduler;
 pub mod status;

@@ -403,7 +403,9 @@ AutomationEditor.svelte,AutomationReview.svelte}` (+ tests), `src/lib/stores/aut
   - Events on excluded and staging paths ignored.
   - Network root → `unsupported`; no timer-based polling exists (assert the fake watcher factory is the only
     source of change events; the UNC availability probe never lists directories).
-  - Real `notify` smoke test on a temp dir: nested file change delivers an event (recursive).
+  - Real backend test on a temp dir: nested file change delivers an event (recursive). FER-565 replaced `notify` on
+    Windows with the own `ReadDirectoryChangesW` backend (design §9.8): parser tests, root deleted -> lost watch,
+    small buffer -> overflow, drop releases the folder.
 - **Security notes:** event paths are untrusted strings; never used to build operations (the engine compares).
 - **Security review:** recommended.
 - **Size:** L.
