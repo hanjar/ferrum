@@ -521,6 +521,35 @@ fn approve_and_resume_pull_a_future_mark_back_and_start_the_cursor_at_now() {
     assert_eq!(rt(&rig, &a).last_fired_occurrence_ms, Some(T0 - DAY));
 }
 
+#[test]
+fn the_first_approval_of_a_new_automation_starts_the_cursor_at_approve_time() {
+    // NIT-R2-1: the INSERT branch of `reset_runtime` (no runtime row yet) must not leave the cursor NULL.
+    let rig = Rig::new();
+    let (a, _) = scheduled(&rig, "First", MissedPolicy::Skip);
+    rig.fx
+        .store
+        .with_write(|c| -> Result<(), StoreError> {
+            c.execute(
+                "DELETE FROM automation_runtime WHERE automation_id = ?1",
+                [&a],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        rig.fx
+            .store
+            .with_read(|c| runtime::get(c, &a))
+            .unwrap()
+            .is_none()
+    );
+    reset(&rig, &a);
+    let row = rt(&rig, &a);
+    assert_eq!(row.schedule_cursor_ms, Some(rig.now()));
+    assert_eq!(row.last_fired_occurrence_ms, None);
+}
+
 // ── Compare and set (review S2) ──
 
 fn due_host(rig: &Rig, name: &str) -> (String, super::Host<FakeDeps>) {
