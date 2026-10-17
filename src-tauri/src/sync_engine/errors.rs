@@ -61,6 +61,10 @@ pub enum Reason {
     /// FER-564: a copy over a versioned file failed, and the previous version could not be put
     /// back at its place (it is kept in the versions folder).
     RestoreFailed,
+    /// FER-564: an in-place overwrite moved the old file aside and could neither publish the new
+    /// file nor put the old one back; the old file is kept, intact, under a hidden
+    /// `.<name>.ferrum-backup-*` name next to the target.
+    BackupLeft,
     /// A file sent to the Recycle Bin did not end up there (the shell deleted it for good).
     RecycleBypassed,
     /// FER-562: the path is inside one of Ferrum's own state folders or a Windows Startup folder.
@@ -104,6 +108,7 @@ impl Reason {
             Reason::TargetAppeared => "target_appeared",
             Reason::TargetChanged => "target_changed",
             Reason::RestoreFailed => "restore_failed",
+            Reason::BackupLeft => "backup_left",
             Reason::RecycleBypassed => "recycle_bypassed",
             Reason::ProtectedFolder => "protected_folder",
             Reason::Unknown => "unknown",
@@ -137,6 +142,9 @@ impl Reason {
             Reason::TargetChanged => "the destination file was changed during the run",
             Reason::RestoreFailed => {
                 "a previous version could not be put back and is kept in the versions folder"
+            }
+            Reason::BackupLeft => {
+                "the previous file is kept under a hidden backup name next to the destination"
             }
             Reason::RecycleBypassed => "a file was removed without going to the Recycle Bin",
             Reason::ProtectedFolder => {
@@ -341,6 +349,9 @@ mod tests {
             Reason::AccessDenied,
             Reason::LinkInPath,
             Reason::ProtectedFolder,
+            Reason::TargetChanged,
+            Reason::RestoreFailed,
+            Reason::BackupLeft,
             Reason::Unknown,
         ] {
             assert!(!r.code().contains('\\') && !r.text().contains('\\'));

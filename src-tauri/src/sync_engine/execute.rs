@@ -1734,6 +1734,7 @@ impl<'a> Runner<'a> {
 
         let mut comps_of: HashMap<usize, Vec<String>> = HashMap::new();
         let mut seen: Option<Expect> = None;
+        let mut seen_id: Option<publish::FileId> = None;
         for &idx in batch {
             let op = self.ops[idx].clone();
             let comps = match split_rel(&op.name) {
@@ -1753,7 +1754,8 @@ impl<'a> Runner<'a> {
                     // FER-564: the exact facts of an in-place overwrite's target, kept for the
                     // re-check at the commit.
                     if overwrite && !versioning {
-                        seen = fact_of(&self.abs_path(target, &refs))
+                        let at = self.abs_path(target, &refs);
+                        seen = fact_of(&at)
                             .ok()
                             .flatten()
                             .filter(|f| !f.is_dir && !f.link)
@@ -1761,6 +1763,11 @@ impl<'a> Runner<'a> {
                                 size: f.size,
                                 mtime_ms: f.mtime,
                             });
+                        // Identity too: a file replaced by another one with the same size and
+                        // time (save-via-rename) must not be overwritten either.
+                        if seen.is_some() {
+                            seen_id = publish::file_id_of_path(&at);
+                        }
                     }
                     comps_of.insert(idx, comps);
                     ready.push((idx, src));
@@ -1887,6 +1894,7 @@ impl<'a> Runner<'a> {
                 &first_name,
                 self.expect_of(&self.ops[first_idx]),
                 seen,
+                seen_id,
             )
         });
         let report = self.guarded(|cancel| {
@@ -1909,6 +1917,20 @@ impl<'a> Runner<'a> {
         for (idx, src) in ready {
             let result = if report.done.contains(&src) {
                 OpResult::Done
+            } else if let Some(backup) = commit.as_ref().and_then(|c| c.backup_left()) {
+                // The old file is intact but only under its backup name: say so and stop the run.
+                log::warn!(
+                    "sync: {}: the previous file is kept as {}",
+                    self.ops[idx].name,
+                    backup
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                );
+                OpResult::Failed(Classified {
+                    class: ErrorClass::Systemic,
+                    reason: Reason::BackupLeft,
+                })
             } else if commit.as_ref().is_some_and(|c| c.target_changed()) {
                 OpResult::TargetChanged
             } else if let Some((_, c)) = report.failed.iter().find(|(k, _)| k == &src) {

@@ -578,3 +578,136 @@ fn two_way_after_a_failed_restore_holds_a_conflict_and_deletes_nothing() {
     // No delete was versioned from the left folder.
     assert!(!rig.versions.join("Left").exists());
 }
+
+// ── rework of the Opus review (round 1) ──
+
+// S1: only folders and LINKS (name-surrogate reparse tags) are refused as the target of the commit.
+// A OneDrive/cloud placeholder or a deduplicated file is an ordinary file, as in the plan and the
+// just-in-time check (their tags are asserted because a real placeholder cannot be made here).
+#[test]
+fn the_commit_refuses_folders_and_links_but_not_other_reparse_data() {
+    use crate::archive_extract::publish::overwrite_target_refused as refused;
+    const DIR: u32 = 0x10;
+    const REPARSE: u32 = 0x400;
+    const FILE: u32 = 0x20;
+    assert!(refused(DIR, 0), "folder");
+    assert!(refused(DIR | REPARSE, 0xA000_0003), "folder junction");
+    assert!(
+        refused(FILE | REPARSE, 0xA000_000C),
+        "IO_REPARSE_TAG_SYMLINK"
+    );
+    assert!(
+        refused(FILE | REPARSE, 0xA000_0003),
+        "IO_REPARSE_TAG_MOUNT_POINT"
+    );
+    assert!(!refused(FILE, 0), "plain file");
+    assert!(
+        !refused(FILE | REPARSE, 0x9000_001A),
+        "IO_REPARSE_TAG_CLOUD"
+    );
+    assert!(
+        !refused(FILE | REPARSE, 0x9000_701A),
+        "IO_REPARSE_TAG_CLOUD_7000"
+    );
+    assert!(
+        !refused(FILE | REPARSE, 0x8000_0013),
+        "IO_REPARSE_TAG_DEDUP"
+    );
+    assert!(!refused(FILE | REPARSE, 0x8000_0017), "IO_REPARSE_TAG_WOF");
+    assert!(
+        !refused(FILE, 0xA000_000C),
+        "a stale tag value without the reparse attribute means nothing"
+    );
+}
+
+// S2: a target replaced by another file with the same size and time (save-via-rename that keeps the
+// time) is a different object: it is not overwritten.
+#[test]
+fn a_target_replaced_by_another_file_with_the_same_size_and_time_is_caught() {
+    let rig = Rig::new();
+    seed_overwrite(&rig);
+    let profile = rig.profile(one_way(), DeletePolicy::Permanent);
+    let right = rig.right.clone();
+    let env = hooked(move |_, _| {
+        let tmp = right.join("swap.tmp");
+        fs::write(&tmp, b"OTHER-C-OLD!").unwrap();
+        set_mtime(&tmp, 1_900_000_000);
+        fs::rename(&tmp, right.join("c.txt")).unwrap();
+    });
+    let r = go(&rig, &profile, &env);
+    let rec = op(&r, "c.txt");
+    assert_eq!(rec.status, OpStatus::Changed);
+    assert_eq!(rec.reason, Some(Reason::TargetChanged));
+    assert!(r.pending_rerun);
+    assert_eq!(read(&rig.right.join("c.txt")), "OTHER-C-OLD!");
+    assert_eq!(leftovers(&rig.right), Vec::<String>::new());
+}
+
+// S3: the old file was moved aside, the new one could not be published and the old one could not
+// be put back because a newcomer took its name. Nothing is overwritten or deleted, the old file is
+// kept under its backup name, and the run stops with its own reason (not an ordinary copy error).
+#[test]
+fn an_old_file_left_under_its_backup_name_stops_the_run_with_its_own_reason() {
+    let rig = Rig::new();
+    seed_overwrite(&rig);
+    write(&rig.left.join("z.txt"), b"later");
+    let profile = rig.profile(mirror(), DeletePolicy::Permanent);
+    let dest = rig.right.join("c.txt");
+    let d = dest.clone();
+    crate::archive_extract::publish::fault::after_aside(&dest, move || {
+        fs::write(&d, b"the newcomer").unwrap();
+    });
+    let r = go(&rig, &profile, &test_env());
+    let rec = op(&r, "c.txt");
+    assert_eq!(rec.status, OpStatus::Failed);
+    assert_eq!(rec.reason, Some(Reason::BackupLeft));
+    assert_eq!(op(&r, "z.txt").status, OpStatus::NotStarted);
+    match &r.outcome {
+        EngineOutcome::Failed { error } | EngineOutcome::Partial { error, .. } => {
+            assert_eq!(error.code, "backup_left");
+            assert!(!error.text.contains('\\'), "{}", error.text);
+        }
+        other => panic!("expected an attention outcome, got {other:?}"),
+    }
+    // The newcomer is untouched; the old file is intact under its backup name; no staging file.
+    assert_eq!(read(&dest), "the newcomer");
+    let names = tree(&rig.right);
+    let backups: Vec<_> = names
+        .iter()
+        .filter(|n| n.contains(".ferrum-backup-"))
+        .collect();
+    assert_eq!(backups.len(), 1, "{names:?}");
+    assert_eq!(read(&rig.right.join(backups[0])), "right-c-old!");
+    assert!(
+        !names.iter().any(|n| n.contains(".ferrum-stage-")),
+        "{names:?}"
+    );
+}
+
+// N4: the swap of a target above MAX_PATH works (the old rename path handled it). The rest of the
+// engine does not walk such paths, so the commit check is driven directly.
+#[test]
+fn the_commit_swap_works_above_max_path() {
+    use crate::copy_engine::ReplaceGuard;
+    use crate::sync_engine::commit_check::CommitCheck;
+    use crate::sync_engine::env::NoHooks;
+    use crate::sync_engine::versioning::Expect;
+    let rig = Rig::new();
+    let deep: String = (0..6).map(|i| format!("{}{i}/", "d".repeat(50))).collect();
+    let dir = rig.right.join(&deep);
+    let (dest, staged) = (dir.join("c.txt"), dir.join(".c.txt.ferrum-stage-1"));
+    assert!(dest.to_string_lossy().len() > 260, "path is long enough");
+    write(&dest, b"right-c-old!");
+    write(&staged, b"left-c-new-content");
+    set_mtime(&dest, 1_900_000_000);
+    let m = fs::metadata(&dest).unwrap();
+    let plan = Expect {
+        size: m.len(),
+        mtime_ms: crate::fs_service::modified_ms(&m),
+    };
+    let check = CommitCheck::new(&NoHooks, 0, "c.txt", plan, None, None);
+    check.replace(&staged, &dest).unwrap();
+    assert_eq!(read(&dest), "left-c-new-content");
+    assert!(!staged.exists());
+    assert_eq!(leftovers(&rig.right), Vec::<String>::new());
+}

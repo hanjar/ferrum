@@ -209,8 +209,9 @@ impl VersionStore {
     /// `move_in` took it from, after the copy that should have replaced it failed or was
     /// cancelled. The target folder is opened without following links, the version is renamed
     /// back by handle WITHOUT replacing anything (a file that appeared at the place meanwhile is
-    /// never touched: `TargetOccupied`). On another volume (the rename answers "not the same
-    /// device", or the version is a copy of a cloud placeholder) it is copied back without
+    /// never touched: `TargetOccupied`). The version in the tree is a full file (a cloud
+    /// placeholder was made one when it was moved in), so a rename is always tried first. On
+    /// another volume (the rename answers "not the same device") it is copied back without
     /// overwriting, the size is verified, and only then is the version in the tree deleted.
     pub fn restore(
         &self,
@@ -237,7 +238,8 @@ impl VersionStore {
             Err(MoveError::Publish(e)) => return Err(classify_publish(&e)),
             Err(MoveError::CrossDevice) => {}
         }
-        let expected = publish::file_size(&vdir, os).map_err(|e| classify_publish(&e))?;
+        let (expected, version_mtime) =
+            publish::file_facts(&vdir, os).map_err(|e| classify_publish(&e))?;
         let version = {
             let mut p = std::path::PathBuf::from(self.dest_dir_path(side, rel_parent));
             p.push(name);
@@ -262,13 +264,24 @@ impl VersionStore {
         match publish::file_size(tparent.dir(), os) {
             Ok(n) if n == expected => {}
             _ => {
-                let _ = publish::delete_file(tparent.dir(), os);
+                // Remove the bad copy only if it still is the file this copy wrote (its time was
+                // carried over from the version): a file the user put there meanwhile stays.
+                let ours = |_size: u64, ms: i64| {
+                    (ms - version_mtime).abs() <= crate::sync_engine::MTIME_TOLERANCE_MS
+                };
+                if let Err(e) = publish::delete_file_if(tparent.dir(), os, &ours) {
+                    log::warn!(
+                        "sync: a restored copy that failed verification was not removed: {e:?}"
+                    );
+                }
                 return Err(per_item(Reason::VerifyFailed));
             }
         }
-        // The copy is in place; the version in the tree is now a duplicate.
-        // A duplicate left behind (a failed delete) is harmless: the file is back.
-        let _ = publish::delete_file(&vdir, os);
+        // The copy is in place; the version in the tree is now a duplicate. A duplicate left
+        // behind (a failed delete) is harmless, the file is back, but it is logged.
+        if let Err(e) = publish::delete_file(&vdir, os) {
+            log::warn!("sync: the duplicate version of a restored file was not removed: {e:?}");
+        }
         Ok(Restored::Back)
     }
 

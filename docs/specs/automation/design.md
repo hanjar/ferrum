@@ -611,12 +611,20 @@ rediscover them:
   check made right before is all there is. An in-place overwrite (`recycleBin`/`permanent`, SP-3.4) replaces the target
   when the copy commits, and FER-564 re-checks the TARGET at that moment (`sync_engine/commit_check.rs`,
   `archive_publish::replace_file_checked`): the target is opened with a share mode that denies other writers, deleters
-  and renamers, its size and time are read from that handle and compared with the plan AND with the exact facts the
-  just-in-time check saw, the old file is renamed aside by that handle, the staged file is published without replacing
-  a name, and only then is the old file deleted. A changed, removed or swapped target is left as it is, the item is
-  `changed` with the reason `target_changed` (another comparison is due) and the staged copy is discarded; a program
-  that has the target open for writing makes the item fail as `sharing_violation` (retried like any transient error).
-  `ReplaceFileW` was not used: it works on paths, so nothing can be compared on the object it replaces.
+  and renamers, its size, time and identity (volume serial + file index) are read from that handle and compared with
+  the plan AND with the exact facts and identity the just-in-time check saw (a file swapped in by save-via-rename with
+  the same size and time is another object and is caught; an edit in place that keeps size and time cannot be told
+  without hashing and is out of scope), the old file is renamed aside by that handle, the staged file is published
+  without replacing a name, and only then is the old file deleted. Folders and LINKS (symlink, junction, mount point:
+  name-surrogate reparse tags) are refused; other reparse data (OneDrive/cloud placeholders, deduplicated files) is an
+  ordinary file, exactly as in the plan and the just-in-time check. A changed, removed or swapped target is left as it
+  is, the item is `changed` with the reason `target_changed` (another comparison is due) and the staged copy is
+  discarded; a program that has the target open for writing makes the item fail as `sharing_violation` (retried like
+  any transient error). If the publish of the staged file fails AND the old file cannot be renamed back (a newcomer took
+  its name in those microseconds), the old file stays, intact, as `.<name>.ferrum-backup-*` next to the target; that is
+  reported as `backup_left`, a systemic stop (the backup name goes to the log), not as an ordinary copy error. Paths are
+  passed in the `\\?\` form so a target above MAX_PATH works as before. `ReplaceFileW` was not used: it works on paths,
+  so nothing can be compared on the object it replaces.
 - **Versioning.** `<root>\Left|Right\<yyyy-MM-dd HHmmss> #<run>\<rel>` (system time zone), folders created no-follow.
   Same volume: rename by handle (`NtSetInformationFile(FileRenameInformation)` with the destination folder handle as
   `RootDirectory`; the destination is never replaced). Another volume (`STATUS_NOT_SAME_DEVICE`): `copy_engine` into the
