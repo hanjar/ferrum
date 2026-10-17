@@ -59,7 +59,7 @@ pub struct CommitCheck<'a> {
 /// The verbatim form of an absolute path (see `path_guard::verbatim_path`), so that a target
 /// above MAX_PATH works as it did with `std::fs::rename`. Relative paths and paths that already
 /// are verbatim or device paths are left alone.
-fn extended(path: &Path) -> PathBuf {
+pub(crate) fn extended(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     if !path.is_absolute()
         || crate::path_guard::is_verbatim_spelling(path)

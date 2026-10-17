@@ -706,8 +706,92 @@ fn the_commit_swap_works_above_max_path() {
         mtime_ms: crate::fs_service::modified_ms(&m),
     };
     let check = CommitCheck::new(&NoHooks, 0, "c.txt", plan, None, None);
+    assert!(
+        publish::file_id_of_path(&crate::sync_engine::commit_check::extended(&dest)).is_some(),
+        "the identity of a long path is read in the verbatim form"
+    );
     check.replace(&staged, &dest).unwrap();
     assert_eq!(read(&dest), "left-c-new-content");
     assert!(!staged.exists());
     assert_eq!(leftovers(&rig.right), Vec::<String>::new());
+}
+
+// N1: the first copy (the overwrite) fails; the restore copies the old version back across
+// volumes, and that copy comes out short.
+struct FailThenShort {
+    dir: std::path::PathBuf,
+    keep_time: bool,
+    hits: AtomicUsize,
+}
+
+impl Copier for FailThenShort {
+    fn copy(
+        &self,
+        sources: &[String],
+        dest_dir: &str,
+        overwrite: bool,
+        durable: bool,
+        cancel: &CancelToken,
+        guard: Option<&dyn crate::copy_engine::ReplaceGuard>,
+    ) -> CopyReport {
+        if !same_dir(dest_dir, &self.dir) {
+            return EngineCopier.copy(sources, dest_dir, overwrite, durable, cancel, guard);
+        }
+        if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
+            return CopyReport {
+                failed: vec![(sources[0].clone(), per_item())],
+                ..CopyReport::default()
+            };
+        }
+        let report = EngineCopier.copy(sources, dest_dir, overwrite, durable, cancel, guard);
+        let name = Path::new(&sources[0]).file_name().unwrap();
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(Path::new(dest_dir).join(name))
+            .unwrap();
+        let before = f.metadata().unwrap().modified().unwrap();
+        f.set_len(0).unwrap();
+        if self.keep_time {
+            f.set_modified(before).unwrap();
+        }
+        report
+    }
+}
+
+fn short_restore(keep_time: bool) -> (Rig, EngineReport) {
+    let rig = Rig::new();
+    seed_overwrite(&rig);
+    let profile = rig.profile(mirror(), rig.versioning());
+    let mut env = test_env();
+    env.mover = Arc::new(CrossVolume);
+    env.copier = Arc::new(FailThenShort {
+        dir: rig.right.clone(),
+        keep_time,
+        hits: AtomicUsize::new(0),
+    });
+    let r = go(&rig, &profile, &env);
+    (rig, r)
+}
+
+// The short copy is still the file the restore wrote (its time was carried over): it is removed,
+// the run stops, and the old version stays in the versions tree.
+#[test]
+fn a_short_restore_copy_that_is_still_ours_is_removed() {
+    let (rig, r) = short_restore(true);
+    assert_eq!(op(&r, "c.txt").reason, Some(Reason::RestoreFailed));
+    assert!(!rig.right.join("c.txt").exists());
+    let kept = versions_listing(&rig);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(read(&rig.versions.join(&kept[0])), "right-c-old!");
+}
+
+// A short file whose time is not the restored one is not ours to delete (somebody wrote to it):
+// it is left alone, and the old version stays in the tree.
+#[test]
+fn a_short_file_that_is_not_ours_is_not_deleted_by_the_restore() {
+    let (rig, r) = short_restore(false);
+    assert_eq!(op(&r, "c.txt").reason, Some(Reason::RestoreFailed));
+    assert!(rig.right.join("c.txt").exists());
+    assert_eq!(fs::metadata(rig.right.join("c.txt")).unwrap().len(), 0);
+    assert_eq!(versions_listing(&rig).len(), 1);
 }

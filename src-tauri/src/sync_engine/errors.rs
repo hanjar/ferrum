@@ -144,7 +144,7 @@ impl Reason {
                 "a previous version could not be put back and is kept in the versions folder"
             }
             Reason::BackupLeft => {
-                "the previous file is kept under a hidden backup name next to the destination"
+                "the previous file is kept in the same folder as .<file name>.ferrum-backup-<number>; rename it back to recover it"
             }
             Reason::RecycleBypassed => "a file was removed without going to the Recycle Bin",
             Reason::ProtectedFolder => {

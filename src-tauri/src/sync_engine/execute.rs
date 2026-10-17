@@ -1766,7 +1766,9 @@ impl<'a> Runner<'a> {
                         // Identity too: a file replaced by another one with the same size and
                         // time (save-via-rename) must not be overwritten either.
                         if seen.is_some() {
-                            seen_id = publish::file_id_of_path(&at);
+                            seen_id = publish::file_id_of_path(
+                                &crate::sync_engine::commit_check::extended(&at),
+                            );
                         }
                     }
                     comps_of.insert(idx, comps);
