@@ -91,9 +91,13 @@ pub fn is_inside(path: &Path) -> bool {
     dir_is_in(path, startup_dirs())
 }
 
-/// True when `path` is a Startup folder or one of its ancestors (a folder that contains Startup).
-pub fn is_startup_or_ancestor_path(path: &Path) -> bool {
-    is_startup_or_ancestor(path, startup_dirs())
+/// FER-562: [`is_inside`] (or, with `ancestors`, also "is a Startup folder or an ancestor") for a
+/// path that is ALREADY a resolved final path: no file system access.
+pub fn touches_resolved(path: &Path, ancestors: bool) -> bool {
+    let d = crate::protected_dirs::resolve_lexical(path);
+    startup_dirs()
+        .iter()
+        .any(|s| d.starts_with(s) || (ancestors && s.starts_with(&d)))
 }
 
 /// A destination / new entry / output path: refused inside Startup.
