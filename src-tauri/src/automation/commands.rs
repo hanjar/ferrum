@@ -51,6 +51,8 @@ pub struct AutomationState {
     pub baselines: ProfileBaselineStore,
     /// The in-app host (P1.3): started once by `start_host` after the state is managed.
     pub host: std::sync::OnceLock<crate::automation::host::prod::AppHost>,
+    /// The hidden window that reports sleep, clock and time zone changes to the host (P1.4).
+    pub power: std::sync::OnceLock<crate::automation::power::PowerWatcher>,
 }
 
 impl AutomationState {
@@ -97,6 +99,7 @@ impl AutomationState {
             tests: Arc::new(TestLedger::new()),
             baselines,
             host: std::sync::OnceLock::new(),
+            power: std::sync::OnceLock::new(),
         }
     }
 
@@ -1171,7 +1174,14 @@ pub async fn automation_validate(
     let store = state.store.clone();
     let probe: Arc<dyn RootProbe> = Arc::new(FsProbe);
     tauri::async_runtime::spawn_blocking(move || {
-        approval::validate_in(&store, &draft, &probe, READINESS_BUDGET, background_ready())
+        approval::validate_in(
+            &store,
+            &draft,
+            &probe,
+            READINESS_BUDGET,
+            background_ready(),
+            now_ms(),
+        )
     })
     .await
     .map_err(|_| internal())?
@@ -1531,6 +1541,13 @@ pub fn start_host<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if state.host.set(host.clone()).is_ok() {
         // Detached on purpose: the loop ends with `stop_host` or with the process.
         let _ = host.start();
+        // Resume, clock and time zone changes make the host look at the schedules again (SC-3.3).
+        let target = host.clone();
+        let on_event: crate::automation::power::OnEvent =
+            Arc::new(move |why| target.recompute_schedules(why));
+        if let Some(watcher) = crate::automation::power::PowerWatcher::start(on_event) {
+            let _ = state.power.set(watcher);
+        }
     }
 }
 
@@ -1542,6 +1559,11 @@ pub fn stop_host<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         && let Some(host) = state.host.get()
     {
         host.shutdown(Duration::from_secs(3));
+    }
+    if let Some(state) = app.try_state::<AutomationState>()
+        && let Some(watcher) = state.power.get()
+    {
+        watcher.stop();
     }
 }
 

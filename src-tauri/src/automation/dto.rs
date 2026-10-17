@@ -74,8 +74,8 @@ pub struct StepDto {
     pub text: String,
 }
 
-/// One upcoming run of a schedule (SC-1.2). The scheduler (P1.4) fills it; until then the list
-/// is empty.
+/// One upcoming run of a schedule (SC-1.2): the instant and its label in the schedule's zone
+/// ("Tue 20 Oct, 10:00 WIB"). The editor adds the relative time and the system-zone equivalent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NextRunDto {

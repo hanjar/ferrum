@@ -162,6 +162,7 @@ pub fn validate_in(
     probe: &std::sync::Arc<dyn crate::sync_engine::roots::RootProbe>,
     budget: std::time::Duration,
     background_ready: bool,
+    now_ms: i64,
 ) -> Result<AutomationValidateDto, CommandError> {
     let facts = if model::is_profile_id(&draft.profile_id) {
         store.with_read(|conn| -> Result<Option<ProfileFacts>, CommandError> {
@@ -187,10 +188,12 @@ pub fn validate_in(
             next: Vec::new(),
         });
     };
-    let errors = match draft.validate(&profile.policy) {
+    let mut errors = match draft.validate(&profile.policy) {
         Ok(_) => Vec::new(),
         Err(e) => e,
     };
+    // SC-1: the next three runs and the Once rules, which need the clock and the zone database.
+    let next = schedule_preview(&draft.policy, now_ms, &mut errors);
     // AP-2.2: readiness block. The live probes run after the store lock is released.
     let mut checks = Vec::new();
     let ready = crate::automation::commands::readiness_dto(&profile.policy, probe, budget);
@@ -231,9 +234,53 @@ pub fn validate_in(
     Ok(AutomationValidateDto {
         errors,
         checks,
-        // The scheduler (P1.4) fills the next occurrences.
-        next: Vec::new(),
+        next,
     })
+}
+
+/// The next three runs of a schedule trigger (SC-1.2) and the clock-dependent errors of a Once
+/// schedule (SC-1.1): a date outside today..today+13 days, a time that has already passed. Adds
+/// to `errors` without repeating one the model already found; returns no runs while the
+/// schedule has an error.
+fn schedule_preview(
+    policy: &model::AutomationPolicy,
+    now_ms: i64,
+    errors: &mut Vec<model::FieldError>,
+) -> Vec<crate::automation::dto::NextRunDto> {
+    use crate::automation::scheduler::Schedule;
+    let model::Trigger::Schedule(trigger) = &policy.trigger else {
+        return Vec::new();
+    };
+    // A schedule the model already refused (bad time, zone, date, days) has nothing to preview.
+    if errors.iter().any(|e| e.field.starts_with("trigger.")) {
+        return Vec::new();
+    }
+    let schedule = match Schedule::from_trigger(trigger) {
+        Ok(s) => s,
+        Err(e) => {
+            let (field, code) = e.field_code();
+            errors.push(model::FieldError {
+                field: field.into(),
+                code: code.into(),
+            });
+            return Vec::new();
+        }
+    };
+    if let Some((field, code)) = schedule.once_error(now_ms) {
+        errors.push(model::FieldError {
+            field: field.into(),
+            code: code.into(),
+        });
+        return Vec::new();
+    }
+    schedule
+        .next_runs(now_ms, 3)
+        .into_iter()
+        .map(|at_ms| crate::automation::dto::NextRunDto {
+            at_ms,
+            label: schedule.label(at_ms),
+        })
+        .collect()
 }
 
 fn draft_name_errors(draft: &AutomationDraft) -> Vec<model::FieldError> {

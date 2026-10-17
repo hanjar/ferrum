@@ -14,9 +14,7 @@ use std::sync::atomic::Ordering;
 use super::runner::{FUTURE_SKEW_MS, USER_REQUEST_TTL_MS, eligible};
 use super::test_support::*;
 use super::{HostClass, Recompute};
-use crate::automation::model::{
-    AutomationPolicy, Freq, MissedPolicy, ScheduleTrigger, Trigger,
-};
+use crate::automation::model::{AutomationPolicy, Freq, MissedPolicy, ScheduleTrigger, Trigger};
 use crate::automation::status::StatusKind;
 use crate::automation::store::queue::{self, NewEntry, TriggerKind};
 use crate::automation::store::runs::Outcome;
@@ -97,7 +95,10 @@ fn an_occurrence_is_queued_and_run_through_the_gate() {
     let calls = rig.world.calls();
     assert_eq!(calls.len(), 1, "exactly one run");
     assert!(calls[0].holds_lease && calls[0].lease_covers, "lease held");
-    assert!(calls[0].verify_loads_before > 0, "policy::verify ran in the gate");
+    assert!(
+        calls[0].verify_loads_before > 0,
+        "policy::verify ran in the gate"
+    );
     let runs = rig.runs();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].trigger_kind, "schedule");
@@ -130,7 +131,10 @@ fn a_quiet_pass_writes_nothing() {
         tick(&host);
     }
     // Only the periodic host beat may write; the schedule hook adds nothing in 5 s.
-    assert!(change_seq(&rig) - before <= 1, "schedule pass wrote while idle");
+    assert!(
+        change_seq(&rig) - before <= 1,
+        "schedule pass wrote while idle"
+    );
 }
 
 #[test]
@@ -267,7 +271,10 @@ fn a_dst_gap_is_a_skipped_entry_and_no_run() {
             "Skipped \u{2014} 02:30 doesn't exist on Sun 29 Mar in Europe/Amsterdam (daylight saving)"
         )
     );
-    assert!(rig.world.calls().is_empty(), "a gap is neither run nor caught up");
+    assert!(
+        rig.world.calls().is_empty(),
+        "a gap is neither run nor caught up"
+    );
     assert!(
         rig.event_texts(&a)
             .iter()
@@ -289,7 +296,10 @@ fn an_offline_device_holds_the_run_until_it_is_back() {
 
     set_clock(&rig, OCC1 + 5 * SEC);
     tick(&host);
-    assert!(rig.world.calls().is_empty(), "never against a missing folder");
+    assert!(
+        rig.world.calls().is_empty(),
+        "never against a missing folder"
+    );
     assert_eq!(rig.queue_len(), 1, "queued and held");
     assert_eq!(rig.status_kind(&a), StatusKind::Device);
     // It stays held, however long, and the occurrence is not fired again.
@@ -411,7 +421,9 @@ fn a_paused_schedule_does_not_fire_and_resuming_does_not_replay() {
     let (a, _) = scheduled(&rig, "Paused", MissedPolicy::RunOnce);
     let host = rig.host(1, HostClass::App);
     tick(&host);
-    rig.sql(&format!("UPDATE automations SET enabled = 0 WHERE id = '{a}'"));
+    rig.sql(&format!(
+        "UPDATE automations SET enabled = 0 WHERE id = '{a}'"
+    ));
     set_clock(&rig, OCC1 + 2 * DAY);
     tick(&host);
     assert!(rig.runs().is_empty() && rig.world.calls().is_empty() && rig.queue_len() == 0);
@@ -426,7 +438,10 @@ fn a_paused_schedule_does_not_fire_and_resuming_does_not_replay() {
         .unwrap();
     rig.advance(10 * SEC);
     tick(&host);
-    assert!(rig.runs().is_empty(), "no Skipped entry for the paused time");
+    assert!(
+        rig.runs().is_empty(),
+        "no Skipped entry for the paused time"
+    );
     assert!(rig.world.calls().is_empty());
 }
 
@@ -484,23 +499,53 @@ fn a_schedule_trigger_merged_into_a_run_now_does_not_keep_it_alive() {
     let t = T0;
     enqueue_at(&rig, &a, &p, TriggerKind::RunNow, "Run now", t);
     // 9 minutes later a schedule trigger merges into the user's request.
-    enqueue_at(&rig, &a, &p, TriggerKind::Schedule, "Scheduled \u{b7} 10:00 UTC", t + 9 * MIN);
+    enqueue_at(
+        &rig,
+        &a,
+        &p,
+        TriggerKind::Schedule,
+        "Scheduled \u{b7} 10:00 UTC",
+        t + 9 * MIN,
+    );
     let e = only_entry(&rig);
     assert_eq!(e.kind, TriggerKind::RunNow, "still the user's request");
     assert_eq!(e.enqueued_ms, t, "the user's epoch is untouched");
     assert_eq!(e.merged_count, 1);
     assert!(eligible_off(&rig, &host, &e, t + 9 * MIN));
     // Past the TTL it is stale, and the merged trigger did not renew it.
-    assert!(!eligible_off(&rig, &host, &e, t + USER_REQUEST_TTL_MS + SEC));
-    enqueue_at(&rig, &a, &p, TriggerKind::Schedule, "Scheduled \u{b7} 10:00 UTC", t + 12 * MIN);
-    enqueue_at(&rig, &a, &p, TriggerKind::CatchUp, "Missed run \u{b7} catch-up", t + 13 * MIN);
+    assert!(!eligible_off(
+        &rig,
+        &host,
+        &e,
+        t + USER_REQUEST_TTL_MS + SEC
+    ));
+    enqueue_at(
+        &rig,
+        &a,
+        &p,
+        TriggerKind::Schedule,
+        "Scheduled \u{b7} 10:00 UTC",
+        t + 12 * MIN,
+    );
+    enqueue_at(
+        &rig,
+        &a,
+        &p,
+        TriggerKind::CatchUp,
+        "Missed run \u{b7} catch-up",
+        t + 13 * MIN,
+    );
     let e = only_entry(&rig);
     assert_eq!(e.enqueued_ms, t);
     assert!(!eligible_off(&rig, &host, &e, t + 13 * MIN));
     // Only the user's next request is a new epoch.
     enqueue_at(&rig, &a, &p, TriggerKind::RunNow, "Run now", t + 14 * MIN);
     let e = only_entry(&rig);
-    assert_eq!(e.enqueued_ms, t + 14 * MIN, "restamped by the user's request");
+    assert_eq!(
+        e.enqueued_ms,
+        t + 14 * MIN,
+        "restamped by the user's request"
+    );
     assert_eq!(e.kind, TriggerKind::RunNow);
     assert!(eligible_off(&rig, &host, &e, t + 14 * MIN));
 }
@@ -512,7 +557,14 @@ fn a_run_now_merged_into_a_parked_entry_starts_a_fresh_epoch() {
     let host = rig.host(1, HostClass::App);
     let t = T0;
     // A schedule entry waits (parked) for 20 minutes; then the user clicks Run now.
-    enqueue_at(&rig, &a, &p, TriggerKind::Schedule, "Scheduled \u{b7} 10:00 UTC", t);
+    enqueue_at(
+        &rig,
+        &a,
+        &p,
+        TriggerKind::Schedule,
+        "Scheduled \u{b7} 10:00 UTC",
+        t,
+    );
     enqueue_at(&rig, &a, &p, TriggerKind::RunNow, "Run now", t + 20 * MIN);
     let e = only_entry(&rig);
     assert_eq!(e.kind, TriggerKind::RunNow);

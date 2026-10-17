@@ -13,6 +13,7 @@ pub mod lease;
 pub mod manual_run;
 pub mod model;
 pub mod policy;
+pub mod power;
 pub mod profile_baseline;
 pub mod read;
 pub mod scheduler;

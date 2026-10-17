@@ -152,7 +152,9 @@ pub(super) fn pass<D: HostDeps>(inner: &Arc<Inner<D>>, now: i64) {
         });
         match result {
             // A job whose rows moved under the pass is read again next tick.
-            Ok(applied) if applied.iter().any(|ok| !ok) => inner.lock().sched.ask(Recompute::Edited),
+            Ok(applied) if applied.iter().any(|ok| !ok) => {
+                inner.lock().sched.ask(Recompute::Edited)
+            }
             Ok(_) => {}
             Err(_) => inner.lock().sched.ask(Recompute::Edited),
         }

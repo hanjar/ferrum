@@ -106,7 +106,7 @@ pub(super) const FUTURE_SKEW_MS: i64 = 60_000;
 /// "fresh" for as long as the clock needs to catch up with its stamp.
 fn user_request_expired(entry: &QueueEntry, now: i64) -> bool {
     let age = now.saturating_sub(entry.enqueued_ms);
-    age > USER_REQUEST_TTL_MS || age < -FUTURE_SKEW_MS
+    !(-FUTURE_SKEW_MS..=USER_REQUEST_TTL_MS).contains(&age)
 }
 
 /// With automatic runs off: a user request that nobody could start in time is dropped with an
