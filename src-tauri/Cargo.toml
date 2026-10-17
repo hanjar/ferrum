@@ -78,6 +78,10 @@ windows-sys = { version = "0.61.2", features = [
     # Automation P1.3 (OP-1): battery state for the run conditions (GetSystemPowerStatus).
     "Win32_System_Power",
 ] }
+# Automation P1.4 (design 9.3): IANA zones and DST resolution. The zone database is BUNDLED
+# (`tzdb-bundle-always`, MIT/Unlicense), so a schedule means the same thing on every machine and in
+# tests; `tz-system` only reads the system zone for the editor default.
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 # Automation P0.3: the automation store (same version and `bundled` feature as the activity
 # store; design §4.2, §6.2).
 rusqlite = { version = "0.37", features = ["bundled"] }
