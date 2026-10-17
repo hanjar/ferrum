@@ -97,8 +97,16 @@ pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64, unattended: 
 /// A user request older than this is not carried out any more (the same life as a control).
 pub(super) const USER_REQUEST_TTL_MS: i64 = 10 * 60 * 1000;
 
+/// A user request stamped further ahead than this is not believed (the clock was set back since):
+/// the same tolerance the controls use.
+pub(super) const FUTURE_SKEW_MS: i64 = 60_000;
+
+/// Stale = older than the TTL, or stamped more than [`FUTURE_SKEW_MS`] in the future of the
+/// clock. The second half matters when the clock moved back: without it a request would stay
+/// "fresh" for as long as the clock needs to catch up with its stamp.
 fn user_request_expired(entry: &QueueEntry, now: i64) -> bool {
-    now >= entry.enqueued_ms && now - entry.enqueued_ms > USER_REQUEST_TTL_MS
+    let age = now.saturating_sub(entry.enqueued_ms);
+    age > USER_REQUEST_TTL_MS || age < -FUTURE_SKEW_MS
 }
 
 /// With automatic runs off: a user request that nobody could start in time is dropped with an

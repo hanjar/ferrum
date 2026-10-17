@@ -177,7 +177,9 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<QueueEntry> {
 /// A merge keeps the earlier entry's place (FIFO), adds one to `merged_count` and the trigger text
 /// to `merged_reasons` (distinct, at most [`MERGED_REASONS_KEPT`]). A `Retry` merging into a
 /// non-retry entry of the SAME automation upgrades that entry to the retry (the resolving run must
-/// not be lost); into another automation's entry it is [`Enqueued::Refused`].
+/// not be lost); into another automation's entry it is [`Enqueued::Refused`]. The one exception to
+/// "keeps its place": a merge of the USER's own request (Run now, Retry) restamps the entry
+/// (`enqueued_ms = now`), so the request's age is the age of the user's latest ask.
 pub fn enqueue(
     conn: &Connection,
     entry: &NewEntry<'_>,
@@ -265,6 +267,18 @@ pub fn enqueue(
         )
     }
     .map_err(unavailable)?;
+    // The epoch of a USER request (Run now, Retry) is the moment the user asked: a merge of the
+    // user's own request starts it again, so an old entry that a later Run now merges into does
+    // not count as stale. A trigger of any other kind never touches it - merging a schedule
+    // trigger into a Run now cannot keep that request alive, and only the user's next request
+    // renews it (FER-525 condition 2).
+    if matches!(entry.kind, TriggerKind::RunNow | TriggerKind::Retry) {
+        conn.execute(
+            "UPDATE queue SET enqueued_ms = ?2 WHERE id = ?1",
+            params![existing.id, now_ms],
+        )
+        .map_err(unavailable)?;
+    }
     Ok(Enqueued::Merged {
         id: existing.id,
         merged_count: merged,

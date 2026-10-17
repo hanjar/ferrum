@@ -129,8 +129,9 @@ fn a_second_trigger_for_the_same_profile_merges_count_and_reasons() {
     assert_eq!(all.len(), 1, "no duplicate job");
     assert_eq!(all[0].merged_count, 3);
     assert_eq!(all[0].merged_reasons, vec!["Changes detected", "Run now"]);
-    // The earlier entry keeps its place; a Run now merging into it makes it the user request (FER-524).
-    assert_eq!(all[0].enqueued_ms, T0);
+    // A Run now merging into it makes it the user request (FER-524) and restamps it: the age of a
+    // user request is the age of the user's latest ask (FER-525 follow-up). Watch merges did not.
+    assert_eq!(all[0].enqueued_ms, T0 + 7);
     assert_eq!(all[0].kind, TriggerKind::RunNow);
     assert_eq!(all[0].text, "Run now");
 }

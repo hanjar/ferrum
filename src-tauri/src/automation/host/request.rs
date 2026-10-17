@@ -300,6 +300,39 @@ fn run_now_tx(
     answer_for(conn, enq, &checked.id)
 }
 
+/// A trigger source (the schedule hook: an on-time occurrence or a catch-up) asks for a run, host
+/// side. The same checks as Run now - the approval VERIFIES (the `enabled` flag is not an
+/// authorization), no attention hold, not paused - and then only a queue entry is written. The
+/// gate asks all of it again, and more, before any file is touched. A user kind is refused: a
+/// trigger source can never pass for the user's own request.
+pub(super) fn trigger_tx(
+    conn: &Connection,
+    keys: &dyn ApprovalKeys,
+    automation_id: &str,
+    kind: TriggerKind,
+    text: &str,
+    now_ms: i64,
+) -> Answer {
+    if !matches!(kind, TriggerKind::Schedule | TriggerKind::CatchUp) {
+        return Err(RequestError::Invalid);
+    }
+    let checked = check(conn, keys, automation_id)?;
+    let class = class_of(&checked.policy);
+    let enq = queue::enqueue(
+        conn,
+        &NewEntry {
+            automation_id: &checked.id,
+            profile_id: &checked.profile_id,
+            host_class: class,
+            kind,
+            text,
+            retry_of: None,
+        },
+        now_ms,
+    )?;
+    answer_for(conn, enq, &checked.id)
+}
+
 /// RQ-10.2 Retry, host side: queue a run with `retryOf`. Needs a recheck that found N > 0
 /// remaining and the run not to be a conflict.
 pub fn retry_in(store: &Store, keys: &dyn ApprovalKeys, run_id: i64, now_ms: i64) -> Answer {
