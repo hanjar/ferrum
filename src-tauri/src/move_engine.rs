@@ -71,8 +71,30 @@ pub fn run_move(
             });
             continue;
         };
+        if crate::path_guard::reserved_name_is_unsafe(&src_name, &s, &target) {
+            out.failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: "Name is a reserved Windows device name (nul, con, com1 ...): rename it first, a move would address the device".into(),
+            });
+            continue;
+        }
         let dest = target.join(&src_name);
-        if dest == s || dest.starts_with(&s) || target.starts_with(&s) {
+        if crate::startup_guard::is_inside(&dest) {
+            out.failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: "Ferrum does not write into the Windows Startup folder.".into(),
+            });
+            continue;
+        }
+        let (dk, sk, tk) = (
+            crate::path_guard::path_key(&dest),
+            crate::path_guard::path_key(&s),
+            crate::path_guard::path_key(&target),
+        );
+        if crate::path_guard::key_is_within(&dk, &sk) || crate::path_guard::key_is_within(&tk, &sk)
+        {
             out.failures.push(FailedCopy {
                 source: src.clone(),
                 code: ErrorCode::InvalidPath,

@@ -143,7 +143,7 @@ impl std::fmt::Display for RarValidationError {
             Self::SymlinkRefused(path) => {
                 write!(
                     f,
-                    "Path is a symlink or junction, which is refused for security: {path}"
+                    "Path is a symlink or junction, which is refused for security: {path}. Choose the real folder (junctions such as Scoop's 'current' are not accepted)"
                 )
             }
             Self::NotRegularFile(path) => {
@@ -290,6 +290,29 @@ fn check_rar_exe_file(path: &Path) -> Result<(), RarValidationError> {
 
     if !file_name.eq_ignore_ascii_case("rar.exe") {
         return Err(RarValidationError::InvalidFilename(file_name.to_owned()));
+    }
+
+    // FER-559 (P3-E): no folder above the exe may be a symlink or junction. The ACL walk and the
+    // path itself follow reparse points, so a junction in the chain would let the checked chain
+    // differ from the one that runs. Refusing is simpler and stricter than resolving the final
+    // path: pick the real install folder instead of a link to it. (The exe is then held open with
+    // FILE_SHARE_READ, which also keeps its folders from being renamed or replaced.)
+    for dir in path.ancestors().skip(1) {
+        if dir.parent().is_none() {
+            break; // the volume root
+        }
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(RarValidationError::SymlinkRefused(
+                    dir.display().to_string(),
+                ));
+            }
+            Ok(_) => {}
+            // A folder that is not there: the exe check below reports "not found".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else (access denied, ...): the chain cannot be vetted, so it is refused.
+            Err(e) => return Err(RarValidationError::Io(e)),
+        }
     }
 
     let meta = std::fs::symlink_metadata(path).map_err(|e| {
@@ -1299,6 +1322,57 @@ mod tests {
             matches!(err, RarValidationError::SymlinkRefused(_)),
             "junction must be refused, got {err:?}"
         );
+    }
+
+    /// FER-559 (P3-E): a junction ANYWHERE above the exe is refused, however deep, in every
+    /// entry point (validate, set-path, re-verify before spawn).
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_in_the_folder_chain_is_refused() {
+        let s = Scratch::new("junction-chain");
+        let real = s.0.join("real");
+        let deep = real.join("sub");
+        std::fs::create_dir_all(&deep).unwrap();
+        let exe_real = deep.join("Rar.exe");
+        std::fs::write(&exe_real, b"MZ not really").unwrap();
+        let link = s.0.join("link");
+        let ok = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&real)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        assert!(ok, "mklink /J must succeed without privileges");
+        let via_link = link.join("sub").join("Rar.exe");
+        assert!(via_link.is_file(), "reachable through the junction");
+
+        let err = check_rar_exe_file(&via_link).unwrap_err();
+        assert!(
+            matches!(&err, RarValidationError::SymlinkRefused(p) if p.ends_with("link")),
+            "{err:?}"
+        );
+        assert!(validate_confirmed_rar_exe(&via_link, None).is_err());
+        let cfg = s.0.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let res = set_rar_exe_path_in(&cfg, Some(via_link.to_string_lossy().into_owned()), |_| {
+            true
+        });
+        assert!(
+            matches!(res, Err(RarValidationError::SymlinkRefused(_))),
+            "{res:?}"
+        );
+        // The real spelling has no link in its chain.
+        assert!(check_rar_exe_file(&exe_real).is_ok());
+        let _ = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("rmdir")
+            .arg(&link)
+            .status();
     }
 
     #[cfg(windows)]

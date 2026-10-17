@@ -224,6 +224,41 @@ pub fn strip_verbatim(path: &str) -> String {
     }
 }
 
+/// True when the path is spelled in the `\\?\` form (no Win32 name parsing).
+pub fn is_verbatim_spelling(path: &std::path::Path) -> bool {
+    path.as_os_str().to_string_lossy().starts_with(r"\\?\")
+}
+
+/// FER-559 (N5): a copy/move step that would read `src` and create `dest` where `name` is a
+/// reserved device name is only safe when BOTH are in the `\\?\` form; in the plain form the
+/// name addresses a device (NUL swallows the data, COM1/CONIN$ can hang). The engines refuse such
+/// a step instead of touching the device.
+pub fn reserved_name_is_unsafe(
+    name: &std::ffi::OsStr,
+    src: &std::path::Path,
+    dest: &std::path::Path,
+) -> bool {
+    is_reserved_device_name(&name.to_string_lossy())
+        && !(is_verbatim_spelling(src) && is_verbatim_spelling(dest))
+}
+
+/// Comparison key of a path that is only used to ask "same path" / "inside": `\?\` stripped,
+/// `/` as `\`, lower case, no trailing separator. A plain and a verbatim spelling of one path give
+/// the same key.
+pub fn path_key(path: &std::path::Path) -> String {
+    let s = path.as_os_str().to_string_lossy().replace('/', "\\");
+    let s = strip_verbatim(&s).to_lowercase();
+    s.trim_end_matches('\\').to_string()
+}
+
+/// `child` is `ancestor` or below it (keys from [`path_key`]).
+pub fn key_is_within(child: &str, ancestor: &str) -> bool {
+    child == ancestor
+        || child
+            .strip_prefix(ancestor)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
 pub fn is_reserved_device_name(comp: &str) -> bool {
     let trimmed = comp.trim_end_matches(['.', ' ']);
     let stem = trimmed

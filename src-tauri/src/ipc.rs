@@ -83,7 +83,7 @@ fn check_not_local_unc(normalised: &str) -> Result<(), FsError> {
 fn prepare_source(path: &str) -> Result<String, FsError> {
     let normalised = crate::path_guard::check_str(path)?;
     check_not_local_unc(&normalised)?;
-    crate::protected_dirs::check_write_source(&normalised)?;
+    crate::protected_dirs::check_write_source(&protected_probe(&normalised))?;
     if !crate::path_guard::has_reserved_device_component(&normalised) {
         return Ok(path.to_string());
     }
@@ -97,23 +97,72 @@ fn prepare_source(path: &str) -> Result<String, FsError> {
     }
 }
 
+/// The spelling handed to `protected_dirs` (which canonicalises, i.e. OPENS the path): a path with
+/// a reserved device component goes in its `\?\` form so that checking it never opens a device.
+fn protected_probe(normalised: &str) -> String {
+    if crate::path_guard::has_reserved_device_component(normalised) {
+        crate::path_guard::verbatim_path(normalised)
+    } else {
+        normalised.to_string()
+    }
+}
+
 fn prepare_sources<'a>(
     paths: impl IntoIterator<Item = &'a String>,
 ) -> Result<Vec<String>, FsError> {
     paths.into_iter().map(|p| prepare_source(p)).collect()
 }
 
-/// FER-514 rework (point 1): a SOURCE that is only read (copy / plan): the plain string gate
-/// (no pipes, device namespaces, ADS, `\\?\GLOBALROOT`); reserved names are not an issue for
-/// reads of existing entries.
-fn check_read_source(path: &str) -> Result<(), FsError> {
-    crate::path_guard::check_str(path).map(|_| ())
+/// FER-514 rework (point 1) + FER-559 (N5): a SOURCE that is only read (copy / plan / move). The
+/// string gate (no pipes, device namespaces, ADS, `\?\GLOBALROOT`). A path with a reserved device
+/// name component (`C:\x\nul`, `COM1`) is read through its `\?\` form when it really is a plain
+/// file or folder (made by WSL/bash); otherwise it is the device (or missing) and is refused, so the
+/// engine never opens a device. Returns the path to hand to the engine.
+fn prepare_read_source(path: &str) -> Result<String, FsError> {
+    let normalised = crate::path_guard::check_str(path)?;
+    if !crate::path_guard::has_reserved_device_component(&normalised) {
+        return Ok(path.to_string());
+    }
+    let verbatim = crate::path_guard::verbatim_path(&normalised);
+    match std::fs::symlink_metadata(&verbatim) {
+        Ok(meta) if meta.is_file() || meta.is_dir() => Ok(verbatim),
+        _ => Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Source path contains a reserved Windows device name and is not a plain file or folder",
+        )),
+    }
+}
+
+/// Sources and target folder for copy / move. When any source needs its `\?\` form, the target
+/// folder is switched to that form as well: the engines derive destination names from source
+/// names (`nul` -> `<target>\nul`), and only the `\?\` spelling makes that a file instead of the
+/// device. The target itself already passed the full mutation gate (no reserved component).
+fn prepare_copy_io(sources: &[String], target_dir: &str) -> Result<(Vec<String>, String), FsError> {
+    let mut prepared = sources
+        .iter()
+        .map(|s| prepare_read_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !prepared.iter().any(|p| p.starts_with(r"\\?\")) {
+        return Ok((prepared, target_dir.to_string()));
+    }
+    // One spelling for the whole operation: with a verbatim target and a plain source the
+    // engines' "same path" / "into itself" comparisons would not match (a move onto itself with
+    // Overwrite would then delete the source). The gates already ran on the plain spellings.
+    for p in &mut prepared {
+        if !p.starts_with(r"\\?\") {
+            *p = crate::path_guard::verbatim_path(&crate::path_guard::check_str(p)?);
+        }
+    }
+    let normalised = crate::path_guard::check_str(target_dir)?;
+    Ok((prepared, crate::path_guard::verbatim_path(&normalised)))
 }
 
 /// FER-514 P3-7: a mutation path that is a DESTINATION or a newly created entry: the string gate
 /// plus "not inside the app's own state folders" (`protected_dirs`).
 fn check_write_target(path: &str) -> Result<(), FsError> {
     check_mutation_path(path)?;
+    // FER-559: the file manager writes nothing into a Windows Startup folder.
+    crate::startup_guard::check_into(path)?;
     crate::protected_dirs::check_write_target(path)
 }
 
@@ -319,6 +368,8 @@ pub fn create_entry(
 ) -> Result<crate::domain::FileEntry, FsError> {
     check_write_target(&parent)?;
     check_new_name(&name)?;
+    // A new folder (or file) named like the Startup folder, in its parent, is Startup itself.
+    crate::startup_guard::check_rename_to(&Path::new(&parent).join(&name).to_string_lossy())?;
     match kind.as_str() {
         "file" => crate::mutations::create_file(&parent, &name),
         "dir" => crate::mutations::create_dir(&parent, &name),
@@ -337,6 +388,9 @@ pub fn rename_entry(
 ) -> Result<crate::domain::FileEntry, FsError> {
     let path = prepare_source(&path)?;
     check_new_name(&new_name)?;
+    if let Some(parent) = Path::new(&path).parent() {
+        crate::startup_guard::check_rename_to(&parent.join(&new_name).to_string_lossy())?;
+    }
     let entry = crate::mutations::rename_entry(&path, &new_name)?;
     // The UI and the activity store only ever see the plain spelling.
     let path = crate::path_guard::strip_verbatim(&path);
@@ -356,6 +410,16 @@ fn note_activity_changes(
     pairs: Vec<(String, Option<String>)>,
 ) {
     if let Some(service) = app.state::<ActivityHandle>().0.as_ref() {
+        // Paths that went through the `\?\` form are recorded in their plain spelling.
+        let pairs: Vec<(String, Option<String>)> = pairs
+            .into_iter()
+            .map(|(a, b)| {
+                (
+                    crate::path_guard::strip_verbatim(&a),
+                    b.map(|b| crate::path_guard::strip_verbatim(&b)),
+                )
+            })
+            .collect();
         service.note_fs_changes(kind, &pairs);
     }
 }
@@ -404,10 +468,8 @@ pub fn plan_copy(
     sources: Vec<String>,
     target_dir: String,
 ) -> Result<crate::copy_engine::CopyPlan, FsError> {
-    for source in &sources {
-        check_read_source(source)?;
-    }
     check_write_target(&target_dir)?;
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     crate::copy_engine::plan_copy(&sources, &target_dir)
 }
 
@@ -419,10 +481,8 @@ pub fn enqueue_copy(
     app: AppHandle,
     queue: State<'_, Arc<OperationQueue>>,
 ) -> Result<OperationId, FsError> {
-    for source in &sources {
-        check_read_source(source)?;
-    }
     check_protected_target(&target_dir)?;
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     let policy = parse_policy(&policy)?;
     let activity_app = app.clone();
     let prefs = load_prefs(app);
@@ -526,8 +586,9 @@ pub fn enqueue_move(
     for source in &sources {
         let normalised = crate::path_guard::check_str(source)?;
         check_not_local_unc(&normalised)?;
-        crate::protected_dirs::check_write_source(source)?;
+        crate::protected_dirs::check_write_source(&protected_probe(&normalised))?;
     }
+    let (sources, target_dir) = prepare_copy_io(&sources, &target_dir)?;
     let policy = parse_policy(&policy)?;
     remember_copy_defaults(&load_prefs(app.clone()));
     let make_body = move || {
@@ -2406,6 +2467,16 @@ pub fn rename_batch(
     pairs: Vec<crate::rename_batch::RenamePair>,
 ) -> Result<crate::rename_batch::RenameBatchReport, FsError> {
     check_write_sources(pairs.iter().map(|p| &p.from))?;
+    for pair in &pairs {
+        // `to` is a bare name or a path; either way its final component is what gets created.
+        if let Some(parent) = Path::new(&pair.from).parent() {
+            let name = Path::new(&pair.to)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| pair.to.clone());
+            crate::startup_guard::check_rename_to(&parent.join(&name).to_string_lossy())?;
+        }
+    }
     Ok(crate::rename_batch::rename_batch(&pairs))
 }
 
@@ -3101,6 +3172,10 @@ fn report_failures(outcome: &crate::codecs::CodecReport) -> Result<(), FsError> 
 #[tauri::command]
 pub async fn comment_set(path: String, comment: Option<String>) -> Result<(), FsError> {
     let path = prepare_source(&path)?;
+    // The comment is stored in a sidecar (descript.ion) next to the item: a write into its folder.
+    if let Some(parent) = Path::new(&crate::path_guard::strip_verbatim(&path)).parent() {
+        crate::startup_guard::check_into(&parent.to_string_lossy())?;
+    }
     spawn_blocking(move || crate::comments::set_comment(&path, comment.as_deref()))
         .await
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
@@ -3502,12 +3577,12 @@ mod fer512_ipc_gate_tests {
             r"\\?\C:\x",
             "relative",
         ] {
-            assert!(super::check_read_source(bad).is_err(), "source {bad}");
+            assert!(super::prepare_read_source(bad).is_err(), "source {bad}");
             assert!(super::check_protected_target(bad).is_err(), "target {bad}");
             assert!(super::prepare_source(bad).is_err(), "move source {bad}");
         }
         for good in [r"C:\Users\u\a.txt", r"\\server\share\dir"] {
-            assert!(super::check_read_source(good).is_ok(), "{good}");
+            assert!(super::prepare_read_source(good).is_ok(), "{good}");
             assert!(super::check_protected_target(good).is_ok(), "{good}");
         }
     }
@@ -3627,6 +3702,452 @@ mod fer512_ipc_gate_tests {
         assert!(super::check_new_name("con.txt").is_err());
         assert!(super::check_new_name("aux.c").is_err());
         let _ = std::fs::remove_dir_all(&verbatim_dir);
+    }
+
+    /// FER-559 N5: a plain file named like a device (made by WSL/bash) is copied and moved through
+    /// the `\?\` form with its content; the device itself, a missing entry and a reserved child
+    /// inside a plainly spelled tree are refused and no device is ever opened.
+    #[cfg(windows)]
+    #[test]
+    fn copy_and_move_read_existing_reserved_name_files_through_verbatim_form() {
+        use crate::copy_engine::{ConflictPolicy, run_copy};
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("ferrum-ipc-n5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let src = src_dir.to_string_lossy().into_owned();
+        let dst = dst_dir.to_string_lossy().into_owned();
+        let vsrc = crate::path_guard::verbatim_path(&src);
+        std::fs::write(format!(r"{vsrc}\nul"), b"real file named nul").unwrap();
+        std::fs::write(format!(r"{vsrc}\plain.txt"), b"plain").unwrap();
+        let cancel = crate::ops::CancelToken::default();
+
+        // Never created: the device. Refused, nothing opened.
+        assert!(super::prepare_copy_io(&[format!(r"{src}\COM1")], &dst).is_err());
+        assert!(super::prepare_copy_io(&[format!(r"{src}\CONIN$")], &dst).is_err());
+        assert!(super::prepare_copy_io(&[format!(r"{src}\prn.txt")], &dst).is_err());
+
+        // copy: the content arrives, in a file really named nul (verbatim target).
+        let (srcs, target) = super::prepare_copy_io(&[format!(r"{src}\nul")], &dst).unwrap();
+        assert!(srcs[0].starts_with(r"\\?\") && target.starts_with(r"\\?\"));
+        let out = run_copy(&srcs, &target, ConflictPolicy::Overwrite, &cancel, &|_| {});
+        assert!(out.failures.is_empty(), "{:?}", out.failures);
+        assert_eq!(
+            std::fs::read(format!(r"{}\nul", crate::path_guard::verbatim_path(&dst))).unwrap(),
+            b"real file named nul"
+        );
+
+        // The engine itself refuses a reserved name in the plain spelling (no device write).
+        let plain_src = format!(r"{src}\nul");
+        let out = run_copy(
+            std::slice::from_ref(&plain_src),
+            &dst,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+
+        // A reserved child inside a plain tree is a per-item failure; its siblings still copy.
+        let tree = root.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        let vtree = crate::path_guard::verbatim_path(&tree.to_string_lossy());
+        std::fs::write(format!(r"{vtree}\nul"), b"x").unwrap();
+        std::fs::write(format!(r"{vtree}\ok.txt"), b"y").unwrap();
+        let out = run_copy(
+            &[tree.to_string_lossy().into_owned()],
+            &dst,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+        assert!(dst_dir.join("tree").join("ok.txt").exists());
+
+        // move: same-volume rename keeps the verbatim name.
+        let moved = root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let (srcs, target) =
+            super::prepare_copy_io(&[format!(r"{src}\nul")], &moved.to_string_lossy()).unwrap();
+        let mv = crate::move_engine::run_move(
+            &srcs,
+            &target,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+            false,
+        );
+        assert!(mv.failures.is_empty(), "{:?}", mv.failures);
+        assert_eq!(
+            std::fs::read(format!(
+                r"{}\nul",
+                crate::path_guard::verbatim_path(&moved.to_string_lossy())
+            ))
+            .unwrap(),
+            b"real file named nul"
+        );
+        assert!(!std::path::Path::new(&format!(r"{vsrc}\nul")).exists());
+        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
+    }
+
+    /// FER-559 N4: the Recycle Bin cannot take an entry with a reserved name via `\?\`
+    /// (probed: "device name is invalid"). The entry is reported as failed, with the way out, and
+    /// stays untouched; permanent delete of the same entry works.
+    #[cfg(windows)]
+    #[test]
+    fn trash_of_reserved_name_entry_is_refused_with_advice_and_permanent_delete_works() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ferrum-n4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.to_string_lossy().into_owned();
+        let v = crate::path_guard::verbatim_path(&plain);
+        std::fs::write(format!(r"{v}\nul"), b"x").unwrap();
+        let prepared = super::prepare_source(&format!(r"{plain}\nul")).unwrap();
+        let r = crate::mutations::delete_to_trash(std::slice::from_ref(&prepared));
+        assert_eq!(r.deleted, 0);
+        assert_eq!(r.failed.len(), 1);
+        assert!(
+            r.failed[0].message.contains("permanent delete"),
+            "{:?}",
+            r.failed
+        );
+        assert!(std::path::Path::new(&prepared).exists(), "untouched");
+        let r = crate::mutations::delete_permanent(std::slice::from_ref(&prepared));
+        assert_eq!(r.deleted, 1, "{:?}", r.failed);
+        assert!(!std::path::Path::new(&prepared).exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// FER-559 P3-C (reworked): the file manager writes NOTHING into the Startup folders. Every
+    /// attempt below is refused before anything is created; the directory is left as it was.
+    #[cfg(windows)]
+    #[test]
+    fn nothing_is_written_into_the_startup_folder() {
+        use crate::copy_engine::{ConflictPolicy, run_copy};
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let startup =
+            crate::profile::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Startup)
+                .expect("startup folder");
+        let programs = startup.parent().unwrap().to_path_buf();
+        let startup_s = startup.to_string_lossy().into_owned();
+        let programs_s = programs.to_string_lossy().into_owned();
+        let list = || -> Vec<_> {
+            std::fs::read_dir(&startup)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect()
+        };
+        let before = list();
+        let probe = "ferrum-test-do-not-keep.txt";
+
+        // create (a plain text file too) and a folder named like Startup next to it
+        for name in ["x.bat", "y.CMD", "z.lnk", "w.ps1.", probe] {
+            let err =
+                super::create_entry("file".into(), startup_s.clone(), name.into()).unwrap_err();
+            assert!(err.message.contains("Startup"), "{name}: {}", err.message);
+        }
+        let err = super::create_entry("dir".into(), programs_s.clone(), "Startup".into());
+        assert!(err.is_err(), "a folder named Startup in Programs");
+
+        // gates for destinations: copy / move / extract / archive / split / selection
+        assert!(super::check_protected_target(&startup_s).is_err());
+        assert!(super::check_protected_target(&format!(r"{startup_s}\sub\{probe}")).is_err());
+        assert!(super::check_write_target(&format!(r"{startup_s}\a.zip")).is_err());
+
+        // rename: into / to Startup, or onto an ancestor
+        assert!(crate::startup_guard::check_rename_to(&format!(r"{startup_s}\{probe}")).is_err());
+        assert!(crate::startup_guard::check_rename_to(&startup_s).is_err());
+        assert!(crate::startup_guard::check_rename_to(&programs_s).is_err());
+        assert!(crate::startup_guard::check_rename_to(&format!(r"{programs_s}\Other")).is_ok());
+
+        // a folder tree `Startup\<probe>` copied or moved into Programs
+        let root = std::env::temp_dir().join(format!("ferrum-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tree = root.join("Startup");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join(probe), b"x").unwrap();
+        let cancel = crate::ops::CancelToken::default();
+        let src = vec![tree.to_string_lossy().into_owned()];
+        let out = run_copy(
+            &src,
+            &programs_s,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert!(!out.failures.is_empty(), "copy into Programs must fail");
+        let mv = crate::move_engine::run_move(
+            &src,
+            &programs_s,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+            false,
+        );
+        assert!(!mv.failures.is_empty(), "move into Programs must fail");
+        assert!(tree.join(probe).exists(), "the source is untouched");
+        // a single file straight into Startup
+        let file = vec![tree.join(probe).to_string_lossy().into_owned()];
+        let out = run_copy(
+            &file,
+            &startup_s,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+        );
+        assert!(!out.failures.is_empty());
+
+        // reading, opening and deleting stay allowed: a source inside Startup passes the gate
+        assert!(super::prepare_source(&format!(r"{startup_s}\{probe}")).is_ok());
+
+        assert_eq!(before, list(), "Startup was not changed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// FER-559: an archive entry `Startup/...` extracted into `Programs` would land in the
+    /// Startup folder: refused before anything is written; an unrelated entry is not.
+    #[cfg(windows)]
+    #[test]
+    fn archive_entries_that_reach_the_startup_folder_are_refused() {
+        use crate::archive_contract::{ArchiveConflictPolicy, ArchiveErrorCode, ArchiveLimits};
+        use crate::archive_extract::{Entry, EntryKind, extract, preflight};
+        crate::install_extract_guard();
+        let startup =
+            crate::profile::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Startup)
+                .expect("startup folder");
+        let programs = startup.parent().unwrap().to_path_buf();
+        let limits = ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        };
+        let plan_for = |names: &[(&str, EntryKind)]| {
+            let entries: Vec<Entry> = names
+                .iter()
+                .map(|(n, kind)| Entry {
+                    raw_name: n,
+                    kind: *kind,
+                    expanded_size: None,
+                    compressed_size: None,
+                    modified_ms: None,
+                })
+                .collect();
+            preflight(&entries, &limits).unwrap()
+        };
+        let run = |plan: &crate::archive_extract::Plan, dest: &std::path::Path| {
+            extract(
+                plan,
+                dest,
+                &limits,
+                ArchiveConflictPolicy::Skip,
+                |_, _| {
+                    Err(crate::archive_contract::ArchiveError::new(
+                        ArchiveErrorCode::Io,
+                        "stream reached",
+                    ))
+                },
+                || false,
+            )
+        };
+        let before = std::fs::read_dir(&startup).unwrap().count();
+        let plan = plan_for(&[
+            ("Startup/", EntryKind::Directory),
+            ("Startup/ferrum-test-do-not-keep.txt", EntryKind::File),
+        ]);
+        let err = run(&plan, &programs).unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::UnsafeEntry, "{err:?}");
+        assert!(err.message.contains("Startup"), "{}", err.message);
+        assert!(!startup.join("ferrum-test-do-not-keep.txt").exists());
+        // Straight into Startup, whatever the entry.
+        let plan_txt = plan_for(&[("ferrum-test-do-not-keep.txt", EntryKind::File)]);
+        assert_eq!(
+            run(&plan_txt, &startup).unwrap_err().code,
+            ArchiveErrorCode::UnsafeEntry
+        );
+        assert_eq!(std::fs::read_dir(&startup).unwrap().count(), before);
+        // Not touching Startup: gets as far as the (failing) stream.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&[("Startup/f.txt", EntryKind::File)]);
+        let err = run(&plan, tmp.path()).unwrap_err();
+        assert!(!err.message.contains("Startup"), "{}", err.message);
+    }
+
+    /// FER-559 rework 2: an 8.3 short name hides the Startup folder from the lexical check
+    /// (`STARTM~1/Programs/Startup/...` extracted into `...\Windows`). The final path of every
+    /// folder the extractor opens is vetoed too. When the volume has no short name for
+    /// `Start Menu`, only the final-path veto function is exercised.
+    #[cfg(windows)]
+    #[test]
+    fn a_short_name_alias_of_the_startup_folder_is_refused_by_the_final_path_check() {
+        use crate::archive_contract::{ArchiveConflictPolicy, ArchiveErrorCode, ArchiveLimits};
+        use crate::archive_extract::{Entry, EntryKind, extract, preflight};
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        crate::install_extract_guard();
+        let startup =
+            crate::profile::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Startup)
+                .expect("startup folder");
+        let start_menu = startup.parent().unwrap().parent().unwrap().to_path_buf();
+        let windows_dir = start_menu.parent().unwrap().to_path_buf();
+        let short_of = |p: &std::path::Path| -> Option<String> {
+            let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: NUL-terminated input, writable output buffer of the given length.
+            let n = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+                    wide.as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                )
+            } as usize;
+            (n > 0 && n < buf.len()).then(|| {
+                std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        // The veto function itself: the final path of Startup is refused, a sibling is not.
+        let guard_dir = |p: &str| {
+            let mut ok = true;
+            crate::startup_guard::check_into(p).unwrap_or_else(|_| ok = false);
+            ok
+        };
+        assert!(!guard_dir(&startup.to_string_lossy()));
+        // A comment is a descript.ion sidecar write into the item's folder.
+        let item = startup
+            .join("ferrum-test-do-not-keep.txt")
+            .to_string_lossy()
+            .into_owned();
+        let err =
+            tauri::async_runtime::block_on(super::comment_set(item, Some("c".into()))).unwrap_err();
+        assert!(err.message.contains("Startup"), "{}", err.message);
+        assert!(!startup.join("descript.ion").exists());
+        assert!(guard_dir(&start_menu.to_string_lossy()));
+
+        let limits = ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        };
+        let alias = short_of(&start_menu).filter(|s| s.contains('~'));
+        let Some(alias) = alias else {
+            eprintln!("8.3 names are off on this volume: only the final-path veto was exercised");
+            return;
+        };
+        let name = format!("{alias}/Programs/Startup/ferrum-test-do-not-keep.txt");
+        let entries = [Entry {
+            raw_name: &name,
+            kind: EntryKind::File,
+            expanded_size: None,
+            compressed_size: None,
+            modified_ms: None,
+        }];
+        let plan = preflight(&entries, &limits).unwrap();
+        // The lexical check cannot see it ...
+        assert!(
+            crate::startup_guard::check_extraction(
+                &windows_dir,
+                plan.entries().iter().map(|e| e.relative_path.as_path())
+            )
+            .is_ok(),
+            "the alias is invisible to the lexical check, which is the point of the final-path veto"
+        );
+        // ... the extractor's per-folder final-path veto does.
+        let err = extract(
+            &plan,
+            &windows_dir,
+            &limits,
+            ArchiveConflictPolicy::Skip,
+            |_, _| {
+                Err(crate::archive_contract::ArchiveError::new(
+                    ArchiveErrorCode::Io,
+                    "stream reached",
+                ))
+            },
+            || false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::UnsafeEntry, "{err:?}");
+        assert!(err.message.contains("Startup"), "{}", err.message);
+        assert!(!startup.join("ferrum-test-do-not-keep.txt").exists());
+    }
+
+    /// FER-559 S1: a plain source next to a verbatim target must not defeat the "same path" and
+    /// "into itself" checks. Moving `[a\nul, a\x]` onto `a` with Overwrite is refused and nothing
+    /// is deleted; copying `[a\nul, a]` into `a\sub` is refused as "into itself".
+    #[cfg(windows)]
+    #[test]
+    fn mixed_spellings_cannot_turn_a_move_onto_itself_into_data_loss() {
+        use crate::copy_engine::{ConflictPolicy, run_copy};
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("ferrum-s1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(format!(r"\\?\{}", root.display()));
+        let a = root.join("a");
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        let va = crate::path_guard::verbatim_path(&a.to_string_lossy());
+        std::fs::write(format!(r"{va}\nul"), b"reserved").unwrap();
+        std::fs::write(a.join("x"), b"precious").unwrap();
+        let a_s = a.to_string_lossy().into_owned();
+        let cancel = crate::ops::CancelToken::default();
+
+        let (srcs, target) =
+            super::prepare_copy_io(&[format!(r"{a_s}\nul"), format!(r"{a_s}\x")], &a_s).unwrap();
+        assert!(srcs.iter().all(|s| s.starts_with(r"\\?\")) && target.starts_with(r"\\?\"));
+        for policy in [
+            ConflictPolicy::Overwrite,
+            ConflictPolicy::RenameAuto,
+            ConflictPolicy::OverwriteOlder,
+        ] {
+            let mv = crate::move_engine::run_move(&srcs, &target, policy, &cancel, &|_| {}, false);
+            assert_eq!(mv.moved, 0, "{policy:?}");
+            assert_eq!(mv.failures.len(), 2, "{policy:?}: {:?}", mv.failures);
+            assert_eq!(std::fs::read(a.join("x")).unwrap(), b"precious");
+            assert_eq!(std::fs::read(format!(r"{va}\nul")).unwrap(), b"reserved");
+        }
+        // The engines also compare normalised paths when handed MIXED spellings directly.
+        let mixed = vec![format!(r"{va}\x")];
+        let mv = crate::move_engine::run_move(
+            &mixed,
+            &a_s,
+            ConflictPolicy::Overwrite,
+            &cancel,
+            &|_| {},
+            false,
+        );
+        assert_eq!(mv.moved, 0);
+        assert_eq!(std::fs::read(a.join("x")).unwrap(), b"precious");
+
+        // copy [a\nul, a] into a\sub: "into itself"
+        let sub = a.join("sub").to_string_lossy().into_owned();
+        let (srcs, target) =
+            super::prepare_copy_io(&[format!(r"{a_s}\nul"), a_s.clone()], &sub).unwrap();
+        let plan = crate::copy_engine::plan_copy(&srcs, &target);
+        assert!(plan.unwrap_err().message.contains("into itself"));
+        let out = run_copy(&srcs, &target, ConflictPolicy::Overwrite, &cancel, &|_| {});
+        assert!(
+            out.failures
+                .iter()
+                .any(|f| f.message.contains("into itself")),
+            "{:?}",
+            out.failures
+        );
+        assert!(!a.join("sub").join("a").exists());
+        let _ = std::fs::remove_dir_all(format!(r"\\?\{}", root.display()));
     }
 
     /// Info-1: the harness job can never sleep longer than 10 s.

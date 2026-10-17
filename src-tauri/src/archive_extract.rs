@@ -495,6 +495,58 @@ where
 /// removed through its own handle, so no partial file that *looks* complete
 /// survives. Directories created by this run are removed (empty, innermost
 /// first) on failure. Entries already fully written stay — they are complete.
+/// Extra vetoes over where an extraction writes (FER-559: the Windows Startup folder), installed
+/// once by the application (`install_extract_guard` in `lib.rs`). `Err(message)` refuses the job.
+/// - `entries`: lexical fail-fast over destination + planned relative paths, before anything is
+///   written;
+/// - `final_dir`: the FINAL path the OS reports for every folder the job opens or creates
+///   (`GetFinalPathNameByHandleW`), which catches 8.3 short names and any other alias the lexical
+///   join cannot see. A folder created before the veto is removed by the normal rollback.
+pub struct ExtractGuard {
+    pub entries: fn(&Path, &[&Path]) -> Result<(), String>,
+    pub final_dir: fn(&Path) -> Result<(), String>,
+}
+static GUARD: std::sync::OnceLock<ExtractGuard> = std::sync::OnceLock::new();
+
+pub fn set_entry_guard(guard: ExtractGuard) {
+    let _ = GUARD.set(guard);
+}
+
+/// This file is also compiled on its own by the archive test crates, which have no such policy.
+/// In the application crate (`ferrum_lib`, outside its unit tests, which extract into temp folders
+/// without installing it) a missing guard means "refuse": an extraction can never run unguarded because installation was forgotten.
+fn app_build() -> bool {
+    option_env!("CARGO_CRATE_NAME") == Some("ferrum_lib")
+}
+
+fn active_guard() -> Result<Option<&'static ExtractGuard>, ArchiveError> {
+    match GUARD.get() {
+        Some(g) => Ok(Some(g)),
+        None if app_build() && !cfg!(test) => Err(error(
+            ArchiveErrorCode::UnsafeEntry,
+            "Extraction is refused: the destination guard is not installed",
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Veto on the folder a handle really points at.
+fn check_final_dir(guard: Option<&ExtractGuard>, dir: &DirHandle) -> Result<(), ArchiveError> {
+    let Some(g) = guard else { return Ok(()) };
+    match publish::final_path(dir) {
+        Some(p) => {
+            (g.final_dir)(Path::new(&p)).map_err(|m| error(ArchiveErrorCode::UnsafeEntry, m))
+        }
+        #[cfg(windows)]
+        None => Err(error(
+            ArchiveErrorCode::UnsafeEntry,
+            "Extraction is refused: the destination folder cannot be verified",
+        )),
+        #[cfg(not(windows))]
+        None => Ok(()),
+    }
+}
+
 pub fn extract<F, C>(
     plan: &Plan,
     destination: &Path,
@@ -536,6 +588,18 @@ where
         ));
     }
 
+    // FER-559: nothing is extracted into a Windows Startup folder, whether the destination is
+    // Startup itself or an archive entry such as `Startup/a.bat` reaches it from above.
+    let guard = active_guard()?;
+    if let Some(g) = guard {
+        let rels: Vec<&Path> = plan
+            .entries
+            .iter()
+            .map(|e| e.relative_path.as_path())
+            .collect();
+        (g.entries)(destination, &rels).map_err(|m| error(ArchiveErrorCode::UnsafeEntry, m))?;
+    }
+
     let mut report = ExtractReport::default();
     let mut dirs: StdMap<PathBuf, DirHandle> = StdMap::new();
     let mut created_dirs: Vec<PathBuf> = Vec::new(); // deepest insert order
@@ -552,6 +616,7 @@ where
         err.archive_path = Some(destination.to_string_lossy().into_owned());
         err
     })?;
+    check_final_dir(guard, &root)?;
     dirs.insert(PathBuf::new(), root);
 
     let ensure_dir = |dirs: &mut StdMap<PathBuf, DirHandle>,
@@ -571,11 +636,15 @@ where
             match publish::create_dir_new(parent, part.as_os_str()) {
                 Ok(dir) => {
                     created.push(acc.clone());
+                    let verdict = check_final_dir(guard, &dir);
                     dirs.insert(acc.clone(), dir);
+                    verdict?;
                 }
                 Err(PublishError::Exists) => match publish::child_dir(parent, part.as_os_str()) {
                     Ok(dir) => {
+                        let verdict = check_final_dir(guard, &dir);
                         dirs.insert(acc.clone(), dir);
+                        verdict?;
                     }
                     Err(e) => return Err(publish_err(e, &acc)),
                 },

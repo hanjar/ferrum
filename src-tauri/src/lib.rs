@@ -54,6 +54,7 @@ pub mod rename_batch;
 pub mod search;
 pub mod selection_file;
 pub mod shell_open;
+pub mod startup_guard;
 pub mod sync_baseline;
 pub mod sync_engine;
 pub mod sync_incremental;
@@ -323,6 +324,7 @@ pub fn run() {
             })
             .collect();
             protected_dirs::register(protected);
+            install_extract_guard();
             // FER-471: live copy-thread state for the progress dialog.
             let control_handle = app.handle().clone();
             copy_pool::set_state_sink(Box::new(move |state| {
@@ -371,6 +373,20 @@ pub fn run() {
         })
         .run(context)
         .expect("error while building tauri application");
+}
+
+/// FER-559: no archive entry may land in a Windows Startup folder (see `startup_guard`).
+pub fn install_extract_guard() {
+    archive_extract::set_entry_guard(archive_extract::ExtractGuard {
+        entries: |destination, rels| {
+            startup_guard::check_extraction(destination, rels.iter().copied())
+                .map_err(|e| e.message)
+        },
+        final_dir: |dir| {
+            startup_guard::check_into(&path_guard::strip_verbatim(&dir.to_string_lossy()))
+                .map_err(|e| e.message)
+        },
+    });
 }
 
 #[cfg(test)]

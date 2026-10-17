@@ -291,9 +291,21 @@ fn modified_ms(p: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Plain and `\?\` spellings, case and `/` do not matter (FER-559: a verbatim target next to a
+/// plain source must still be recognised as "into itself").
 fn is_within(child: &Path, ancestor: &Path) -> bool {
-    child.starts_with(ancestor)
+    crate::path_guard::key_is_within(
+        &crate::path_guard::path_key(child),
+        &crate::path_guard::path_key(ancestor),
+    )
 }
+
+const STARTUP_MSG: &str = "Ferrum does not write into the Windows Startup folder.";
+const ITSELF_MSG: &str = "Cannot copy a folder into itself";
+
+const RESERVED_NAME_MSG: &str = "Name is a reserved Windows device name (nul, con, com1 ...): rename it first, a copy would address the device";
+
+use crate::path_guard::is_reserved_device_name;
 
 /// Plan a copy: totals + conflicts. Performs the D06 "ask first" scan.
 pub fn plan_copy(sources: &[String], target_dir: &str) -> Result<CopyPlan, FsError> {
@@ -310,9 +322,9 @@ pub fn plan_copy(sources: &[String], target_dir: &str) -> Result<CopyPlan, FsErr
             return Err(err(ErrorCode::NotFound, "Source not found").with_path(src));
         }
         // Rejections that make no sense to ask about (task 11 tests).
-        // FER-563: also catch aliases (8.3 names, letter case) of the source folder.
-        if s == target
-            || is_within(target, &s)
+        // FER-559: plain/verbatim spellings, case and `/` (path keys); FER-563: also aliases
+        // (8.3 names, ...) of the source folder, by file identity.
+        if is_within(target, &s)
             || (s.is_dir() && crate::file_identity::is_same_or_inside(target, &s))
         {
             return Err(
@@ -342,7 +354,14 @@ fn accumulate(p: &Path, plan: &mut CopyPlan) -> Result<(), FsError> {
     if meta.is_dir() {
         for item in fs::read_dir(p).map_err(|e| FsError::from(e).with_path(p.to_string_lossy()))? {
             let item = item.map_err(FsError::from)?;
-            accumulate(&item.path(), plan)?;
+            let child = item.path();
+            // A reserved device name in the plain spelling is never opened (it fails at run time).
+            if is_reserved_device_name(&item.file_name().to_string_lossy())
+                && !crate::path_guard::is_verbatim_spelling(p)
+            {
+                continue;
+            }
+            accumulate(&child, plan)?;
         }
     } else {
         plan.total_files += 1;
@@ -836,6 +855,32 @@ fn walk_sources(sh: &Shared, sources: &[String], target: &Path, policy: Conflict
                 continue;
             }
         };
+        if crate::path_guard::reserved_name_is_unsafe(&src_name, &s, target) {
+            sh.out.lock().unwrap().failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: RESERVED_NAME_MSG.into(),
+            });
+            continue;
+        }
+        // A folder cannot be copied into itself (also when the target is spelled `\?\`).
+        if s.is_dir() && is_within(target, &s) {
+            sh.out.lock().unwrap().failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: ITSELF_MSG.into(),
+            });
+            continue;
+        }
+        // A plain file lands directly in `target`; folders are checked entry by entry in `walk`.
+        if !s.is_dir() && crate::startup_guard::is_inside(target) {
+            sh.out.lock().unwrap().failures.push(FailedCopy {
+                source: src.clone(),
+                code: ErrorCode::InvalidPath,
+                message: STARTUP_MSG.into(),
+            });
+            continue;
+        }
         let src_modified = modified_ms(&s);
         let wanted = target.join(&src_name);
         let resolved = resolve_dest(wanted, src_modified, policy, &planned);
@@ -902,6 +947,11 @@ fn walk(sh: &Shared, src: &Path, dest: &Path, group: &Arc<Group>) -> Result<(), 
         return copy_link(sh, src, dest, group);
     }
     if meta.is_dir() {
+        // FER-559: no directory is created inside a Startup folder, however deep in the tree.
+        if crate::startup_guard::is_inside(dest) {
+            sh.fail(group, src, err(ErrorCode::InvalidPath, STARTUP_MSG));
+            return Ok(());
+        }
         if let Err(e) = fs::create_dir_all(dest) {
             sh.fail(group, src, FsError::from(e));
             return Ok(());
@@ -912,6 +962,14 @@ fn walk(sh: &Shared, src: &Path, dest: &Path, group: &Arc<Group>) -> Result<(), 
             }
             let child = item.path();
             let child_name = child.file_name().unwrap_or_default();
+            if crate::path_guard::reserved_name_is_unsafe(child_name, src, dest) {
+                sh.fail(
+                    group,
+                    &child,
+                    err(ErrorCode::InvalidPath, RESERVED_NAME_MSG),
+                );
+                continue;
+            }
             walk(sh, &child, &dest.join(child_name), group)?;
         }
         return Ok(());
