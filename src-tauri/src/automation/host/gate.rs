@@ -186,7 +186,7 @@ impl From<StoreError> for GateRefusal {
     }
 }
 
-/// The rows the decision rests on, read in ONE store call.
+/// The rows the decision rests on, read in ONE store call and ONE read transaction.
 struct Snapshot {
     automation: automations::AutomationRecord,
     policy: AutomationPolicy,
@@ -212,6 +212,14 @@ fn snapshot(
     automation_id: &str,
 ) -> Result<Snapshot, GateRefusal> {
     store.with_read(|conn| -> Result<Snapshot, GateRefusal> {
+        // ONE real read transaction (BEGIN DEFERRED): every statement below sees the same
+        // committed state, so the automation, the approval and the profile the verdict was
+        // judged on are the ones the run uses. The transaction ends (rolls back) when the
+        // closure returns.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|_| GateRefusal::Store(StoreError::Unavailable))?;
+        let conn: &rusqlite::Connection = &tx;
         let automation = automations::get(conn, automation_id)?.ok_or(GateRefusal::NotFound)?;
         // An unreadable stored policy is a review, never a repair (design §4.4).
         let policy = serde_json::from_str::<AutomationPolicy>(&automation.policy);
@@ -226,8 +234,26 @@ fn snapshot(
                 Verdict::Valid => NeedsReview::PolicyChanged,
             }));
         };
+        let profile = serde_json::from_str::<ProfilePolicy>(&profile_rec.policy).ok();
+        // Belt and braces: the hash of the very policies that go into the proof must be the one
+        // the approval carries (the verdict above already said so on the same snapshot).
+        if matches!(verdict, Verdict::Valid) {
+            let recomputed = profile.as_ref().and_then(|pp| {
+                policy::policy_hash(
+                    &automation.id,
+                    &profile_rec.id,
+                    profile_rec.revision,
+                    pp,
+                    &policy,
+                )
+            });
+            let approved = approval.as_ref().map(|a| a.policy_hash.as_str());
+            if recomputed.as_deref() != approved {
+                return Err(GateRefusal::NeedsReview(NeedsReview::PolicyChanged));
+            }
+        }
         Ok(Snapshot {
-            profile: serde_json::from_str::<ProfilePolicy>(&profile_rec.policy).ok(),
+            profile,
             profile_id: profile_rec.id.clone(),
             profile_revision: profile_rec.revision,
             policy_hash: approval.map(|a| a.policy_hash).unwrap_or_default(),

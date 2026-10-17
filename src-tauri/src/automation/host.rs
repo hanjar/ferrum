@@ -61,7 +61,7 @@ mod requeue;
 mod runner;
 
 pub use gate::{GateCtx, GateKind, GateOk, GateRefusal, RunMode, gate};
-pub use requeue::requeue_siblings;
+pub use requeue::{requeue_siblings, requeue_siblings_if};
 
 #[cfg(test)]
 mod test_support;
@@ -72,6 +72,45 @@ mod tests_flows;
 
 /// The host refreshes its row this often (design §3.3: every 5 s).
 pub const BEAT_EVERY_MS: i64 = 5_000;
+/// **Automatic runs are OFF.** While this is `false` the engine runs only when the user asks at
+/// that moment (Run now, Retry). Everything that would start it on its own is parked: pending
+/// reruns, the fresh comparison after a folder came back (`Available`), entries of triggers
+/// (schedule, watch, catch-up, startup), entries the gate kept waiting (device, conditions,
+/// busy folders) that would run later by themselves, and the move of merged triggers to a
+/// sibling. A parked entry stays in the queue and says "Waiting - run it with Run now".
+///
+/// AUTO-P0.2c (P0.2 review P3-2 and P3-3: re-check the target at the commit of an in-place
+/// overwrite; restore the old target when a versioning overwrite fails or is cancelled) is
+/// REQUIRED before this is switched on.
+pub const UNATTENDED_RUNS_ENABLED: bool = false;
+
+#[cfg(test)]
+thread_local! {
+    static UNATTENDED_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The switch as the calling code sees it. Tests may set it per thread
+/// ([`set_unattended_for_tests`]); production reads the constant.
+pub fn unattended_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(v) = UNATTENDED_OVERRIDE.with(|c| c.get()) {
+        return v;
+    }
+    UNATTENDED_RUNS_ENABLED
+}
+
+/// Per-thread override for tests: set it on the test thread BEFORE the host is created.
+#[cfg(test)]
+pub(crate) fn set_unattended_for_tests(on: bool) {
+    UNATTENDED_OVERRIDE.with(|c| c.set(Some(on)));
+}
+
+/// Running rows are re-examined for a dead host this often (LC-6).
+const RECOVERY_EVERY_MS: i64 = 30_000;
+/// A run younger than this is never called an orphan (its worker may be about to register it).
+const RECOVERY_GRACE_MS: i64 = 30_000;
+/// A holder that is still alive keeps its run this long after its last beat.
+const LIVE_HOLDER_GRACE_MS: i64 = 5 * 60 * 1000;
 /// A process that does not host asks for the role this often.
 pub const CLAIM_RETRY_MS: i64 = 1_000;
 /// The host looks at `meta.change_seq` this often (MH-10: views follow within 2 s).
@@ -207,6 +246,13 @@ pub(crate) struct State {
     pub logged_refusal: HashMap<i64, &'static str>,
     /// Automation id → pending reruns chained in a row.
     pub rerun_streak: HashMap<String, u32>,
+    /// Queue entry id -> (`merged_count`, `enqueued_ms`) when the gate last looked at it (the
+    /// time tells a reused row id from the entry it once was). With automatic runs off an
+    /// entry is asked once, and again only when the user merges another Run now into it.
+    pub attempted: HashMap<i64, (i64, i64)>,
+    /// Entries already announced as parked ("Waiting - run it with Run now").
+    pub parked_logged: HashMap<i64, i64>,
+    pub last_recovery_ms: Option<i64>,
     pub shutdown: bool,
 }
 
@@ -216,6 +262,8 @@ pub(crate) struct Inner<D: HostDeps> {
     pub class: HostClass,
     pub version: String,
     pub holder: Holder,
+    /// [`unattended_enabled`] when the host was made.
+    pub unattended: bool,
     pub state: Mutex<State>,
     pub wake: (Mutex<bool>, Condvar),
     pub stopped: AtomicBool,
@@ -280,6 +328,7 @@ impl<D: HostDeps> Host<D> {
                 class,
                 version: version.to_string(),
                 holder,
+                unattended: unattended_enabled(),
                 state: Mutex::new(State::default()),
                 wake: (Mutex::new(false), Condvar::new()),
                 stopped: AtomicBool::new(false),
@@ -447,7 +496,17 @@ impl<D: HostDeps> Host<D> {
         let mut state = inner.lock();
         state.last_claim_ms = Some(now);
         match claim {
-            Ok(Claim::Refreshed) => state.hosting = true,
+            Ok(Claim::Refreshed) => {
+                state.hosting = true;
+                // Periodic recovery: a run left Running by a host that died while another one
+                // already hosts (or whose takeover came too early to see it as dead).
+                if state
+                    .last_recovery_ms
+                    .is_none_or(|t| now.saturating_sub(t) >= RECOVERY_EVERY_MS || now < t)
+                {
+                    state.needs_recovery = true;
+                }
+            }
             Ok(Claim::Acquired { .. }) => {
                 state.hosting = true;
                 state.needs_recovery = true;
@@ -473,20 +532,29 @@ impl<D: HostDeps> Host<D> {
                 return;
             }
             state.needs_recovery = false;
+            state.last_recovery_ms = Some(now);
         }
         let probe = inner.deps.lease_env().probe.clone();
         let mine: Vec<i64> = inner.lock().active.keys().copied().collect();
         let _ = inner.write(|conn| {
-            leases::reclaim_dead(conn, now, probe.as_ref())?;
             for run in runs::active(conn)? {
                 if run.host != inner.run_host() || mine.contains(&run.id) {
                     continue;
                 }
-                if leases::live_for_run(conn, run.id, now, probe.as_ref())? {
+                // A run that just started may not be registered yet; a holder that is still alive
+                // keeps its run (a stalled host is not a dead one).
+                if now >= run.started_ms && now - run.started_ms < RECOVERY_GRACE_MS {
+                    continue;
+                }
+                if leases::held_by_living(conn, run.id, now, probe.as_ref(), LIVE_HOLDER_GRACE_MS)?
+                {
                     continue;
                 }
                 runner::interrupt_orphan(conn, &run, now)?;
             }
+            // Only after the runs were judged: a stale row is the evidence that a holder still
+            // exists, and deleting it first would erase that.
+            leases::reclaim_dead(conn, now, probe.as_ref())?;
             Ok(())
         });
     }
@@ -599,7 +667,17 @@ impl<D: HostDeps> Host<D> {
         let Some((automation_id, run)) = self.control_target(control) else {
             return self.mark(control, "gone", now);
         };
-        match self.owns(&automation_id) {
+        // Stop and Recheck belong to the host that RAN the run (`run.host`), whatever the
+        // automation's runtime says today; the rest follows the automation's runtime.
+        let owned = match (&run, control.action) {
+            (Some(r), Action::Stop | Action::Recheck) => Some(match r.host {
+                RunHost::App => inner.class == HostClass::App,
+                RunHost::Background => inner.class == HostClass::Background,
+                RunHost::Manual => false,
+            }),
+            _ => self.owns(&automation_id),
+        };
+        match owned {
             None => return self.mark(control, "gone", now),
             Some(false) => return, // the other host answers it
             Some(true) => {}
@@ -650,7 +728,13 @@ impl<D: HostDeps> Host<D> {
                 let Some(run) = run else {
                     return self.mark(control, "gone", now);
                 };
-                if !self.try_begin_recheck(&automation_id, run.id) {
+                // Not while a run works on the same folders: the comparison would describe a
+                // tree in motion. The control stays pending and is tried again.
+                let busy = inner
+                    .store
+                    .with_read(|c| request::folders_in_use(c, &automation_id))
+                    .unwrap_or(true);
+                if busy || !self.try_begin_recheck(&automation_id, run.id) {
                     // No capacity right now: stays pending, tried again at the next tick.
                     return;
                 }
@@ -705,8 +789,21 @@ impl<D: HostDeps> Host<D> {
             return;
         };
         {
+            // Bookkeeping of entries that are gone (a row id can be reused by a later entry).
+            let mut state = inner.lock();
+            let live: HashSet<i64> = entries.iter().map(|e| e.id).collect();
+            state.attempted.retain(|id, _| live.contains(id));
+            state.parked_logged.retain(|id, _| live.contains(id));
+        }
+        if !inner.unattended {
+            runner::park_unattended(inner, &entries, now);
+        }
+        {
             let state = inner.lock();
-            if !entries.iter().any(|e| runner::eligible(&state, e, now)) {
+            if !entries
+                .iter()
+                .any(|e| runner::eligible(&state, e, now, inner.unattended))
+            {
                 return;
             }
         }

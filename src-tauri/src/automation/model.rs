@@ -126,12 +126,15 @@ pub struct DeleteGuard {
 }
 
 impl DeleteGuard {
-    /// Whether the guard can ever stop a run. `enabled` with a percent of 100 (or more) or a zero
-    /// count never trips, so it is the same as OFF and is treated as off wherever the user must
-    /// confirm turning protection off (SE-1, SP-5.1): a profile stored before validation refused
-    /// such values cannot slip past the native dialog.
+    /// Whether the guard can ever stop a run. The engine stops a run only when the deletes
+    /// exceed BOTH the count and the percent of the side, and deletes never exceed 100 %. So
+    /// `enabled` with a percent of 100 (or more) never trips and is the same as OFF; it is
+    /// treated as off wherever the user must confirm turning protection off (SE-1, SP-5.1): a
+    /// profile stored before validation refused such values cannot slip past the native dialog.
+    /// A count of 0 is NOT "never trips": every delete exceeds it, so the percent alone decides
+    /// and the guard still protects (validation refuses 0 for new profiles, old data may hold it).
     pub fn effective(&self) -> bool {
-        self.enabled && self.max_count > 0 && self.max_percent < 100
+        self.enabled && self.max_percent < 100
     }
 }
 
@@ -1371,7 +1374,10 @@ mod tests {
         assert!(!g(false, 50, 20).effective());
         assert!(!g(true, 50, 100).effective());
         assert!(!g(true, 50, 255).effective());
-        assert!(!g(true, 0, 20).effective());
+        assert!(
+            g(true, 0, 20).effective(),
+            "count 0 is percent-only, not off"
+        );
     }
 
     /// SP-5.1: guard ranges (count 1..=100000, percent 1..=99; 100 % could never trip).

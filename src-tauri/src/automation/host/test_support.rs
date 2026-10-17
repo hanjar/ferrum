@@ -356,7 +356,10 @@ pub struct Rig {
 }
 
 impl Rig {
+    /// A rig with automatic runs ON (the behaviour the host tests describe); a test of the
+    /// default (off) calls `set_unattended_for_tests(false)` before it makes its host.
     pub fn new() -> Rig {
+        crate::automation::host::set_unattended_for_tests(true);
         let fx = Fixture::new();
         let keys = CountingKeys::new(fx.keys.clone());
         let world = Arc::new(World {

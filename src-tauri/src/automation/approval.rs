@@ -469,7 +469,31 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
         return Ok(ApproveResultDto::Canceled);
     }
 
-    // The user said Yes. Only now may an unusable key be replaced (it is backed up first).
+    // The user said Yes. Only now may an unusable key be replaced (it is backed up first), and
+    // only if the approval would still go through: a replaced key invalidates every earlier
+    // approval, so a stale answer must not cost the user their other automations.
+    if key.is_none() {
+        let still_current = store.with_read(|conn| -> Result<bool, CommandError> {
+            let fresh = match load_profile(conn, &validated.profile_id) {
+                Ok(p) => p,
+                Err(e) if e.code == "not_found" => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let hash_ok = hash_for(&automation_id, &fresh, &validated.policy)
+                .map(|h| h == shown_hash)
+                .unwrap_or(false);
+            let current = automations::get(conn, &automation_id)?;
+            let rev_ok = match (&req.id, &current) {
+                (Some(_), Some(row)) => Some(row.config_rev) == req.expected_config_rev,
+                (None, None) => true,
+                _ => false,
+            };
+            Ok(hash_ok && rev_ok)
+        })?;
+        if !still_current || deps.ledger.find(&req.test_id, (deps.clock)()).is_none() {
+            return Ok(ApproveResultDto::Stale);
+        }
+    }
     let key = match key.take() {
         Some(key) => key,
         None => {

@@ -37,7 +37,7 @@ use crate::automation::store::controls::{self, Action, Control};
 use crate::automation::store::events::{self, EventRecord};
 use crate::automation::store::hosts;
 use crate::automation::store::profiles::{self, ProfileRecord};
-use crate::automation::store::queue::{self, QueueEntry};
+use crate::automation::store::queue::{self, QueueEntry, TriggerKind};
 use crate::automation::store::runs::{self, HistoryFilter, OPS_KEPT, Outcome, RunRecord};
 use crate::automation::store::runtime::{self, RuntimeRow, TriggerState};
 use crate::automation::store::{Store, approvals};
@@ -431,11 +431,16 @@ fn build(world: &World, rec: &AutomationRecord, now_ms: i64) -> Built {
         // Per AUTOMATION (design 9.1: "queued entry for this automation"): another automation
         // on the same profile that is paused, held or in review keeps its own chip.
         .find(|q| q.automation_id == rec.id)
-        .map(|_| {
+        .map(|q| {
             if trigger == TriggerState::Device {
                 QueueWait::Device
             } else if let Some(name) = world.blocker(&rec.profile_id, Some(&rec.id)) {
                 QueueWait::WaitsFor(name)
+            } else if !crate::automation::host::unattended_enabled()
+                && !matches!(q.kind, TriggerKind::RunNow | TriggerKind::Retry)
+            {
+                // Automatic runs are off: an entry that no user asked for waits for Run now.
+                QueueWait::RunNowOnly
             } else {
                 QueueWait::Starting
             }

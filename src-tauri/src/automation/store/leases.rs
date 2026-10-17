@@ -518,6 +518,23 @@ pub fn set_run_id(
     .map_err(unavailable)
 }
 
+/// Whether a lease names `run_id` and its holder process still exists and beat within `grace_ms`
+/// (a stalled holder keeps its run for a while). The host uses this for the periodic recovery of
+/// `Running` rows (LC-6): a row is an orphan only when nobody alive claims it.
+pub fn held_by_living(
+    conn: &Connection,
+    run_id: i64,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+    grace_ms: i64,
+) -> Result<bool, StoreError> {
+    Ok(read_rows(conn)?.iter().any(|row| {
+        row.run_id == Some(run_id)
+            && probe.is_alive(row.holder)
+            && now_ms.saturating_sub(row.beat_ms) <= grace_ms
+    }))
+}
+
 /// Whether a LIVE lease (fresh beat, holder process alive) names `run_id`. The host asks this
 /// before it declares a `Running` row an orphan: a host that merely stalled still holds its
 /// lease, so its run must not be taken away from it (FER-524, LC-6).

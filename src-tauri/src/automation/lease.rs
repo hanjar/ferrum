@@ -155,12 +155,14 @@ impl LeaseGuard {
         self.kind
     }
 
-    /// Record the run this lease belongs to (the host takes the lease before the run row exists).
-    /// Best effort and informational: the lease protects the folders either way.
-    pub fn attach_run(&self, run_id: i64) {
-        let _ = self
-            .store
-            .with_write(|c| leases::set_run_id(c, &self.id, self.env.holder, run_id));
+    /// Record the run this lease belongs to, inside the caller's transaction (the same one that
+    /// starts the run row). `false` = the lease is not ours any more: the caller must not start.
+    pub fn attach_run_in(
+        &self,
+        conn: &rusqlite::Connection,
+        run_id: i64,
+    ) -> Result<bool, StoreError> {
+        leases::set_run_id(conn, &self.id, self.env.holder, run_id)
     }
 
     /// True once the heartbeat found the lease gone (reclaimed) or hit the hold limit. A lost
@@ -237,7 +239,14 @@ impl Drop for LeaseGuard {
             *flag.lock().unwrap_or_else(|p| p.into_inner()) = true;
             cv.notify_all();
         }
-        if let Some(thread) = self.thread.take() {
+        // Inside a store closure (a bug of the caller) the join could wait for a heartbeat that
+        // waits for the store we hold, and the release below would be refused as a nested call:
+        // do neither - the thread ends on its own (the stop flag is set) and the row expires.
+        let nested = crate::automation::store::inside_closure();
+        debug_assert!(!nested, "a LeaseGuard was dropped inside a store closure");
+        if let Some(thread) = self.thread.take()
+            && !nested
+        {
             let _ = thread.join();
         }
         // Best effort: if the store is gone the lease expires on its own.
@@ -1008,11 +1017,33 @@ mod tests {
                 .unwrap()
         };
         assert!(!live(77, 1_000), "not attached yet");
-        guard.attach_run(77);
+        rig.store
+            .with_write(|c| guard.attach_run_in(c, 77))
+            .unwrap();
         assert!(live(77, 1_000));
         assert!(!live(78, 1_000));
         assert!(!live(77, 1_000 + 40_000), "a stale beat is not live");
         rig.probe.kill(rig.env.holder);
         assert!(!live(77, 1_000), "a dead holder is not live");
+    }
+
+    /// FER-524 rework B-b: dropping a guard inside a store closure never joins the heartbeat
+    /// thread (it could wait for the store the caller holds): it fails loudly in debug builds and
+    /// is skipped in release builds - either way it returns instead of hanging.
+    #[test]
+    fn dropping_a_guard_inside_a_store_closure_cannot_hang() {
+        let rig = rig();
+        let GuardOutcome::Acquired(guard) = acquire_manual(&rig, &[r"C:"]) else {
+            panic!("acquired");
+        };
+        let store = rig.store.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.with_read(|_| -> Result<(), StoreError> {
+                drop(guard);
+                Ok(())
+            });
+        }));
+        assert_eq!(outcome.is_err(), cfg!(debug_assertions));
+        assert!(!crate::automation::store::inside_closure());
     }
 }

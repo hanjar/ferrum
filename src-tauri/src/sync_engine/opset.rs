@@ -202,8 +202,8 @@ pub fn evaluate_guard(guard: &DeleteGuard, report: &CompareDirsReport, ops: &[Op
             return GuardVerdict::EmptySource { empty: other };
         }
     }
-    // FER-524 (review P1.1): a stored guard that can never trip (percent 100 or more, a zero
-    // count) is OFF here too, so data saved before validation refused such values reads the same
+    // FER-524 (review P1.1): a stored guard that can never trip (percent 100 or more) is OFF
+    // here too (a zero count still trips on the percent: it is percent-only), so data saved before validation refused such values reads the same
     // way in the engine, in the approval dialog and in `confirm_needed`.
     if !guard.effective() {
         return GuardVerdict::Off;
@@ -368,18 +368,12 @@ mod tests {
             e.push(entry(&format!("x{i}"), DirDiffState::RightOnly));
         }
         let r = report(e);
-        for guard in [
-            DeleteGuard {
+        {
+            let guard = DeleteGuard {
                 enabled: true,
                 max_count: 50,
                 max_percent: 100,
-            },
-            DeleteGuard {
-                enabled: true,
-                max_count: 0,
-                max_percent: 20,
-            },
-        ] {
+            };
             assert!(!guard.effective());
             assert_eq!(
                 evaluate_guard(&guard, &r, &delete_ops(&r)),
@@ -387,6 +381,17 @@ mod tests {
                 "{guard:?}"
             );
         }
+        // A count of 0 is percent-only: 60 of 70 entries is far over 20 %, so it trips.
+        let zero = DeleteGuard {
+            enabled: true,
+            max_count: 0,
+            max_percent: 20,
+        };
+        assert!(zero.effective());
+        assert!(matches!(
+            evaluate_guard(&zero, &r, &delete_ops(&r)),
+            GuardVerdict::Tripped { .. }
+        ));
     }
 
     // SP-5.2: an empty source with a populated target holds the run, even with the guard off.

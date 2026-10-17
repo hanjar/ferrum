@@ -193,16 +193,43 @@ fn answer_for(conn: &Connection, enq: Enqueued, automation_id: &str) -> Answer {
     }
 }
 
+/// The per-target rate limit (T5). Each action has its own bucket, so a flood of one kind of
+/// request (Recheck, say) can never keep a Stop from reaching the host.
 fn rate_limited(
     conn: &Connection,
+    action: Action,
     automation_id: Option<&str>,
     run_id: Option<i64>,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
-    Ok(
-        controls::recent_count(conn, automation_id, run_id, now_ms.saturating_sub(1_000))?
-            >= CONTROLS_PER_SECOND,
-    )
+    Ok(controls::recent_count(
+        conn,
+        action,
+        automation_id,
+        run_id,
+        now_ms.saturating_sub(1_000),
+    )? >= CONTROLS_PER_SECOND)
+}
+
+/// Is any run active on folders that overlap this automation's (its own run included)? A recheck
+/// compares read-only, but against a tree a run is changing it would report a half-synced state.
+pub fn folders_in_use(conn: &Connection, automation_id: &str) -> Result<bool, StoreError> {
+    let Some(rec) = automations::get(conn, automation_id)? else {
+        return Ok(false);
+    };
+    let roots_for = |profile_id: &str| -> Result<Vec<String>, StoreError> {
+        Ok(profiles::get(conn, profile_id)?
+            .and_then(|p| serde_json::from_str::<ProfilePolicy>(&p.policy).ok())
+            .map(|p| roots_of(&p))
+            .unwrap_or_default())
+    };
+    let mine = roots_for(&rec.profile_id)?;
+    for run in runs::active(conn)? {
+        if queue::roots_overlap(&mine, &roots_for(&run.profile_id)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Run now, host side: the entry is queued here (also what a host does with a Run now control).
@@ -244,7 +271,7 @@ fn run_now_tx(
         if !runner_live(conn, now_ms)? {
             return Err(RequestError::RunnerDown);
         }
-        if rate_limited(conn, Some(&checked.id), None, now_ms)? {
+        if rate_limited(conn, Action::RunNow, Some(&checked.id), None, now_ms)? {
             return Err(RequestError::TooMany);
         }
         controls::post(
@@ -327,7 +354,7 @@ fn retry_tx(
         if !runner_live(conn, now_ms)? {
             return Err(RequestError::RunnerDown);
         }
-        if rate_limited(conn, None, Some(run_id), now_ms)? {
+        if rate_limited(conn, Action::Retry, None, Some(run_id), now_ms)? {
             return Err(RequestError::TooMany);
         }
         controls::post(
@@ -372,7 +399,7 @@ pub fn recheck_command(store: &Store, run_id: i64, now_ms: i64) -> Answer {
             if run.ended_ms.is_none() || !held {
                 return Err(RequestError::NotReady("not_held"));
             }
-            if rate_limited(conn, None, Some(run_id), now_ms)? {
+            if rate_limited(conn, Action::Recheck, None, Some(run_id), now_ms)? {
                 return Err(RequestError::TooMany);
             }
             controls::post(
@@ -400,7 +427,7 @@ pub fn stop_command(store: &Store, run_id: i64, now_ms: i64) -> Answer {
             if run.automation_id.is_none() || run.ended_ms.is_some() {
                 return Err(RequestError::NotReady("not_running"));
             }
-            if rate_limited(conn, None, Some(run_id), now_ms)? {
+            if rate_limited(conn, Action::Stop, None, Some(run_id), now_ms)? {
                 return Err(RequestError::TooMany);
             }
             controls::post(
@@ -431,9 +458,9 @@ pub fn pause_run_part(
             if !automations::has_running_run(conn, automation_id)? {
                 return Ok(());
             }
-            if rate_limited(conn, Some(automation_id), None, now_ms)? {
-                return Err(RequestError::TooMany);
-            }
+            // No rate limit here: "Pause & stop" is the user's one chance to stop the run, and
+            // the pause itself already happened. The control table is bounded by its 10 minute
+            // life, and a flood of other requests has its own bucket.
             controls::post(
                 conn,
                 &NewControl {

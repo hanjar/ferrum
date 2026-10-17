@@ -90,6 +90,9 @@ pub enum QueueWait {
     Battery,
     /// OP-1: on a metered network.
     Metered,
+    /// Nothing blocks it, but automatic runs are switched off (`host::UNATTENDED_RUNS_ENABLED`):
+    /// only the user's Run now starts it.
+    RunNowOnly,
     /// Nothing blocks it; the host starts it next.
     Starting,
 }
@@ -194,6 +197,11 @@ pub fn compute(i: &StatusInput) -> StatusDto {
                 StatusKind::Queued,
                 "Queued",
                 Some("Waits for an unmetered network".to_string()),
+            ),
+            QueueWait::RunNowOnly => StatusDto::new(
+                StatusKind::Queued,
+                "Queued",
+                Some("Waiting \u{2014} run it with Run now".to_string()),
             ),
             QueueWait::Starting => StatusDto::new(
                 StatusKind::Queued,

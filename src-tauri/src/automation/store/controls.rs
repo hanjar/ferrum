@@ -242,15 +242,16 @@ pub fn sweep(conn: &Connection, now_ms: i64) -> Result<usize, StoreError> {
 /// request functions use it for the per-target rate limit (threat T5).
 pub fn recent_count(
     conn: &Connection,
+    action: Action,
     automation_id: Option<&str>,
     run_id: Option<i64>,
     since_ms: i64,
 ) -> Result<i64, StoreError> {
     conn.query_row(
         "SELECT COUNT(*) FROM controls
-         WHERE created_ms >= ?1
+         WHERE created_ms >= ?1 AND action = ?4
            AND ((?2 IS NOT NULL AND automation_id = ?2) OR (?3 IS NOT NULL AND run_id = ?3))",
-        params![since_ms, automation_id, run_id],
+        params![since_ms, automation_id, run_id, action.as_str()],
         |row| row.get(0),
     )
     .map_err(unavailable)

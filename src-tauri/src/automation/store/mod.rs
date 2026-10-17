@@ -242,6 +242,25 @@ fn open_connection(dir: &Path, app_version: &str) -> Result<(Connection, OpenMod
             [],
         )
         .map_err(|_| StoreError::Unavailable)?;
+        // FER-524: which other automations merged a trigger into a queue entry (design 9.5).
+        // An additive column, added on open when missing, so the schema version stays 2 and an
+        // older binary reading the same file is unaffected.
+        let has_column = |conn: &Connection| {
+            conn.prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = 'merged_from'")
+                .and_then(|mut s| s.exists([]))
+                .unwrap_or(false)
+        };
+        if !has_column(&conn) {
+            let added = conn.execute(
+                "ALTER TABLE queue ADD COLUMN merged_from TEXT NOT NULL DEFAULT '[]'",
+                [],
+            );
+            // Two openers may race: the loser's ALTER fails with "duplicate column"; what counts
+            // is that the column is there afterwards.
+            if added.is_err() && !has_column(&conn) {
+                return Err(StoreError::Unavailable);
+            }
+        }
         OpenMode::Write
     };
     Ok((conn, mode))

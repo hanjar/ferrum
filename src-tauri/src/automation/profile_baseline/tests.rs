@@ -546,3 +546,44 @@ fn baseline_calls_inside_a_store_closure_fail_closed_instead_of_deadlocking() {
         BaselineTrust::Trusted
     );
 }
+
+/// FER-524 rework B-d: when the "key created again" events cannot be written at that moment (a
+/// nested store call is refused), the notice is kept and written at the next sign / verify.
+#[test]
+fn the_key_rotation_notice_is_not_lost_when_the_store_refuses_it() {
+    use crate::automation::dpapi::KeyLoad;
+    use crate::automation::test_support::Fixture;
+    let fx = Fixture::new();
+    let (profile, _) = fx.profile("P");
+    let a = fx.new_automation("Auto", &profile, Fixture::daily());
+    fx.memory.as_ref().unwrap().set(KeyLoad::Missing);
+    let auth = KeyedAuth::new(fx.keys.clone(), fx.store.clone());
+    let notes = || {
+        fx.store
+            .with_read(|c| crate::automation::store::automations::events(c, &a, 50))
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.text.starts_with("The approval key was created again"))
+            .count()
+    };
+    // Signing creates the key while the store is busy with a closure of this very thread.
+    let signed = fx
+        .store
+        .with_read(
+            |_| -> Result<Option<String>, crate::automation::store::StoreError> {
+                Ok(auth.sign(b"payload"))
+            },
+        )
+        .unwrap();
+    assert!(signed.is_some(), "the key was made and used");
+    assert_eq!(
+        notes(),
+        0,
+        "the event could not be written inside the closure"
+    );
+    // Outside any closure the next call writes it - once.
+    assert!(!auth.verify(b"payload", "00"));
+    assert_eq!(notes(), 1);
+    assert!(!auth.verify(b"payload", "00"));
+    assert_eq!(notes(), 1, "only once");
+}

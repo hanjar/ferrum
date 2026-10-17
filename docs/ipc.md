@@ -420,6 +420,14 @@ Behaviour the contract relies on:
 - **Interrupted** never sets attention. A folder that disappears sends the automation to Waiting for device with a
   fresh-comparison entry queued; a run left `Running` by a dead host becomes Interrupted when the next host takes over,
   and its lease expires.
-- **Pending rerun** (a file changed during the run) queues one run 10 s later, at most 5 in a row per automation.
+- **Pending rerun** (a file changed during the run) queues one run 10 s later, at most 5 in a row per automation - only when automatic runs are on (see below).
 - **Merged triggers** (design §9.5): when the owner of a merged queue entry is paused, edited, deleted, held or in review,
   the merged triggers move to the first other healthy automation of the profile.
+
+**Automatic runs are off.** While `UNATTENDED_RUNS_ENABLED` is false (the shipped state) the host starts the engine
+only for a Run now or Retry the user asked for. A queue entry of any other kind (schedule, watch, catch-up, pending
+rerun, "folder is back") is not started: it stays in the queue, `automation_list` shows `Queued` with the sub-line
+"Waiting - run it with Run now", and one event says so. An entry the gate kept waiting (device, conditions, busy
+folders) is not retried by itself; pressing Run now again asks again. A file that changed during a run, or a folder that
+disappeared, is reported in the event log instead of queueing a rerun. Open conditions fail closed: unknown power status
+counts as battery, and `skipOnMetered` waits until metered detection exists.

@@ -10,6 +10,7 @@ use super::request::{self, QueueAnswer, RequestError};
 use super::test_support::*;
 use super::{HostClass, HostEvent, RunMode};
 use crate::automation::dto::PauseMode;
+use crate::automation::lease::{GuardOutcome, LeaseGuard};
 use crate::automation::status::StatusKind;
 use crate::automation::store::leases::{self, AcquireRequest, Holder, HolderKind};
 use crate::automation::store::queue::{self, TriggerKind};
@@ -17,6 +18,7 @@ use crate::automation::store::runs::{self, NewRun, Outcome, RecheckState, RunHos
 use crate::automation::store::{StoreError, controls, runtime};
 use crate::sync_engine::InterruptReason;
 use crate::sync_engine::execute::{Counts, Phase};
+use crate::sync_engine::roots;
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -823,7 +825,7 @@ fn orphan_run(rig: &Rig, automation: &str, profile: &str, dead: Holder, host: Ru
                     trigger_text: "Scheduled",
                     merged_count: 0,
                     retry_of: None,
-                    started_ms: now,
+                    started_ms: now - 60_000, // past the recovery grace
                 },
             )
         })
@@ -1338,4 +1340,494 @@ fn deleting_an_automation_stops_its_run() {
         row.note
     );
     assert_eq!(rig.queue_len(), 0);
+}
+
+// ── Rework 1: automatic runs are OFF by default (decision for P0.2c) ──
+
+fn parked_rig() -> Rig {
+    let rig = Rig::new();
+    crate::automation::host::set_unattended_for_tests(false);
+    rig
+}
+
+fn parked_text(rig: &Rig, a: &str) -> usize {
+    rig.event_texts(a)
+        .iter()
+        .filter(|e| e.contains("run it with Run now"))
+        .count()
+}
+
+#[test]
+fn the_switch_is_off_in_the_shipped_code() {
+    const { assert!(!super::UNATTENDED_RUNS_ENABLED) };
+}
+
+#[test]
+fn with_automatic_runs_off_no_trigger_but_run_now_reaches_the_engine() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Parked");
+    let host = rig.host(1, HostClass::App);
+    for kind in [
+        TriggerKind::Schedule,
+        TriggerKind::Watch,
+        TriggerKind::CatchUp,
+        TriggerKind::PendingRerun,
+        TriggerKind::Available,
+        TriggerKind::Startup,
+        TriggerKind::Recheck,
+    ] {
+        rig.enqueue(&a, &p, kind, HostClass::App);
+        rig.advance(20_000);
+        tick(&host);
+        assert!(rig.world.calls().is_empty(), "{kind:?} started the engine");
+        assert_eq!(rig.queue_len(), 1, "{kind:?} stays in the queue");
+        rig.sql("DELETE FROM queue");
+    }
+    // One parked entry says so, once, in the log and on the status line.
+    rig.enqueue(&a, &p, TriggerKind::Schedule, HostClass::App);
+    rig.advance(20_000);
+    tick(&host);
+    tick(&host);
+    assert_eq!(parked_text(&rig, &a), 1);
+    let rows =
+        crate::automation::read::list_in(&rig.fx.store, rig.fx.keys.as_ref(), rig.now()).unwrap();
+    assert_eq!(
+        rows[0].status.sub.as_deref(),
+        Some("Waiting \u{2014} run it with Run now")
+    );
+    // The user's Run now merges into it, and that - and only that - starts the engine.
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    rig.advance(1_000);
+    tick(&host);
+    assert_eq!(rig.world.calls().len(), 1);
+    assert_eq!(rig.queue_len(), 0);
+}
+
+#[test]
+fn with_automatic_runs_off_a_kept_run_now_is_not_retried_by_itself() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Offline now");
+    let host = rig.host(1, HostClass::App);
+    let right = rig.fx.profile_policy(&p).right.path;
+    let away = format!("{right}-away");
+    std::fs::rename(&right, &away).unwrap();
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    assert_eq!(rig.status_kind(&a), StatusKind::Device);
+    // The folder comes back: nothing happens by itself, however long we wait.
+    std::fs::rename(&away, &right).unwrap();
+    for _ in 0..4 {
+        rig.advance(20_000);
+        tick(&host);
+    }
+    assert!(rig.world.calls().is_empty());
+    assert_eq!(rig.queue_len(), 1);
+    // Asking again does (the second Run now merges and is looked at once more).
+    assert_eq!(
+        request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()),
+        Ok(QueueAnswer::Merged)
+    );
+    tick(&host);
+    assert_eq!(rig.world.calls().len(), 1);
+}
+
+#[test]
+fn with_automatic_runs_off_a_busy_run_now_waits_for_the_next_request() {
+    let rig = parked_rig();
+    let (a, p) = rig.automation("Busy now");
+    let host = rig.host(1, HostClass::App);
+    let policy = rig.fx.profile_policy(&p);
+    let roots = vec![
+        roots::canonical(&policy.left.path).unwrap(),
+        roots::canonical(&policy.right.path).unwrap(),
+    ];
+    let other = rig.lease_env(999);
+    let manual = match LeaseGuard::acquire(
+        &rig.fx.store,
+        &other,
+        HolderKind::Manual,
+        None,
+        &roots,
+        None,
+    )
+    .unwrap()
+    {
+        GuardOutcome::Acquired(g) => g,
+        GuardOutcome::Busy(_) => panic!("free"),
+    };
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    drop(manual);
+    for _ in 0..3 {
+        rig.advance(20_000);
+        tick(&host);
+    }
+    assert!(
+        rig.world.calls().is_empty(),
+        "no run by itself after the lease is free"
+    );
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    assert_eq!(rig.world.calls().len(), 1);
+}
+
+#[test]
+fn with_automatic_runs_off_a_condition_does_not_start_a_run_later_by_itself() {
+    let rig = parked_rig();
+    let (a, _) = rig.automation("Needs AC 2");
+    let host = rig.host(1, HostClass::App);
+    *rig.world.unmet.lock().unwrap() = Some("Waits for AC power");
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    *rig.world.unmet.lock().unwrap() = None;
+    rig.advance(20_000);
+    tick(&host);
+    assert!(rig.world.calls().is_empty());
+}
+
+#[test]
+fn with_automatic_runs_off_follow_ups_of_a_run_are_not_queued() {
+    let rig = parked_rig();
+    let (a, _p) = rig.automation("Follow-ups");
+    let host = rig.host(1, HostClass::App);
+    // A file changed during the run: no pending rerun entry, one honest event.
+    rig.world.set_script(script(|_, _| {
+        let mut r = completed(2);
+        r.pending_rerun = true;
+        r
+    }));
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    assert_eq!(rig.queue_len(), 0);
+    assert!(
+        rig.event_texts(&a)
+            .iter()
+            .any(|e| e.contains("run it again with Run now")),
+        "{:?}",
+        rig.event_texts(&a)
+    );
+    // A folder that disappeared: Device state, no "folder is back" entry.
+    rig.world.set_script(script(|_, _| {
+        interrupted(1, 3, InterruptReason::RootOffline)
+    }));
+    rig.advance(1_000);
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &a, rig.now()).unwrap();
+    tick(&host);
+    assert_eq!(rig.queue_len(), 0);
+    assert_eq!(
+        rig.fx
+            .store
+            .with_read(|c| runtime::get(c, &a))
+            .unwrap()
+            .unwrap()
+            .trigger_state,
+        Some(runtime::TriggerState::Device)
+    );
+    assert_eq!(rig.world.calls().len(), 2);
+}
+
+#[test]
+fn with_automatic_runs_off_merged_triggers_are_not_moved_to_a_sibling() {
+    let rig = parked_rig();
+    let (owner, p) = rig.automation("Owner off");
+    let sibling = rig.automation_on("Sibling off", &p);
+    rig.enqueue(&owner, &p, TriggerKind::Schedule, HostClass::App);
+    rig.enqueue(&sibling, &p, TriggerKind::Watch, HostClass::App);
+    approval_pause(&rig, &owner);
+    assert_eq!(
+        rig.queue_len(),
+        0,
+        "nothing starts the engine on the sibling's behalf"
+    );
+}
+
+// ── Rework 1: Part A items ──
+
+#[test]
+fn a_shutdown_or_lost_role_between_gate_and_start_starts_nothing() {
+    for lose_role in [false, true] {
+        let rig = Rig::new();
+        let (a, p) = rig.automation("Closing 2");
+        let host = rig.host(1, HostClass::App);
+        let inner = host.clone();
+        *rig.world.between.lock().unwrap() = Some(Box::new(move || {
+            let mut state = inner.inner.lock();
+            if lose_role {
+                state.hosting = false;
+            } else {
+                state.shutdown = true;
+            }
+        }));
+        rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+        host.tick();
+        settle(&host);
+        assert!(rig.world.calls().is_empty(), "lose_role={lose_role}");
+        assert!(rig.runs().is_empty(), "no run row was written");
+        assert_eq!(rig.queue_len(), 1, "the entry waits for the next host");
+        assert!(
+            rig.fx.store.with_read(leases::all).unwrap().is_empty(),
+            "the lease was released"
+        );
+    }
+}
+
+#[test]
+fn the_lease_names_its_run_from_the_moment_the_run_exists() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Lease run");
+    let host = rig.host(1, HostClass::App);
+    let seen = Arc::new(Mutex::new(None));
+    {
+        let (seen, store) = (seen.clone(), rig.fx.store.clone());
+        rig.world.set_script(script(move |_, call| {
+            let rows = store.with_read(leases::all).unwrap();
+            *seen.lock().unwrap() = Some((call.run_id, rows[0].run_id, rows[0].holder_kind));
+            completed(1)
+        }));
+    }
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    let (run_id, lease_run, kind) = seen.lock().unwrap().unwrap();
+    assert_eq!(lease_run, Some(run_id));
+    assert_eq!(kind, HolderKind::App);
+}
+
+#[test]
+fn recovery_repeats_and_finds_a_run_orphaned_after_the_takeover() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Late orphan");
+    let host = rig.host(1, HostClass::App);
+    host.tick();
+    assert!(host.is_hosting());
+    // Another instance died with a run in progress AFTER this host took over.
+    let dead = Holder {
+        pid: 5,
+        created: 50,
+    };
+    let id = orphan_run(&rig, &a, &p, dead, RunHost::App);
+    rig.world.probe.kill(dead);
+    rig.advance(6_000);
+    host.tick();
+    assert_eq!(
+        run_row(&rig, id).outcome,
+        None,
+        "not yet: the pass is every 30 s"
+    );
+    rig.advance(31_000);
+    host.tick();
+    settle(&host);
+    assert_eq!(run_row(&rig, id).outcome, Some(Outcome::Interrupted));
+}
+
+#[test]
+fn a_run_that_just_started_is_not_an_orphan() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Young");
+    let host = rig.host(1, HostClass::App);
+    let id = rig
+        .fx
+        .store
+        .with_write(|c| {
+            runs::start(
+                c,
+                &NewRun {
+                    automation_id: Some(&a),
+                    automation_name: Some("Young"),
+                    profile_id: &p,
+                    profile_revision: 1,
+                    policy_hash: None,
+                    host: RunHost::App,
+                    trigger_kind: "schedule",
+                    trigger_text: "Scheduled",
+                    merged_count: 0,
+                    retry_of: None,
+                    started_ms: rig.now(),
+                },
+            )
+        })
+        .unwrap();
+    host.tick();
+    settle(&host);
+    assert_eq!(
+        run_row(&rig, id).outcome,
+        None,
+        "a worker may be about to register it"
+    );
+}
+
+#[test]
+fn an_entry_of_another_host_class_never_merges_and_own_triggers_are_not_merged_from() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Classes");
+    rig.enqueue(&a, &p, TriggerKind::Schedule, HostClass::App);
+    // Same profile, other class: refused, not merged into the app entry.
+    let refused = rig
+        .fx
+        .store
+        .with_write(|c| {
+            queue::enqueue(
+                c,
+                &queue::NewEntry {
+                    automation_id: &a,
+                    profile_id: &p,
+                    host_class: HostClass::Background,
+                    kind: TriggerKind::Watch,
+                    text: "x",
+                    retry_of: None,
+                },
+                rig.now(),
+            )
+        })
+        .unwrap();
+    assert_eq!(refused, queue::Enqueued::Refused);
+    // The owner's own second trigger merges but records no OTHER automation.
+    rig.enqueue(&a, &p, TriggerKind::Watch, HostClass::App);
+    let entry = rig.fx.store.with_read(queue::all).unwrap().remove(0);
+    assert_eq!((entry.merged_count, entry.merged_from.len()), (1, 0));
+    // So pausing the owner has nothing to give a sibling.
+    let _sibling = rig.automation_on("Sibling classes", &p);
+    approval_pause(&rig, &a);
+    assert_eq!(rig.queue_len(), 0);
+}
+
+#[test]
+fn stop_follows_the_host_that_ran_the_run() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Ran in the runner");
+    // A run the BACKGROUND host started (holder alive) for an app-runtime automation.
+    let alive = Holder {
+        pid: 7,
+        created: 70,
+    };
+    let id = orphan_run(&rig, &a, &p, alive, RunHost::Background);
+    request::stop_command(&rig.fx.store, id, rig.now()).unwrap();
+    let app = rig.host(1, HostClass::App);
+    tick(&app);
+    let pending = rig
+        .fx
+        .store
+        .with_read(|c| controls::pending(c, rig.now()))
+        .unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the app host leaves a runner run's Stop alone"
+    );
+    let runner = rig.host(2, HostClass::Background);
+    tick(&runner);
+    assert!(
+        rig.fx
+            .store
+            .with_read(|c| controls::pending(c, rig.now()))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pause_and_stop_is_never_held_back_by_a_flood_of_other_controls() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Flooded");
+    let host = rig.host(1, HostClass::App);
+    rig.world.set_script(script(|_, _| partial(1, 1, 0)));
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    let held_run = rig.runs()[0].id;
+    for _ in 0..request::CONTROLS_PER_SECOND {
+        request::recheck_command(&rig.fx.store, held_run, rig.now()).unwrap();
+    }
+    assert_eq!(
+        request::recheck_command(&rig.fx.store, held_run, rig.now()),
+        Err(RequestError::TooMany)
+    );
+    // Another automation is running: Stop and Pause & stop still go through, however often.
+    let hold = blocking(Arc::new(AtomicBool::new(false)), 1, 3);
+    rig.world.set_script(script(move |proof, call| {
+        if call.dry_run {
+            dry_run(1, 0) // the rechecks of the flood answer at once
+        } else {
+            hold(proof, call)
+        }
+    }));
+    let (b, pb) = rig.automation("Running one");
+    rig.enqueue(&b, &pb, TriggerKind::RunNow, HostClass::App);
+    host.tick();
+    wait_until("run active", || !host.active_runs().is_empty());
+    for _ in 0..(request::CONTROLS_PER_SECOND + 5) {
+        request::pause_run_part(&rig.fx.store, &b, true, rig.now()).unwrap();
+    }
+    drive(&host);
+    assert_eq!(rig.runs().last().unwrap().outcome, Some(Outcome::Cancelled));
+}
+
+#[test]
+fn a_recheck_waits_while_a_run_uses_the_same_folders() {
+    let rig = Rig::new();
+    let (a, pa) = rig.automation("Held A");
+    let host = rig.host(1, HostClass::App);
+    rig.world.set_script(script(|_, call| {
+        if call.dry_run {
+            dry_run(0, 0)
+        } else {
+            partial(1, 1, 0)
+        }
+    }));
+    rig.enqueue(&a, &pa, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    let run_a = rig.runs()[0].id;
+    // B uses A's left folder and is running (blocked).
+    let left = rig.fx.profile_policy(&pa).left.path;
+    let (b, _) = rig.overlapping_automation("Runner B", &left);
+    let release = Arc::new(AtomicBool::new(false));
+    rig.world.set_script(blocking(release.clone(), 0, 2));
+    request::run_now_command(&rig.fx.store, rig.fx.keys.as_ref(), &b, rig.now()).unwrap();
+    host.tick();
+    wait_until("B active", || !host.active_runs().is_empty());
+    request::recheck_command(&rig.fx.store, run_a, rig.now()).unwrap();
+    host.tick();
+    let dry = |rig: &Rig| rig.world.calls().iter().filter(|c| c.dry_run).count();
+    assert_eq!(
+        dry(&rig),
+        0,
+        "no comparison while B works on the same folders"
+    );
+    rig.world.set_script(script(|_, call| {
+        if call.dry_run {
+            dry_run(0, 0)
+        } else {
+            completed(2)
+        }
+    }));
+    release.store(true, Ordering::SeqCst);
+    wait_until("B done", || host.active_runs().is_empty());
+    drive(&host);
+    assert_eq!(dry(&rig), 1, "the recheck ran once the folders were free");
+}
+
+/// RQ-10.2 (requirements): "Retry remaining N" is "shown only after a Recheck that found N > 0
+/// and the run was not a conflict". A conflict run whose recheck finds plain work left still
+/// offers no retry.
+#[test]
+fn a_conflict_run_never_offers_retry_even_when_a_recheck_finds_work() {
+    let rig = Rig::new();
+    let (a, p) = rig.automation("Conflict retry");
+    let host = rig.host(1, HostClass::App);
+    rig.world.set_script(script(|_, call| {
+        if call.dry_run {
+            dry_run(2, 0)
+        } else {
+            conflict_held(1)
+        }
+    }));
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    let id = rig.runs()[0].id;
+    request::recheck_command(&rig.fx.store, id, rig.now()).unwrap();
+    drive(&host);
+    let rc = run_row(&rig, id).recheck.unwrap();
+    assert_eq!((rc.state, rc.remaining), (RecheckState::Remaining, 2));
+    assert_eq!(
+        request::retry_command(&rig.fx.store, rig.fx.keys.as_ref(), id, rig.now()),
+        Err(RequestError::NotReady("recheck_first"))
+    );
 }

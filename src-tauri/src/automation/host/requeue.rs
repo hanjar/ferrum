@@ -22,18 +22,36 @@ use crate::automation::store::runtime;
 
 /// Give the merged triggers of `removed` entries to a healthy sibling. Returns how many entries
 /// were created or merged. Call inside the same transaction that removed the entries.
+///
+/// Only a trigger that came from ANOTHER automation (`merged_from`) has anything to lose; the
+/// owner's own repeated triggers die with it. While [`super::unattended_enabled`] is off this
+/// does nothing: a moved trigger would start the engine without the user asking.
 pub fn requeue_siblings(
     conn: &Connection,
     keys: &dyn ApprovalKeys,
     removed: &[QueueEntry],
     now_ms: i64,
 ) -> Result<usize, StoreError> {
+    requeue_siblings_if(super::unattended_enabled(), conn, keys, removed, now_ms)
+}
+
+/// [`requeue_siblings`] with the switch given by the caller (the host passes its own).
+pub fn requeue_siblings_if(
+    enabled: bool,
+    conn: &Connection,
+    keys: &dyn ApprovalKeys,
+    removed: &[QueueEntry],
+    now_ms: i64,
+) -> Result<usize, StoreError> {
+    if !enabled {
+        return Ok(0);
+    }
     let mut moved = 0;
-    for entry in removed.iter().filter(|e| e.merged_count > 0) {
+    for entry in removed.iter().filter(|e| !e.merged_from.is_empty()) {
         let siblings: Vec<_> = automations::list(conn)?
             .into_iter()
             .filter(|a| a.profile_id == entry.profile_id && a.id != entry.automation_id)
-            .filter(|a| a.enabled)
+            .filter(|a| a.enabled && entry.merged_from.contains(&a.id))
             .collect();
         for sibling in siblings {
             let Ok(policy) = serde_json::from_str::<AutomationPolicy>(&sibling.policy) else {

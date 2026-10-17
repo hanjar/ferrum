@@ -73,7 +73,21 @@ impl<D: HostDeps> Drop for RecheckGuard<'_, D> {
 
 /// May the gate be asked about this entry now? (A kept entry waits a few seconds; a pending
 /// rerun waits for the folders to settle.)
-pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64) -> bool {
+pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64, unattended: bool) -> bool {
+    if !unattended {
+        // Automatic runs are off: only the user's Run now / Retry may start the engine, and
+        // the gate is asked about such an entry once per request (a merged Run now asks again).
+        if !is_user_request(entry.kind) {
+            return false;
+        }
+        if state
+            .attempted
+            .get(&entry.id)
+            .is_some_and(|(merged, enq)| *enq == entry.enqueued_ms && entry.merged_count <= *merged)
+        {
+            return false;
+        }
+    }
     if state.next_try.get(&entry.id).is_some_and(|t| now < *t) {
         return false;
     }
@@ -84,6 +98,56 @@ pub(super) fn eligible(state: &State, entry: &QueueEntry, now: i64) -> bool {
         return false;
     }
     true
+}
+
+/// A trigger the user asked for at that moment.
+fn is_user_request(kind: TriggerKind) -> bool {
+    matches!(kind, TriggerKind::RunNow | TriggerKind::Retry)
+}
+
+/// With automatic runs off, say once per entry that it waits for the user (no engine call).
+pub(super) fn park_unattended<D: HostDeps>(
+    inner: &Arc<Inner<D>>,
+    entries: &[QueueEntry],
+    now: i64,
+) {
+    let fresh: Vec<&QueueEntry> = {
+        let state = inner.lock();
+        entries
+            .iter()
+            .filter(|e| {
+                !is_user_request(e.kind) && state.parked_logged.get(&e.id) != Some(&e.enqueued_ms)
+            })
+            .collect()
+    };
+    if fresh.is_empty() {
+        return;
+    }
+    let _ = inner.write(|conn| {
+        for e in &fresh {
+            add_event_once(
+                conn,
+                &e.automation_id,
+                now,
+                EventKind::Info,
+                "Waiting \u{2014} run it with Run now (automatic runs are off)",
+            )?;
+        }
+        Ok(())
+    });
+    let mut state = inner.lock();
+    for e in fresh {
+        state.parked_logged.insert(e.id, e.enqueued_ms);
+    }
+}
+
+/// Drop what the host remembers about an entry that has left the queue (row ids are reused).
+fn forget_entry<D: HostDeps>(inner: &Arc<Inner<D>>, id: i64) {
+    let mut state = inner.lock();
+    state.logged_refusal.remove(&id);
+    state.attempted.remove(&id);
+    state.parked_logged.remove(&id);
+    state.next_try.remove(&id);
 }
 
 enum Attempt {
@@ -112,12 +176,14 @@ pub(super) fn start_cycle<D: HostDeps>(inner: &Arc<Inner<D>>) {
         let live: std::collections::HashSet<i64> = entries.iter().map(|e| e.id).collect();
         state.next_try.retain(|id, _| live.contains(id));
         state.logged_refusal.retain(|id, _| live.contains(id));
+        state.attempted.retain(|id, _| live.contains(id));
+        state.parked_logged.retain(|id, _| live.contains(id));
     }
     for entry in entries {
         if inner.lock().shutdown {
             return;
         }
-        if !eligible(&inner.lock(), &entry, now) {
+        if !eligible(&inner.lock(), &entry, now, inner.unattended) {
             continue;
         }
         match attempt(inner, &entry, now) {
@@ -142,6 +208,13 @@ fn attempt<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, now: i64) -> 
         trigger: entry.kind,
         retry_of: entry.retry_of,
     };
+    if !inner.unattended {
+        // Asked once per request; whatever the answer, a kept entry does not try again by itself.
+        inner
+            .lock()
+            .attempted
+            .insert(entry.id, (entry.merged_count, entry.enqueued_ms));
+    }
     match gate(&ctx, &entry.automation_id, kind) {
         Ok(proof) => run_entry(inner, entry, proof),
         Err(refusal) => refuse(inner, entry, refusal, now),
@@ -198,10 +271,21 @@ fn refuse<D: HostDeps>(
         drop(state);
         if first {
             let _ = record_kept(inner, entry, &refusal, now);
+            if !inner.unattended {
+                let _ = inner.write(|conn| {
+                    add_event_once(
+                        conn,
+                        &entry.automation_id,
+                        now,
+                        EventKind::Info,
+                        "Waiting \u{2014} run it with Run now (automatic runs are off)",
+                    )
+                });
+            }
         }
         return Attempt::Kept;
     }
-    inner.lock().logged_refusal.remove(&entry.id);
+    forget_entry(inner, entry.id);
     let result = inner.write(|conn| {
         let removed = queue::remove(conn, entry.id)?;
         let aid = entry.automation_id.as_str();
@@ -262,7 +346,8 @@ fn refuse<D: HostDeps>(
                     | GateRefusal::WrongRuntime
             )
         {
-            super::requeue::requeue_siblings(
+            super::requeue::requeue_siblings_if(
+                inner.unattended,
                 conn,
                 inner.deps.keys(),
                 std::slice::from_ref(entry),
@@ -471,8 +556,17 @@ impl<D: HostDeps> EngineSink for RunSink<'_, D> {
 fn run_entry<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, proof: GateOk) -> Attempt {
     let now = inner.deps.now_ms();
     let aid = proof.automation_id().to_string();
-    // The run row, the queue entry's removal and the start event are one transaction. An entry
-    // that was withdrawn while the gate worked (paused, edited, deleted) starts nothing.
+    // Not while this process is closing or has lost the host role: the proof (and its lease) is
+    // dropped and the entry stays where it is for the next host.
+    {
+        let state = inner.lock();
+        if state.shutdown || !state.hosting {
+            return Attempt::Kept;
+        }
+    }
+    // The run row, the lease's run id, the queue entry's removal and the start event are one
+    // transaction. An entry that was withdrawn while the gate worked (paused, edited, deleted)
+    // starts nothing; a lease that is not ours any more starts nothing either.
     let started = inner.write(|conn| {
         if !queue::remove(conn, entry.id)? {
             return Ok(None);
@@ -510,9 +604,14 @@ fn run_entry<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, proof: Gate
             };
             runtime::set_trigger_state(conn, &aid, back, None, None, None, now)?;
         }
+        if let Some(lease) = proof.lease()
+            && !lease.attach_run_in(conn, run_id)?
+        {
+            return Err(StoreError::Unavailable);
+        }
         Ok(Some(run_id))
     });
-    inner.lock().logged_refusal.remove(&entry.id);
+    forget_entry(inner, entry.id);
     let run_id = match started {
         Ok(Some(id)) => id,
         // Withdrawn meanwhile, or the store failed: nothing started, the lease goes with `proof`.
@@ -525,18 +624,24 @@ fn run_entry<D: HostDeps>(inner: &Arc<Inner<D>>, entry: &QueueEntry, proof: Gate
             return Attempt::Kept;
         }
     };
-    if let Some(lease) = proof.lease() {
-        lease.attach_run(run_id);
-    }
     let cancel = CancelToken::default();
-    inner.lock().active.insert(
-        run_id,
-        Active {
-            automation_id: aid.clone(),
-            cancel: cancel.clone(),
-            stop: None,
-        },
-    );
+    {
+        // Registered under the same lock `shutdown` uses: a shutdown that came in meanwhile
+        // finds the run and stops it (outcome Interrupted), and one that comes later too.
+        let mut state = inner.lock();
+        let stop = state.shutdown.then_some(StopKind::Shutdown);
+        if stop.is_some() {
+            cancel.cancel();
+        }
+        state.active.insert(
+            run_id,
+            Active {
+                automation_id: aid.clone(),
+                cancel: cancel.clone(),
+                stop,
+            },
+        );
+    }
     let sink = RunSink {
         inner,
         run_id,
@@ -880,21 +985,39 @@ fn settle<D: HostDeps>(
         let mut rerun = report.pending_rerun || summary.lease_lost;
         if summary.offline && wanted {
             runtime::set_trigger_state(conn, &aid, TriggerState::Device, None, None, None, now)?;
-            queue::enqueue(
-                conn,
-                &NewEntry {
-                    automation_id: &aid,
-                    profile_id: proof.profile_id(),
-                    host_class: inner.class,
-                    kind: TriggerKind::Available,
-                    text: "Folder is back",
-                    retry_of: None,
-                },
-                now,
-            )?;
+            if inner.unattended {
+                queue::enqueue(
+                    conn,
+                    &NewEntry {
+                        automation_id: &aid,
+                        profile_id: proof.profile_id(),
+                        host_class: inner.class,
+                        kind: TriggerKind::Available,
+                        text: "Folder is back",
+                        retry_of: None,
+                    },
+                    now,
+                )?;
+            } else {
+                events::add_event(
+                    conn,
+                    &aid,
+                    now,
+                    EventKind::Info,
+                    "Waiting for the folder \u{2014} run it with Run now when it is back",
+                )?;
+            }
             rerun = false;
         }
-        if rerun && wanted {
+        if rerun && wanted && !inner.unattended {
+            events::add_event(
+                conn,
+                &aid,
+                now,
+                EventKind::Info,
+                "Files changed during the run \u{2014} run it again with Run now",
+            )?;
+        } else if rerun && wanted {
             let streak = {
                 let mut state = inner.lock();
                 let n = state.rerun_streak.entry(aid.clone()).or_insert(0);

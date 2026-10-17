@@ -261,6 +261,7 @@ fn paused_and_a_stored_policy_that_cannot_be_read() {
 
 #[test]
 fn running_queued_and_waiting_rows() {
+    crate::automation::host::set_unattended_for_tests(true);
     let fx = Fixture::new();
     let (p, a) = one_watch(&fx, "Projects watch");
     let b = fx.new_automation("Same folders, other trigger", &p, Fixture::daily());

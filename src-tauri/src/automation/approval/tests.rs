@@ -1229,3 +1229,27 @@ fn a_missing_key_may_be_created_before_the_dialog() {
     .unwrap();
     assert!(matches!(during.borrow().clone(), Some(KeyLoad::Key(_))));
 }
+
+/// FER-524 rework B-c: a stale answer must not cost the user their other approvals. The key is
+/// replaced only after a cheap check that the approval would still go through.
+#[test]
+fn a_stale_yes_does_not_replace_an_unusable_key() {
+    let fx = Fixture::new();
+    let (profile, revision, draft) = draft_of(&fx, "A");
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Unusable);
+    let test = fx.test(None, &draft);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            // The profile is saved while the dialog is open ...
+            fx.bump_profile(&profile, revision, "*.tmp");
+            true // ... and the user says yes to what they saw.
+        },
+    )
+    .unwrap();
+    assert_eq!(out, ApproveResultDto::Stale);
+    assert_eq!(memory.load(), KeyLoad::Unusable, "the key was not touched");
+}
