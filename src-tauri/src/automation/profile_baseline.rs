@@ -39,6 +39,14 @@ const SUBKEY_PURPOSE: &str = "ferrum.automation.baseline.key.v1";
 
 /// MACs baseline files with a subkey of the approval key and keeps the save counters in the
 /// automation store.
+///
+/// **Deadlock rule (FER-524, review P1.1 #2).** `generation` and `advance_generation` open the
+/// automation store themselves, and the store is one connection behind a `Mutex` that is not
+/// re-entrant. So a baseline load or save - and therefore the sync engine, which does both -
+/// must NEVER run inside a `Store::with_read` / `with_write` closure of the same store. The
+/// store refuses a nested call on the same thread (`StoreError::Unavailable`), which this type
+/// turns into "unknown counter / refused save" (fail closed: a first run, no deletion
+/// propagated), and the host checks `store::inside_closure()` before it calls the engine.
 pub struct KeyedAuth {
     keys: Arc<dyn ApprovalKeys>,
     store: Arc<Store>,

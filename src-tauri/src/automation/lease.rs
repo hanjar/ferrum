@@ -72,6 +72,8 @@ pub struct LeaseGuard {
     store: Arc<Store>,
     env: LeaseEnv,
     id: String,
+    /// What kind of holder this lease was taken as; `covers` only accepts its own kind.
+    kind: HolderKind,
     stop: Arc<(Mutex<bool>, Condvar)>,
     lost: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -130,6 +132,7 @@ impl LeaseGuard {
             store: store.clone(),
             env: env.clone(),
             id,
+            kind,
             stop,
             lost,
             thread,
@@ -145,6 +148,19 @@ impl LeaseGuard {
     /// The secret lease token (32 hex characters). Handed only to the acquiring process.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The kind this lease was taken as.
+    pub fn kind(&self) -> HolderKind {
+        self.kind
+    }
+
+    /// Record the run this lease belongs to (the host takes the lease before the run row exists).
+    /// Best effort and informational: the lease protects the folders either way.
+    pub fn attach_run(&self, run_id: i64) {
+        let _ = self
+            .store
+            .with_write(|c| leases::set_run_id(c, &self.id, self.env.holder, run_id));
     }
 
     /// True once the heartbeat found the lease gone (reclaimed) or hit the hold limit. A lost
@@ -163,7 +179,14 @@ impl LeaseGuard {
         let now = self.env.now();
         self.store
             .with_read(|c| -> Result<bool, StoreError> {
-                leases::covers_lease(c, &self.id, self.env.holder, canonical_roots, now)
+                leases::covers_lease(
+                    c,
+                    &self.id,
+                    self.env.holder,
+                    self.kind,
+                    canonical_roots,
+                    now,
+                )
             })
             .unwrap_or(false)
     }
@@ -369,8 +392,8 @@ pub enum CoverError {
     Required,
 }
 
-/// Design §3.4 / §5.7: the calling process must hold a fresh lease that covers every one of
-/// `canonical_roots`. Any store problem refuses too (fail closed).
+/// Design §3.4 / §5.7: the calling process must hold a fresh MANUAL lease that covers every one
+/// of `canonical_roots` (an automation run lease never satisfies a save the webview asked for). Any store problem refuses too (fail closed).
 pub fn require_cover(
     store: &Store,
     env: &LeaseEnv,
@@ -378,7 +401,7 @@ pub fn require_cover(
 ) -> Result<(), CoverError> {
     let now = env.now();
     match store.with_read(|c| -> Result<bool, StoreError> {
-        leases::covers(c, env.holder, canonical_roots, now)
+        leases::covers(c, env.holder, HolderKind::Manual, canonical_roots, now)
     }) {
         Ok(true) => Ok(()),
         _ => Err(CoverError::Required),
@@ -915,5 +938,81 @@ mod tests {
             ManualAcquire::Acquired { .. }
         ));
         assert_eq!(registry.held_count(), 1, "the lost guards were dropped");
+    }
+
+    /// FER-524 (review P1.1 #4): the coverage check knows the kind of the lease. A lease taken
+    /// as an automation run (`App`) never satisfies the manual check a webview-driven baseline
+    /// save makes, and a manual lease is not accepted for a run.
+    #[test]
+    fn coverage_is_checked_per_lease_kind() {
+        let rig = rig();
+        let list = roots(&[r"C:\a", r"D:\b"]);
+        let GuardOutcome::Acquired(run_guard) =
+            LeaseGuard::acquire(&rig.store, &rig.env, HolderKind::App, None, &list, None).unwrap()
+        else {
+            panic!("acquired");
+        };
+        assert!(run_guard.covers(&list), "the run covers its own roots");
+        assert_eq!(run_guard.kind(), HolderKind::App);
+        assert_eq!(
+            require_cover(&rig.store, &rig.env, &list),
+            Err(CoverError::Required),
+            "an automation run lease is not a manual lease"
+        );
+        drop(run_guard);
+
+        let GuardOutcome::Acquired(manual) = acquire_manual(&rig, &[r"C:\a", r"D:\b"]) else {
+            panic!("acquired");
+        };
+        assert_eq!(require_cover(&rig.store, &rig.env, &list), Ok(()));
+        assert!(manual.covers(&list));
+        // Same holder process, other kind of row: a guard forged with the id of the manual lease
+        // but the kind of a run is not covered either.
+        let forged = view_as(&manual, HolderKind::App);
+        assert!(!forged.covers(&list));
+    }
+
+    /// Builds a second view of a guard's identity without a heartbeat thread (the original keeps
+    /// the real one), to prove that `covers` compares the kind. Dropping the view releases the
+    /// row, so the test uses it last.
+    fn view_as(g: &LeaseGuard, kind: HolderKind) -> LeaseGuard {
+        LeaseGuard {
+            store: g.store.clone(),
+            env: g.env.clone(),
+            id: g.id.clone(),
+            kind,
+            stop: Arc::new((Mutex::new(true), Condvar::new())),
+            lost: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        }
+    }
+
+    /// A run row is attached to its lease once it exists; a live lease names its run.
+    #[test]
+    fn a_lease_learns_its_run_and_reports_it_while_alive() {
+        let rig = rig();
+        let GuardOutcome::Acquired(guard) = LeaseGuard::acquire(
+            &rig.store,
+            &rig.env,
+            HolderKind::App,
+            None,
+            &roots(&[r"C:\a"]),
+            None,
+        )
+        .unwrap() else {
+            panic!("acquired");
+        };
+        let live = |run: i64, now: i64| {
+            rig.store
+                .with_read(|c| leases::live_for_run(c, run, now, rig.probe.as_ref()))
+                .unwrap()
+        };
+        assert!(!live(77, 1_000), "not attached yet");
+        guard.attach_run(77);
+        assert!(live(77, 1_000));
+        assert!(!live(78, 1_000));
+        assert!(!live(77, 1_000 + 40_000), "a stale beat is not live");
+        rig.probe.kill(rig.env.holder);
+        assert!(!live(77, 1_000), "a dead holder is not live");
     }
 }

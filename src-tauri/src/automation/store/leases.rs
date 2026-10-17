@@ -425,12 +425,17 @@ pub fn release(conn: &Connection, id: &str, holder: Holder) -> Result<bool, Stor
     Ok(changed == 1)
 }
 
-/// Whether `holder` owns a fresh lease that covers every one of `wanted` (each wanted root
-/// equals or lies inside a root of that one lease). Used by `sync_baseline_save` (design §3.4,
-/// §5.7): no covering lease, no baseline write.
+/// Whether `holder` owns a fresh lease OF KIND `kind` that covers every one of `wanted` (each
+/// wanted root equals or lies inside a root of that one lease). Used by `sync_baseline_save`
+/// (design §3.4, §5.7): no covering lease, no baseline write.
+///
+/// The kind matters (FER-524, review P1.1 #4): the webview-driven manual baseline commands pass
+/// [`HolderKind::Manual`], so a lease that the app host holds for an automation run (`App`) can
+/// never satisfy a save the webview asks for, and a manual lease can never stand in for a run.
 pub fn covers(
     conn: &Connection,
     holder: Holder,
+    kind: HolderKind,
     wanted: &[String],
     now_ms: i64,
 ) -> Result<bool, StoreError> {
@@ -439,6 +444,7 @@ pub fn covers(
     }
     Ok(read_rows(conn)?.iter().any(|row| {
         row.holder == holder
+            && row.holder_kind == kind
             && !stale(now_ms, row.beat_ms)
             && row.roots.as_ref().is_some_and(|have| {
                 wanted
@@ -448,13 +454,14 @@ pub fn covers(
     }))
 }
 
-/// Like [`covers`], but for ONE lease row (by id): the row must belong to `holder`, be fresh and
-/// cover every one of `wanted`. Used by a run that holds a lease guard and must not be satisfied
-/// by some other lease of the same process.
+/// Like [`covers`], but for ONE lease row (by id): the row must belong to `holder`, be of kind
+/// `kind`, be fresh and cover every one of `wanted`. Used by a run that holds a lease guard and
+/// must not be satisfied by some other lease of the same process.
 pub fn covers_lease(
     conn: &Connection,
     id: &str,
     holder: Holder,
+    kind: HolderKind,
     wanted: &[String],
     now_ms: i64,
 ) -> Result<bool, StoreError> {
@@ -463,12 +470,46 @@ pub fn covers_lease(
     }
     Ok(get(conn, id)?.is_some_and(|row| {
         row.holder == holder
+            && row.holder_kind == kind
             && !stale(now_ms, row.beat_ms)
             && row.roots.as_ref().is_some_and(|have| {
                 wanted
                     .iter()
                     .all(|want| have.iter().any(|root| roots::contains(root, want)))
             })
+    }))
+}
+
+/// Record the run a lease belongs to once the run row exists (the host takes the lease in the gate,
+/// before the run is created). Only the holder can; returns whether the row changed.
+pub fn set_run_id(
+    conn: &Connection,
+    id: &str,
+    holder: Holder,
+    run_id: i64,
+) -> Result<bool, StoreError> {
+    if !is_lease_id(id) {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE leases SET run_id = ?2 WHERE id = ?1 AND holder_pid = ?3 AND holder_created = ?4",
+        params![id, run_id, holder.pid, holder.created],
+    )
+    .map(|n| n == 1)
+    .map_err(unavailable)
+}
+
+/// Whether a LIVE lease (fresh beat, holder process alive) names `run_id`. The host asks this
+/// before it declares a `Running` row an orphan: a host that merely stalled still holds its
+/// lease, so its run must not be taken away from it (FER-524, LC-6).
+pub fn live_for_run(
+    conn: &Connection,
+    run_id: i64,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+) -> Result<bool, StoreError> {
+    Ok(read_rows(conn)?.iter().any(|row| {
+        row.run_id == Some(run_id) && !stale(now_ms, row.beat_ms) && probe.is_alive(row.holder)
     }))
 }
 
@@ -892,12 +933,34 @@ mod tests {
         let both = roots(&[r"C:\a", r"D:\B\sub"]);
         store
             .with_read(|c| -> Result<(), StoreError> {
-                assert!(covers(c, ME, &both, 1_000)?);
-                assert!(!covers(c, OTHER, &both, 1_000)?, "someone else's lease");
-                assert!(!covers(c, ME, &roots(&[r"C:\a", r"D:\other"]), 1_000)?);
-                assert!(!covers(c, ME, &roots(&[r"C:\a", r"E:\x"]), 1_000)?);
-                assert!(!covers(c, ME, &both, STALE_MS + 1)?, "stale beat");
-                assert!(!covers(c, ME, &[], 1_000)?);
+                assert!(covers(c, ME, HolderKind::Manual, &both, 1_000)?);
+                assert!(
+                    !covers(c, ME, HolderKind::App, &both, 1_000)?,
+                    "a manual lease is not an automation run lease"
+                );
+                assert!(
+                    !covers(c, OTHER, HolderKind::Manual, &both, 1_000)?,
+                    "someone else's lease"
+                );
+                assert!(!covers(
+                    c,
+                    ME,
+                    HolderKind::Manual,
+                    &roots(&[r"C:\a", r"D:\other"]),
+                    1_000
+                )?);
+                assert!(!covers(
+                    c,
+                    ME,
+                    HolderKind::Manual,
+                    &roots(&[r"C:\a", r"E:\x"]),
+                    1_000
+                )?);
+                assert!(
+                    !covers(c, ME, HolderKind::Manual, &both, STALE_MS + 1)?,
+                    "stale beat"
+                );
+                assert!(!covers(c, ME, HolderKind::Manual, &[], 1_000)?);
                 Ok(())
             })
             .unwrap();

@@ -245,18 +245,38 @@ impl DpapiKeyFile {
         outcome.map_err(|_| KeyError)
     }
 
-    /// Keep the blob that is about to be replaced. No backup, no replacement.
+    /// Keep the blob that is about to be replaced. No backup, no replacement. An earlier backup is
+    /// never overwritten (FER-524, review P1.1 #6): the first one is `approval.key.bak`, later
+    /// ones get a timestamp (and a counter when the clock repeats), so the oldest blob - possibly
+    /// the only one a restored profile can still use - survives repeated replacements.
     fn back_up(&self, old: &[u8]) -> Result<(), KeyError> {
         use std::io::Write;
-        let backup = self.backup_path();
-        let _ = std::fs::remove_file(&backup);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup)
-            .map_err(|_| KeyError)?;
-        f.write_all(old).map_err(|_| KeyError)?;
-        f.sync_all().map_err(|_| KeyError)
+        let mut candidates = vec![self.backup_path()];
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        for n in 0..100u32 {
+            candidates.push(
+                self.path
+                    .with_file_name(format!("{KEY_BACKUP_FILE}.{stamp}-{n}")),
+            );
+        }
+        for backup in candidates {
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup);
+            match created {
+                Ok(mut f) => {
+                    f.write_all(old).map_err(|_| KeyError)?;
+                    return f.sync_all().map_err(|_| KeyError);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(KeyError),
+            }
+        }
+        Err(KeyError)
     }
 }
 
@@ -364,7 +384,30 @@ impl KeyLock {
                 {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(_) => return Err(KeyError),
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_ACCESS_DENIED)
+                    ) =>
+                {
+                    log::warn!(
+                        "approval key lock stayed busy for {} s (os error {:?})",
+                        LOCK_WAIT.as_secs(),
+                        e.raw_os_error()
+                    );
+                    return Err(KeyError);
+                }
+                Err(e) => {
+                    // Diagnostic (FER-524, review P1.1 #6): the approval cannot be saved and the
+                    // user should be able to find out why (a read-only folder, a security
+                    // product, a reparse point where the lock file belongs).
+                    log::warn!(
+                        "approval key lock could not be created (os error {:?}, {:?})",
+                        e.raw_os_error(),
+                        e.kind()
+                    );
+                    return Err(KeyError);
+                }
             }
         }
     }

@@ -506,3 +506,43 @@ fn signing_never_replaces_an_existing_key() {
         BaselineTrust::Absent
     );
 }
+
+/// FER-524 (review P1.1 #2): a baseline load or save that reaches the automation store from
+/// INSIDE one of its closures would wait for the connection mutex it already holds. The store
+/// refuses the nested call, so the baseline code fails closed (unknown counter, refused save)
+/// and returns instead of hanging - this test finishing is the proof.
+#[test]
+fn baseline_calls_inside_a_store_closure_fail_closed_instead_of_deadlocking() {
+    let (tmp, left, right) = dirs();
+    let keys = Arc::new(MemoryKeys::with_key(3));
+    let db = Arc::new(crate::automation::store::Store::open(tmp.path(), "0.2.0"));
+    let store = ProfileBaselineStore::open(tmp.path(), keys.clone(), db.clone());
+    let p = pair(&left, &right);
+    // Outside a closure it works.
+    store
+        .engine_store()
+        .save_unguarded_for_tests(&p, &baseline_for(&p, &["a.txt"]))
+        .unwrap();
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Trusted
+    );
+    let auth = KeyedAuth::new(keys, db.clone());
+    db.with_read(|_| -> Result<(), crate::automation::store::StoreError> {
+        assert!(crate::automation::store::inside_closure());
+        assert_eq!(auth.generation("pair"), None, "no counter: fail closed");
+        assert_eq!(auth.advance_generation("pair"), None, "no new counter");
+        // The signed file now loads as untrusted: nothing would be propagated from it.
+        assert_eq!(
+            verify_profile_baseline(&store, &p).unwrap(),
+            BaselineTrust::Untrusted
+        );
+        Ok(())
+    })
+    .unwrap();
+    // After the closure the same file is trusted again.
+    assert_eq!(
+        verify_profile_baseline(&store, &p).unwrap(),
+        BaselineTrust::Trusted
+    );
+}

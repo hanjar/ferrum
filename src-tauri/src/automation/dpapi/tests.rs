@@ -234,3 +234,52 @@ fn create_if_missing_only_creates_never_replaces() {
     assert_eq!(keys.create_if_missing(), Err(KeyError));
     assert!(keys.path().is_dir());
 }
+
+/// FER-524 (review P1.1 #6): a second replacement never overwrites the first backup.
+#[test]
+fn a_second_replacement_keeps_the_older_backup() {
+    if !windows_only() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let keys = DpapiKeyFile::new(dir.path());
+    std::fs::write(keys.path(), b"first unusable blob").unwrap();
+    keys.load_or_create().unwrap();
+    std::fs::write(keys.path(), b"second unusable blob").unwrap();
+    keys.load_or_create().unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join(KEY_BACKUP_FILE)).unwrap(),
+        b"first unusable blob",
+        "the oldest backup survives"
+    );
+    let newer: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{KEY_BACKUP_FILE}."))
+        })
+        .collect();
+    assert_eq!(
+        newer.len(),
+        1,
+        "the second blob has its own timestamped file"
+    );
+    assert_eq!(
+        std::fs::read(newer[0].path()).unwrap(),
+        b"second unusable blob"
+    );
+}
+
+/// FER-524 (review P1.1 #6): a lock file that cannot be created (a folder sits where it belongs)
+/// fails closed with an error instead of waiting for ever or replacing anything.
+#[cfg(windows)]
+#[test]
+fn a_lock_that_cannot_be_created_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = DpapiKeyFile::new(dir.path());
+    std::fs::create_dir(dir.path().join(KEY_LOCK_FILE)).unwrap();
+    assert_eq!(keys.load_or_create(), Err(KeyError));
+    assert_eq!(keys.load(), KeyLoad::Missing, "nothing was created");
+}

@@ -1118,3 +1118,88 @@ fn reapprove_prompt_uses_the_stored_name_and_says_enable() {
     assert!(text.contains("It will be renamed to \"Brand new name\"."));
     assert!(text.contains("Delete guard: stops above 50 items and 20%."));
 }
+
+// ── FER-524 (review P1.1 #3): an unusable key is replaced only after the user said Yes ──
+
+/// A key that DPAPI refuses (another user, machine or entropy) stays exactly as it is while the
+/// dialog is open and when the user cancels; only a Yes replaces it.
+#[test]
+fn an_unusable_key_is_left_alone_until_the_user_says_yes() {
+    let fx = Fixture::new();
+    let (profile, _, _) = draft_of(&fx, "A");
+    let old = fx.new_automation("Old one", &profile, Fixture::daily());
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Unusable);
+    let draft = Fixture::auto_draft("New one", &profile, Fixture::watch());
+    let test = fx.test(None, &draft);
+
+    // Cancel: while the dialog is open the blob is untouched, and it still is afterwards.
+    let during = RefCell::new(None);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(out, ApproveResultDto::Canceled);
+    assert_eq!(during.borrow().clone(), Some(KeyLoad::Unusable));
+    assert_eq!(memory.load(), KeyLoad::Unusable, "Cancel replaces nothing");
+    assert!(
+        !events(&fx, &old)
+            .iter()
+            .any(|e| e.starts_with("The approval key was created again")),
+        "no rotation notice for a key that was not replaced"
+    );
+
+    // Yes: the dialog still saw the old blob; the replacement happens after the answer.
+    let test = fx.test(None, &draft);
+    let during = RefCell::new(None);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            true
+        },
+    )
+    .unwrap();
+    assert!(matches!(out, ApproveResultDto::Approved { .. }));
+    assert_eq!(during.borrow().clone(), Some(KeyLoad::Unusable));
+    assert!(
+        matches!(memory.load(), KeyLoad::Key(_)),
+        "replaced after Yes"
+    );
+    assert!(
+        events(&fx, &old)
+            .iter()
+            .any(|e| e.starts_with("The approval key was created again")),
+        "the replacement is announced on every automation"
+    );
+}
+
+/// A MISSING key may be created before the dialog (nothing is lost by it).
+#[test]
+fn a_missing_key_may_be_created_before_the_dialog() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Nightly");
+    let test = fx.test(None, &draft);
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Missing);
+    let during = RefCell::new(None);
+    approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            false
+        },
+    )
+    .unwrap();
+    assert!(matches!(during.borrow().clone(), Some(KeyLoad::Key(_))));
+}
