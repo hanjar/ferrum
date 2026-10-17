@@ -20,6 +20,7 @@ pub mod scheduler;
 pub mod status;
 pub mod store;
 pub mod test_run;
+pub mod watcher;
 
 #[cfg(test)]
 pub(crate) mod test_support;
