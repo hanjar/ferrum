@@ -371,19 +371,7 @@ export class AutomationStore {
     const seq = ++this.#reviewSeq;
     try {
       const detail = await this.#deps.backend.get(row.id);
-      let changes: FieldChange[] = [];
-      if (row.review?.reason === 'profileChanged') {
-        try {
-          const profile = await this.#deps.profiles.get(row.profileId);
-          const since = row.approvedRevision ?? row.review.from;
-          changes = profile.changes
-            .filter((c) => c.revision > since)
-            .sort((a, b) => a.revision - b.revision)
-            .flatMap((c) => c.changes);
-        } catch {
-          // The list of changes is informational; the review itself still works.
-        }
-      }
+      const changes = await this.#profileChanges(row);
       if (seq !== this.#reviewSeq) return;
       this.editor = null;
       this.review = {
@@ -407,6 +395,22 @@ export class AutomationStore {
     } catch (e) {
       if (seq !== this.#reviewSeq) return;
       this.notice = { kind: 'error', text: automationErrorMessage(codeOf(e)) };
+    }
+  }
+
+  /** What changed in the profile since the approved revision (field, from → to). */
+  async #profileChanges(row: AutomationRow): Promise<FieldChange[]> {
+    if (row.review?.reason !== 'profileChanged') return [];
+    try {
+      const profile = await this.#deps.profiles.get(row.profileId);
+      const since = row.approvedRevision ?? row.review.from;
+      return profile.changes
+        .filter((c) => c.revision > since)
+        .sort((a, b) => a.revision - b.revision)
+        .flatMap((c) => c.changes);
+    } catch {
+      // The list of changes is informational; the review itself still works.
+      return [];
     }
   }
 
@@ -442,7 +446,39 @@ export class AutomationStore {
   /** The approve button is enabled only after a passed test of exactly this draft (AP-4.4). */
   get canApprove(): boolean {
     const r = this.review;
-    return !!r && !!r.test && r.test.passed && !r.testing && !r.approving && !r.stale;
+    return (
+      !!r &&
+      !!r.test &&
+      r.test.passed &&
+      !r.testing &&
+      !r.approving &&
+      !r.stale &&
+      !this.resumeBlock
+    );
+  }
+
+  /**
+   * A re-review of a Once schedule that already fired can never be approved as it is (its date is
+   * past). Say so and point to Edit instead of looping test and approve.
+   */
+  get resumeBlock(): string | null {
+    const r = this.review;
+    if (!r || r.mode !== 'resume') return null;
+    const form = formFromDraft(r.draft, this.#deps.now());
+    if (!form || form.freq !== 'once') return null;
+    const bad = localErrors(form, this.#deps.now()).some(
+      (e) => e.code === 'time_passed' || e.code === 'date_out_of_range',
+    );
+    return bad ? 'This one-time schedule has passed — edit its date, then review again.' : null;
+  }
+
+  /** Stale in edit mode: open the editor again from the latest saved version. */
+  async reloadEdit(): Promise<void> {
+    const r = this.review;
+    if (!r?.id || r.approving) return;
+    const id = r.id;
+    this.closeEditor();
+    await this.openEdit(id);
   }
 
   /**
@@ -453,7 +489,8 @@ export class AutomationStore {
     const r = this.review;
     if (!r || !this.canApprove || !r.test) return;
     // Re-check the clock-dependent rules right before asking (a Once time may have passed).
-    const form = formFromDraft(r.draft, this.#deps.now());
+    // A re-review keeps its stored schedule; `resumeBlock` handles an expired Once there.
+    const form = r.mode === 'resume' ? null : formFromDraft(r.draft, this.#deps.now());
     const fresh = form ? localErrors(form, this.#deps.now()) : [];
     if (fresh.length > 0) {
       r.test = undefined;
@@ -505,19 +542,22 @@ export class AutomationStore {
     r.test = undefined;
     r.notice = { kind: 'error', text: STALE_TEXT };
     await this.load();
-    if (!r.id || this.review !== r) return;
+    // New: nothing stored. Edit: do NOT adopt the newer revision under the user's old draft (that
+    // would overwrite another window's change); the review offers Reload instead.
+    if (!r.id || r.mode !== 'resume' || this.review !== r) return;
     try {
       const detail = await this.#deps.backend.get(r.id);
       if (this.review !== r) return;
       r.expectedConfigRev = detail.automation.configRev;
-      if (this.editor?.id === r.id) this.editor.expectedConfigRev = detail.automation.configRev;
       r.row = this.rows.find((x) => x.id === r.id) ?? r.row;
-      if (r.mode === 'resume') {
-        r.draft = {
-          name: detail.automation.name,
-          profileId: detail.automation.profileId,
-          policy: detail.policy,
-        };
+      r.draft = {
+        name: detail.automation.name,
+        profileId: detail.automation.profileId,
+        policy: detail.policy,
+      };
+      if (r.row) {
+        r.changes = await this.#profileChanges(r.row);
+        r.approvedRevision = r.row.approvedRevision;
       }
     } catch {
       // Keep the old revision: the next approval then reports stale again, with the same text.

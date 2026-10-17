@@ -301,32 +301,89 @@ describe('AutomationStore', () => {
 });
 
 describe('AutomationStore rework R1', () => {
-  it('S1: after stale the stored configRev is re-read, so retest + approve succeeds', async () => {
+  it('R2-1: stale in EDIT mode keeps the old revision and Reload reopens the latest version', async () => {
     const detail = scheduleDetail();
-    let rev = detail.automation.configRev;
-    const approve = vi
-      .fn()
-      .mockResolvedValueOnce(fixture('automation-approve-stale.json'))
-      .mockResolvedValue(fixture('automation-approve.json'));
-    const { store } = make({
-      approve: approve as never,
-      get: vi.fn(async () => ({ ...detail, automation: { ...detail.automation, configRev: rev } })),
-    });
+    let latest = {
+      ...detail,
+      automation: { ...detail.automation, name: 'Changed elsewhere', configRev: 9 },
+    };
+    let served = detail;
+    const approve = vi.fn().mockResolvedValueOnce(fixture('automation-approve-stale.json'));
+    const { store } = make({ approve: approve as never, get: vi.fn(async () => served) });
     await store.load();
     await store.openEdit(detail.automation.id);
     await settle();
     store.continueToReview();
     await store.runTest();
-    rev = 9; // changed elsewhere
+    served = latest;
     await store.approve();
     expect(store.review?.notice?.text).toBe('The profile or automation changed — review again');
+    expect(store.review?.expectedConfigRev).toBe(detail.automation.configRev); // not rebased
+    expect(store.canApprove).toBe(false);
+    await store.reloadEdit();
+    expect(store.view).toBe('editor');
+    expect(store.editor?.expectedConfigRev).toBe(9);
+    expect(store.editor?.form.name).toBe('Changed elsewhere');
+    expect(store.review).toBeNull();
+    latest = served;
+    store.dispose();
+  });
+
+  it('R2-1/R2-4: stale in RESUME mode re-reads revision, draft and the profile changes; retest + approve succeeds', async () => {
+    const base = fixture<Record<string, unknown>>('automation-get.json') as never as ReturnType<
+      typeof scheduleDetail
+    >;
+    let rev = 2;
+    const approve = vi
+      .fn()
+      .mockResolvedValueOnce(fixture('automation-approve-stale.json'))
+      .mockResolvedValue(fixture('automation-approve.json'));
+    const profiles = fakeProfiles();
+    const { store } = make({
+      approve: approve as never,
+      get: vi.fn(async () => ({ ...base, automation: { ...base.automation, configRev: rev } })),
+    });
+    (store as unknown as { profiles: unknown }).profiles = store.profiles;
+    await store.load();
+    await store.openReview(rows()[1]);
+    await store.runTest();
+    rev = 9;
+    await store.approve();
     expect(store.review?.expectedConfigRev).toBe(9);
+    expect(store.review?.changes.length).toBeGreaterThan(0);
     expect(store.canApprove).toBe(false);
     await store.runTest();
     await store.approve();
     expect(approve).toHaveBeenLastCalledWith(expect.objectContaining({ expectedConfigRev: 9 }));
     expect(store.view).toBe('list');
+    void profiles;
     store.dispose();
+  });
+
+  it('R2-2: an expired Once in a re-review is blocked with a pointer to Edit, no test loop', async () => {
+    const base = fixture<Record<string, unknown>>('automation-get.json') as never as ReturnType<
+      typeof scheduleDetail
+    >;
+    const policy = {
+      ...base.policy,
+      trigger: {
+        kind: 'schedule' as const,
+        freq: { kind: 'once' as const, date: '2026-01-01' },
+        time: '02:00',
+        tz: 'UTC',
+        missed: 'skip' as const,
+      },
+    };
+    const { store, backend } = make({ get: vi.fn(async () => ({ ...base, policy })) });
+    await store.load();
+    await store.openReview(rows()[1]);
+    await store.runTest();
+    expect(store.review?.test?.passed).toBe(true);
+    expect(store.resumeBlock).toMatch(/one-time schedule has passed/);
+    expect(store.canApprove).toBe(false);
+    await store.approve();
+    expect(backend.approve).not.toHaveBeenCalled();
+    expect(store.review?.test).toBeTruthy(); // the test is not thrown away
   });
 
   it('S3: a Once time that passed while waiting blocks Continue and Approve', async () => {

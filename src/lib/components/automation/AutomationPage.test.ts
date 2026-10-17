@@ -10,6 +10,7 @@ import {
   fixture,
   profileSummary,
   rows,
+  scheduleDetail,
   type FakeBackend,
 } from './automationTestKit';
 
@@ -448,5 +449,41 @@ describe('rework R1 (review of PR 35)', () => {
     const review = await screen.findByTestId('automation-review');
     expect(review.textContent).toContain('In the background');
     expect(review.textContent).not.toContain('While Ferrum is running');
+  });
+
+  it('R2-3: a stored Background runtime shows as the selected (unavailable) card and blocks Continue', async () => {
+    const detail = scheduleDetail();
+    detail.policy = { ...detail.policy, runtime: 'background' };
+    setup({ get: vi.fn(async () => detail) });
+    await fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    const bg = (await waitFor(() => {
+      const el = document.querySelector('[data-runtime="background"]');
+      if (!el) throw new Error('no card');
+      return el;
+    })) as HTMLButtonElement;
+    expect(bg.getAttribute('aria-checked')).toBe('true');
+    expect(bg.disabled).toBe(true);
+    expect(document.querySelector('[data-runtime="app"]')!.getAttribute('aria-checked')).toBe(
+      'false',
+    );
+    expect((await screen.findByTestId('editor-errors')).textContent).toContain(
+      "The background runner isn't included in this Ferrum build.",
+    );
+    expect(continueBtn2().disabled).toBe(true);
+  });
+
+  it('R2-1: after stale in edit mode the review offers Reload', async () => {
+    const { store } = setup({
+      approve: vi.fn(async () => fixture('automation-approve-stale.json') as never),
+    });
+    await fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    await waitFor(() => expect(continueBtn2().disabled).toBe(false));
+    await fireEvent.click(continueBtn2());
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run test' }));
+    await screen.findByTestId('test-passed');
+    await fireEvent.click(screen.getByRole('button', { name: 'Approve & save' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Reload' }));
+    await screen.findByTestId('automation-editor');
+    expect(store.view).toBe('editor');
   });
 });

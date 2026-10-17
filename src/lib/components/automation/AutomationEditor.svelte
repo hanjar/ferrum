@@ -193,7 +193,14 @@
   <section>
     <div class="lbl">Runtime</div>
     <div class="cards" role="radiogroup" aria-label="Runtime">
-      <button type="button" role="radio" class="card sel" aria-checked="true" data-runtime="app">
+      <button
+        type="button"
+        role="radio"
+        class="card"
+        class:sel={form.runtime === 'app'}
+        aria-checked={form.runtime === 'app'}
+        data-runtime="app"
+      >
         <span class="top"
           ><span class="name">While Ferrum is running</span><span class="chip ok">Available</span
           ></span
@@ -204,7 +211,8 @@
         type="button"
         role="radio"
         class="card off"
-        aria-checked="false"
+        class:sel={form.runtime === 'background'}
+        aria-checked={form.runtime === 'background'}
         aria-disabled="true"
         disabled
         data-runtime="background"

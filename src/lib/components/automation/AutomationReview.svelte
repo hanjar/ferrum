@@ -195,6 +195,16 @@
     </p>
   {/if}
 
+  {#if store.resumeBlock}
+    <p class="banner error" role="alert" data-testid="resume-block">{store.resumeBlock}</p>
+  {/if}
+  {#if review.stale && review.mode === 'edit'}
+    <p class="banner">
+      <button type="button" onclick={() => void store.reloadEdit()}>Reload</button>
+      Reload opens the editor again with the latest saved version.
+    </p>
+  {/if}
+
   <footer class="footer">
     <button type="button" disabled={review.approving} onclick={() => store.backFromReview()}>
       Back
