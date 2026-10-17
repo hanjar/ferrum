@@ -1089,3 +1089,69 @@ fn a_share_that_is_back_is_compared_before_anything_runs() {
     );
     assert_eq!(rig.runs().len(), 0, "nothing runs without a comparison");
 }
+
+// ── The read-only comparison is a gate mode, not a way around the gate ──
+
+#[test]
+fn the_compare_gate_takes_no_lease_and_refuses_a_held_or_paused_automation() {
+    use super::{GateCtx, GateKind, GateRefusal, RunMode, gate};
+    let w = setup();
+    let env = crate::sync_engine::test_support::test_env();
+    let lease_env = w.rig.lease_env(7);
+    let unmet = |_: &crate::automation::model::Conditions| None;
+    let ctx = GateCtx {
+        store: &w.rig.fx.store,
+        keys: w.rig.fx.keys.as_ref(),
+        class: HostClass::App,
+        lease_env: &lease_env,
+        env: &env,
+        unmet_condition: &unmet,
+    };
+    let ok = gate(&ctx, &w.id, GateKind::Compare).expect("a healthy automation compares");
+    assert!(ok.lease().is_none(), "a comparison holds no lease");
+    assert!(matches!(ok.mode(), RunMode::Compare));
+    drop(ok);
+
+    // A hold is NOT resolved by a comparison (a recheck of the run it names is).
+    let set = |a: Option<&Attention>| {
+        w.rig
+            .fx
+            .store
+            .with_write(|c| runtime::set_attention(c, &w.id, a, w.rig.now()))
+            .expect("write");
+    };
+    set(Some(&Attention {
+        kind: AttentionKind::Failed,
+        run_id: 1,
+        text: "1 failed".into(),
+    }));
+    assert!(matches!(
+        gate(&ctx, &w.id, GateKind::Compare),
+        Err(GateRefusal::Held)
+    ));
+    set(None);
+    // A paused automation compares nothing either (unlike a recheck, which may look).
+    sql_bump(
+        &w,
+        &format!("UPDATE automations SET enabled = 0 WHERE id = '{}'", w.id),
+    );
+    assert!(matches!(
+        gate(&ctx, &w.id, GateKind::Compare),
+        Err(GateRefusal::Disabled)
+    ));
+    // The approval is verified: a key that is gone refuses.
+    sql_bump(
+        &w,
+        &format!("UPDATE automations SET enabled = 1 WHERE id = '{}'", w.id),
+    );
+    w.rig
+        .fx
+        .memory
+        .as_ref()
+        .expect("memory keys")
+        .set(crate::automation::dpapi::KeyLoad::Missing);
+    assert!(matches!(
+        gate(&ctx, &w.id, GateKind::Compare),
+        Err(GateRefusal::NeedsReview(_))
+    ));
+}

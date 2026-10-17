@@ -1153,6 +1153,48 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   false clock passes the same local time again, that occurrence can run twice (once for the false clock, once for the real
   one). The Warn event makes it visible; a mark within 26 hours is never clamped, so ordinary corrections cannot repeat a run.
 
+### 9.8 P2.1 implementation notes (as built)
+
+- **Modules.** `automation/watcher.rs` is the source of change events and nothing else (no store, queue, gate or
+  engine): the `WatchFactory` trait (production: `notify`, recursive), the event filter, the inbox of counts and the
+  burst timer. `automation/host/watch.rs` is the host's hook, `power.rs` adds local volume arrival and removal
+  (`WM_DEVICECHANGE`), `host/runner.rs` runs the read-only comparison. `HostDeps::watch_factory` is the ONLY source of
+  change events; the tests replace it with a factory they feed by hand. Source tests keep the gate, proof, engine and
+  user kinds out of `watcher.rs` and `watch.rs`, and any directory listing out of both.
+- **Event paths are untrusted.** A backend event is classified in the sink on the backend's thread (under the root, not
+  excluded, not the engine's staging or backup name, not the versioning root, no `.`/`..`, no control character) and
+  reduced to a COUNT. No path is stored, logged or used for an operation; the engine compares afresh (WA-2.4). An event
+  is read as a file: an excluded folder hides everything below it. Only the excluded folder's own entry can cause a
+  spurious comparison.
+- **The hook only queues.** A burst that went quiet (idle delay) or reached the maximum wait becomes a `Watch` entry
+  through `request::trigger_tx` (approval must VERIFY, no hold, enabled; user kinds refused), merged by the queue rules of
+  FER-525 (a merged trigger never changes the kind or `enqueued_ms` of a user's entry). `trigger_tx` also accepts
+  `PendingRerun`, `Available` and `Startup`.
+- **Comparison before a run (WA-3.2, WA-5.2, WA-6, WA-7).** "Checking" is a real comparison: `GateKind::Compare` is the
+  read-only sibling of `Recheck` (approval verified, enabled, no hold, roots present and approved, NO lease, NO optional
+  conditions), the engine runs with `dry_run`, and the answer is `InSync` (no run, event), `Differences` (one queue entry
+  of the matching kind), `Unreliable` (Needs recheck, retry after 60 s), `Device` (Waiting for device) or a refusal.
+  `run_gated` checks that a `Compare` proof is only used for a dry run.
+- **Self-generated changes (WA-4).** The window of a run is read from the history (`runs::since`), not from a live
+  flag: a batch of events belongs to a run that was active since the previous look, or that ended less than 3 s ago. Such
+  events set the single `pending_rerun` flag ("5 file events during the active run -> 1 pending rerun", further events are
+  merged silently); 1.5 s after the run ended one comparison decides, and "Ignored N changes written by run #id
+  (self-generated) - no rerun" is logged when nothing is left to do.
+- **Offline roots (WA-5).** A local drive is looked at when Windows says a volume came or went (and at host start and
+  resume); there is no timer for it. A UNC root of an automation that waits for the device is probed at most every 30 s
+  (`roots::probe`: opens the folder, reads its identity, never lists it). While a root is missing no watcher is held,
+  nothing is compared, nothing is queued. A network root that is WATCHED is Unsupported (validation already refuses it);
+  a share that is only the other side of the profile is fine.
+- **Resources.** A watcher exists only for an automation that is enabled, approved, not held, of this host's class and
+  only while this process hosts. It is released when the automation is paused, deleted, held, sent to review or edited,
+  when a root is lost, when this process stops hosting and at shutdown (`Host::shutdown`). The host reads the automations
+  again when the store changed (cheap signature check) and fully verifies them every 30 s.
+- **Known limits.** `notify` 7 on Windows does not report a buffer overflow of `ReadDirectoryChangesW` (no rescan flag)
+  and does not tell when the watched folder itself is deleted; Needs recheck therefore comes from a `Rescan` flag or a
+  backend failure, and a deleted watch folder is noticed by the next comparison or volume event. A comparison needs
+  `Differences` from the engine's dry run; a conflict-only difference queues a run (it ends in a hold, as any run does).
+  While a hold lasts the machine is frozen and events are not logged (the watcher is released, as the task asks).
+
 ## 10. Threat model and security controls
 
 ### 10.1 Assets, actors, trust boundaries

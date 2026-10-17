@@ -806,7 +806,11 @@ fn step<D: HostDeps>(
     let win = if need_window {
         match inner.store.with_read(|conn| window_of(conn, t, now)) {
             Ok(w) => w,
-            Err(_) => return, // the store cannot say: look again at the next pass
+            Err(_) => {
+                // The store cannot say: what was counted waits for the next pass.
+                t.shared.inbox.restore(drained);
+                return;
+            }
         }
     } else {
         Window {
@@ -870,7 +874,8 @@ fn step<D: HostDeps>(
     });
     t.last_drain_ms = now;
     let Ok(out) = result else {
-        // The store failed: what was drained is lost, so make sure the next comparison covers it.
+        // The transaction was rolled back: what was counted waits for the next pass.
+        t.shared.inbox.restore(drained);
         return;
     };
     if out.drop_handles {

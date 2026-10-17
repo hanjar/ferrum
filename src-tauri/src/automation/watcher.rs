@@ -265,6 +265,14 @@ impl Inbox {
         first && !delta.is_empty()
     }
 
+    /// Give back what was taken but could not be handled (the store failed): nothing is lost.
+    pub fn restore(&self, drained: Drained) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .absorb(drained);
+    }
+
     /// Take everything counted so far.
     pub fn take(&self) -> Drained {
         std::mem::take(&mut *self.state.lock().unwrap_or_else(|p| p.into_inner()))
@@ -530,6 +538,12 @@ mod tests {
         // An event the filter drops wakes nobody.
         sink(RawEvent::Change(vec![r"C:\R\y.tmp".into()]));
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        // What could not be handled is given back and adds to what came meanwhile.
+        sink(RawEvent::Change(vec![r"C:\R\z.txt".into()]));
+        let taken = inbox.take();
+        sink(RawEvent::Change(vec![r"C:\R\w.txt".into()]));
+        inbox.restore(taken);
+        assert_eq!(inbox.take().changes, 2);
     }
 
     #[test]
