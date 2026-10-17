@@ -12,8 +12,9 @@
 //!   root), and is then forgotten: only a COUNT leaves this file. No path is ever used to build an
 //!   operation, a log line or a file name; the sync engine always compares the folders afresh
 //!   (WA-2.4).
-//! - **No polling.** [`NotifyFactory`] is backed by the operating system's change notification
-//!   (`ReadDirectoryChangesW` through `notify`). There is no timer that lists a folder, and no
+//! - **No polling.** [`ProductionFactory`] is backed by the operating system's change notification:
+//!   on Windows the own `ReadDirectoryChangesW` backend (`rdcw.rs`, FER-565: it reports buffer
+//!   overflow and a lost watch, which `notify` 7 does not); elsewhere `notify`. There is no timer that lists a folder, and no
 //!   fallback for a root without notifications (a network share is Unsupported, WA-2.3). The
 //!   host talks to the factory through [`WatchFactory`], so the tests replace it with one that the
 //!   test feeds by hand, and can assert it is the ONLY source of events.
@@ -38,9 +39,10 @@ use crate::sync_engine::roots::{self, RootProbeOutcome};
 pub enum RawEvent {
     /// Something under the root changed (created, changed, renamed or removed).
     Change(Vec<String>),
-    /// The backend says it lost events (the `notify` rescan flag).
+    /// The backend lost events (a full kernel buffer, or the `notify` rescan flag).
     Overflow,
-    /// The backend failed: what it reported can no longer be trusted (the watch was lost).
+    /// The backend failed: the watch was lost (root deleted, access lost, any error) and what it
+    /// reported can no longer be trusted.
     Failed,
 }
 
@@ -48,7 +50,13 @@ pub enum RawEvent {
 pub type Sink = Arc<dyn Fn(RawEvent) + Send + Sync>;
 
 /// A running watch. Dropping it stops the watch and frees what the operating system holds.
-pub trait WatchHandle: Send {}
+pub trait WatchHandle: Send {
+    /// `false` once the backend knows the watch is gone (its worker reported [`RawEvent::Failed`]).
+    /// The host counts a dead watch as missing and puts a new one in place.
+    fn alive(&self) -> bool {
+        true
+    }
+}
 
 /// Why a watch could not be started. Carries no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,9 +74,19 @@ pub trait WatchFactory: Send + Sync {
 
 // ── The `notify` backend ──
 
-/// Change notifications from the operating system (`notify`, recursive).
+/// The backend the application uses: the own `ReadDirectoryChangesW` watcher on Windows.
+#[cfg(windows)]
+pub type ProductionFactory = crate::automation::rdcw::RdcwFactory;
+/// The backend the application uses (`notify`; the product is Windows only for now).
+#[cfg(not(windows))]
+pub type ProductionFactory = NotifyFactory;
+
+/// Change notifications from the operating system through `notify` (recursive). Not used on
+/// Windows, where `notify` 7 neither reports overflow nor a watch that died.
+#[cfg_attr(windows, allow(dead_code))]
 pub struct NotifyFactory;
 
+#[cfg_attr(windows, allow(dead_code))]
 struct NotifyHandle {
     // Held for its Drop: the watcher stops (and its thread ends) when this goes.
     _watcher: notify::RecommendedWatcher,
@@ -77,6 +95,7 @@ struct NotifyHandle {
 impl WatchHandle for NotifyHandle {}
 
 /// Turn one `notify` result into a [`RawEvent`] (`None` = not a change: a read, an open, ...).
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn map_notify(res: notify::Result<notify::Event>) -> Option<RawEvent> {
     use notify::EventKind;
     match res {
@@ -616,6 +635,7 @@ mod tests {
     /// The real backend: a nested change under the root is delivered (recursive). The temp path is
     /// compared in canonical form (a runner's temp dir may be an 8.3 name such as `RUNNER~1`), and
     /// the test waits on a channel with a timeout, re-touching the file until the event arrives.
+    #[cfg(not(windows))]
     #[test]
     fn real_notify_delivers_a_nested_change() {
         let tmp = tempfile::tempdir().expect("temp dir");
