@@ -372,6 +372,9 @@ test.describe('FER-527 Automation detail, history and dialogs (mock IPC)', () =>
     await expect(page.getByTestId('run-recheck')).toContainText('Decide in Sync');
     await expect(page.getByRole('button', { name: /Retry remaining/ })).toHaveCount(0);
 
+    const before = await page.evaluate(
+      () => (window as unknown as { __calls: Calls }).__calls.length,
+    );
     await page.getByRole('button', { name: 'Review in Sync \u2197' }).click();
     await expect(
       page.getByRole('complementary', { name: 'Synchronize Directories' }),
@@ -385,14 +388,10 @@ test.describe('FER-527 Automation detail, history and dialogs (mock IPC)', () =>
     const all = await page.evaluate(() =>
       (window as unknown as { __calls: Calls }).__calls.map((c) => c.cmd),
     );
-    const forbidden = all.filter(
-      (c) =>
-        c !== 'copy_control_snapshot' &&
-        /copy|move|delete|sync_baseline_save|sync_lease_acquire|automation_run_now|automation_retry/.test(
-          c,
-        ),
-    );
-    expect(forbidden).toEqual([]);
+    // Allow-list of read-only commands: anything else fails the test.
+    const readOnly =
+      /^(plugin:|load_prefs$|save_prefs$|list_dir$|list_drives$|watch_(start|stop)$|sync_profile_(list|get)$|automation_(list|get|history|run_ops|events|recheck)$|compare_dirs$|compare_cancel$|disk_usage_fast_eligibility$|sync_baseline_load$|validate_sync_roots$|copy_control_snapshot$)/;
+    expect(all.slice(before).filter((c) => !readOnly.test(c))).toEqual([]);
   });
 
   test('detail page: live progress, Stop dialog and Pause dialog', async () => {

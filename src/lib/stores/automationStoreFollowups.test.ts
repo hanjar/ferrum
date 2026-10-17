@@ -215,4 +215,46 @@ describe('Live operation list, events cursor and cleanup (review S2, S3, NITs)',
     // The fixture row is scheduled (not running): the run is over.
     expect(toast.message).toBe(`${store.rows[0].name} paused`);
   });
+
+  it('R2-1: a background reload does not swallow a page change', async () => {
+    const gate = deferred<RunOpsPage>();
+    const page = (total: number): RunOpsPage => ({ ops: [], total, stored: total });
+    const runOps = vi
+      .fn<(r: number, o: number, l: number) => Promise<RunOpsPage>>()
+      .mockResolvedValueOnce(page(450)) // page 1 on open
+      .mockReturnValueOnce(gate.promise) // "Next 200" in flight
+      .mockResolvedValue(page(450)); // background reloads
+    const { store } = make({ runOps, get: vi.fn(async () => photoDetail()) });
+    await store.openDetail(ID);
+    store.toggleOps(store.detail!.data!.currentRun!);
+    await vi.advanceTimersByTimeAsync(0);
+    void store.loadOps(1044, 200);
+    store.applyProgress(progress(3));
+    await vi.advanceTimersByTimeAsync(1000); // the progress timer fires while page 2 loads
+    expect(runOps).toHaveBeenLastCalledWith(1044, 200, 200);
+    gate.resolve(page(450));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.opsByRun[1044].offset).toBe(200);
+    await store.refreshDetail();
+    expect(runOps).toHaveBeenLastCalledWith(1044, 200, 200);
+    expect(store.opsByRun[1044].offset).toBe(200);
+  });
+
+  it('R2-2: the ops list of a run that ended is no longer reloaded', async () => {
+    const ended = photoDetail();
+    ended.currentRun = undefined;
+    const get = vi
+      .fn<(id: string) => Promise<AutomationDetail>>()
+      .mockResolvedValueOnce(photoDetail())
+      .mockResolvedValue(ended);
+    const { store, backend } = make({ get });
+    await store.openDetail(ID);
+    store.toggleOps(store.detail!.data!.currentRun!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.runOps).toHaveBeenCalledTimes(1);
+    await store.refreshDetail();
+    expect(store.opsOpen[1044]).toBeUndefined();
+    await store.refreshDetail();
+    expect(backend.runOps).toHaveBeenCalledTimes(1);
+  });
 });

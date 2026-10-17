@@ -205,6 +205,8 @@ export class AutomationStore {
   #historySeq = 0;
   #detailSeq = 0;
   #opsSeq: Record<number, number> = {};
+  /** The offset last REQUESTED per run; background reloads use it, never the on-screen offset. */
+  #opsWanted: Record<number, number> = {};
   #opsTimer: ReturnType<typeof setTimeout> | null = null;
   #progressRefresh = false;
   #validateSeq = 0;
@@ -494,6 +496,10 @@ export class AutomationStore {
       d.data = data;
       d.error = null;
       this.#mergeEvents(d, data);
+      // The current-run card is gone when its run ended: stop fetching its operations.
+      for (const key of Object.keys(this.opsOpen)) {
+        if (data.currentRun?.id !== Number(key)) delete this.opsOpen[Number(key)];
+      }
     } catch (e) {
       if (seq !== this.#detailSeq || this.detail !== d) return;
       d.error = automationErrorMessage(codeOf(e));
@@ -530,7 +536,7 @@ export class AutomationStore {
     for (const [k, v] of Object.entries(this.opsOpen)) if (v) ids[Number(k)] = true;
     for (const key of Object.keys(ids)) {
       const runId = Number(key);
-      void this.loadOps(runId, this.opsByRun[runId]?.offset ?? 0);
+      void this.loadOps(runId, this.#opsWanted[runId] ?? 0);
     }
   }
 
@@ -588,7 +594,7 @@ export class AutomationStore {
     if ((this.expanded[p.runId] || this.opsOpen[p.runId]) && !this.#opsTimer) {
       this.#opsTimer = setTimeout(() => {
         this.#opsTimer = null;
-        void this.loadOps(p.runId, this.opsByRun[p.runId]?.offset ?? 0);
+        void this.loadOps(p.runId, this.#opsWanted[p.runId] ?? 0);
       }, 1000);
     }
   }
@@ -614,6 +620,7 @@ export class AutomationStore {
   /** One page (200) of a run's stored operations. */
   async loadOps(runId: number, offset: number): Promise<void> {
     const seq = (this.#opsSeq[runId] = (this.#opsSeq[runId] ?? 0) + 1);
+    this.#opsWanted[runId] = offset;
     const prev = this.opsByRun[runId];
     // The pager keeps showing the offset of the rows on screen until the new page arrives.
     this.opsByRun[runId] = {
