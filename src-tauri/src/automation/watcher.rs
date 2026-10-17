@@ -202,12 +202,12 @@ impl EventFilter {
         }
         let rel = rel.join("\\");
         // The event does not say whether the path is a file or a folder, and the file system is
-        // not asked. A path is read as a file: an excluded FOLDER hides everything below it (the
-        // ancestors are checked as folders), and a folder that is not itself selected by an
-        // include list only matters through the files in it. The one case this over-reports is
-        // the excluded folder's own entry, which costs a comparison that finds nothing.
+        // not asked, so the path counts if the profile would show it as EITHER: renaming or moving
+        // a whole folder produces one event for the folder itself (none for what is inside), and
+        // with an include list such as `*.md` only the folder reading counts it. Excludes apply to
+        // both readings (and to every ancestor). The price is a spurious comparison now and then.
         let visible = match &self.filter {
-            Some(f) => f.visible(&rel, false),
+            Some(f) => f.visible(&rel, false) || f.visible(&rel, true),
             None => !crate::sync_engine::filters::is_builtin_exclude(&rel),
         };
         if visible {
@@ -271,6 +271,11 @@ impl Inbox {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .absorb(drained);
+    }
+
+    /// Look at what is counted without taking it.
+    pub fn peek(&self) -> Drained {
+        *self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Take everything counted so far.
@@ -461,11 +466,25 @@ mod tests {
     }
 
     #[test]
-    fn an_include_list_hides_what_it_does_not_select() {
+    fn an_include_list_counts_folders_that_may_hold_selected_files() {
         let f = EventFilter::new(r"C:\R", &[], &filters(&["*.md"], &[]));
         assert_eq!(f.classify(r"C:\R\notes.md"), PathClass::Change);
         assert_eq!(f.classify(r"C:\R\deep\notes.md"), PathClass::Change);
-        assert_eq!(f.classify(r"C:\R\notes.txt"), PathClass::Ignored);
+        // S2: a folder may hold included files, and renaming it is ONE event for the folder.
+        assert_eq!(f.classify(r"C:\R\docs-old"), PathClass::Change);
+        assert_eq!(f.classify(r"C:\R\docs\sub"), PathClass::Change);
+        // Built-in and explicit excludes still win over the folder reading.
+        let f = EventFilter::new(r"C:\R", &[], &filters(&["*.md"], &["cache/"]));
+        // The folder reading is excluded and the file reading is not selected by the include list.
+        assert_eq!(f.classify(r"C:\R\cache"), PathClass::Ignored);
+        // Without an include list the excluded folder's own entry reads as a file: one spurious
+        // comparison, no more.
+        let g = EventFilter::new(r"C:\R", &[], &filters(&[], &["cache/"]));
+        assert_eq!(g.classify(r"C:\R\cache"), PathClass::Change);
+        assert_eq!(g.classify(r"C:\R\cache\deep"), PathClass::Ignored);
+        assert_eq!(f.classify(r"C:\R\cache\deep"), PathClass::Ignored);
+        assert_eq!(f.classify(r"C:\R\.x.ferrum-stage-1-1"), PathClass::Ignored);
+        assert_eq!(f.classify(r"C:\R\$RECYCLE.BIN"), PathClass::Ignored);
     }
 
     #[test]

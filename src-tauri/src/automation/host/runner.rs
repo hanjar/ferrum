@@ -75,6 +75,13 @@ impl<D: HostDeps> Drop for CheckGuard<D> {
 /// Watch comparisons that may run at the same time (they only read).
 const MAX_COMPARES: usize = 2;
 
+/// Is there room for another watch comparison right now? (The hook does not start work, or write
+/// anything, while there is not.)
+pub(super) fn has_capacity<D: HostDeps>(inner: &Arc<Inner<D>>) -> bool {
+    let state = inner.lock();
+    !state.shutdown && state.comparing < MAX_COMPARES
+}
+
 /// Start the read-only comparison of a watch trigger on its own thread. `false` = no capacity
 /// right now (the hook asks again at its next pass).
 pub(super) fn begin_check<D: HostDeps>(

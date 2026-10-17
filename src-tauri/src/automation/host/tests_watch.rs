@@ -49,6 +49,10 @@ fn watch(on_changes: bool, on_available: bool) -> AutomationPolicy {
 }
 
 fn setup_with(policy: AutomationPolicy, exclude: Option<&str>) -> W {
+    setup_full(policy, exclude, None)
+}
+
+fn setup_full(policy: AutomationPolicy, exclude: Option<&str>, include: Option<&str>) -> W {
     let rig = Rig::new();
     let remaining = Arc::new(AtomicUsize::new(0));
     let r = remaining.clone();
@@ -60,9 +64,12 @@ fn setup_with(policy: AutomationPolicy, exclude: Option<&str>) -> W {
             completed(3)
         }
     }));
-    let (profile, revision) = rig.fx.profile("W");
+    let (profile, mut revision) = rig.fx.profile("W");
     if let Some(pattern) = exclude {
-        rig.fx.bump_profile(&profile, revision, pattern);
+        revision = rig.fx.bump_profile(&profile, revision, pattern);
+    }
+    if let Some(pattern) = include {
+        rig.fx.bump_profile_include(&profile, revision, pattern);
     }
     let id = rig.fx.new_automation("W", &profile, policy);
     let left = rig.fx.profile_policy(&profile).left.path;
@@ -153,12 +160,25 @@ struct Held {
 
 impl Held {
     fn install(w: &W) -> Held {
+        Self::build(w, false)
+    }
+
+    /// The comparison (a dry run) blocks instead of the run.
+    fn install_dry(w: &W) -> Held {
+        Self::build(w, true)
+    }
+
+    fn build(w: &W, block_dry: bool) -> Held {
         let entered = Arc::new(AtomicBool::new(false));
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let (e, g, r) = (entered.clone(), gate.clone(), w.remaining.clone());
         w.rig.world.set_script(script(move |_, call| {
-            if call.dry_run {
-                return dry_run(r.load(Ordering::SeqCst), 0);
+            if call.dry_run != block_dry {
+                if call.dry_run {
+                    return dry_run(r.load(Ordering::SeqCst), 0);
+                }
+                r.store(0, Ordering::SeqCst);
+                return completed(3);
             }
             e.store(true, Ordering::SeqCst);
             let (lock, cv) = &*g;
@@ -166,10 +186,31 @@ impl Held {
             while !*open {
                 open = cv.wait(open).unwrap();
             }
+            if call.dry_run {
+                return dry_run(r.load(Ordering::SeqCst), 0);
+            }
             r.store(0, Ordering::SeqCst);
             completed(3)
         }));
         Held { entered, gate }
+    }
+
+    /// A gate with no script: the caller's script calls [`Held::block`].
+    fn raw() -> Held {
+        Held {
+            entered: Arc::new(AtomicBool::new(false)),
+            gate: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    /// Called from inside a script: say so, and wait for [`Held::open`].
+    fn block(&self) {
+        self.entered.store(true, Ordering::SeqCst);
+        let (lock, cv) = &*self.gate;
+        let mut open = lock.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
     }
 
     /// Wait until the run is inside the engine (a channel-style wait, not a fixed sleep).
@@ -414,6 +455,13 @@ fn events_while_a_run_is_queued_are_merged_into_it_and_never_change_a_user_reque
     );
     assert!(after[0].merged_count > before[0].merged_count);
     assert!(w.has_event("3 changes merged into the queued run"));
+    // More events for the same queued entry do not write more lines (NIT-1).
+    for _ in 0..3 {
+        w.advance(SEC);
+        w.emit(2);
+        tick(&w.host);
+    }
+    assert_eq!(w.count_events("merged into the queued run"), 1);
     assert_ne!(w.state(), TriggerState::Quiet);
     // When the condition is met the user's request runs, as the user asked.
     *w.rig.world.unmet.lock().unwrap() = None;
@@ -931,18 +979,17 @@ impl crate::sync_engine::roots::RootProbe for ShareProbe {
 
 /// A watch automation on a local folder that syncs to `\nas\backup\proj` (approved with the
 /// share probe). Returns `(rig, host, automation id, local root, share root)`.
-fn share_destination() -> (Rig, Host<FakeDeps>, String, String, String) {
+fn share_automation(rig: &Rig, n: usize) -> (String, String, String) {
     use crate::automation::commands::{self, SaveRequest, SaveResultDto};
     use crate::automation::model::{
         Draft, DraftGuard, PolicyDraft, WireCompare, WireDeletePolicy, WireMode, WireSide,
     };
-    let rig = Rig::new();
     let probe: Arc<dyn crate::sync_engine::roots::RootProbe> = Arc::new(ShareProbe);
-    let left = rig.fx.tmp.path().join("share-left");
+    let left = rig.fx.tmp.path().join(format!("share-left-{n}"));
     std::fs::create_dir_all(&left).expect("left");
-    let share = r"\\nas\backup\proj".to_string();
+    let share = format!(r"\\nas\backup\proj{n}");
     let draft = Draft {
-        name: "Share".into(),
+        name: format!("Share {n}"),
         policy: PolicyDraft {
             left: left.to_string_lossy().into_owned(),
             right: share.clone(),
@@ -976,7 +1023,7 @@ fn share_destination() -> (Rig, Host<FakeDeps>, String, String, String) {
     let SaveResultDto::Saved { profile } = saved else {
         panic!("expected saved");
     };
-    let auto = Fixture::auto_draft("Share", &profile.id, watch(true, true));
+    let auto = Fixture::auto_draft(&format!("Share {n}"), &profile.id, watch(true, true));
     let dry =
         |_: &crate::automation::model::ProfilePolicy| crate::automation::test_run::DryRun::Done {
             summary: crate::sync_engine::plan::PlanSummary::default(),
@@ -1008,6 +1055,13 @@ fn share_destination() -> (Rig, Host<FakeDeps>, String, String, String) {
         other => panic!("expected approved, got {other:?}"),
     };
     let local = rig.fx.profile_policy(&profile.id).left.path;
+    (id, local, share)
+}
+
+/// One automation with a share destination, on a rig and host of its own.
+fn share_destination() -> (Rig, Host<FakeDeps>, String, String, String) {
+    let rig = Rig::new();
+    let (id, local, share) = share_automation(&rig, 0);
     let host = rig.host(1, HostClass::App);
     (rig, host, id, local, share)
 }
@@ -1154,4 +1208,265 @@ fn the_compare_gate_takes_no_lease_and_refuses_a_held_or_paused_automation() {
         gate(&ctx, &w.id, GateKind::Compare),
         Err(GateRefusal::NeedsReview(_))
     ));
+}
+
+// ── Review R1 ──
+
+/// S1: changes noted while the comparison ran are not thrown away when it says "in sync".
+#[test]
+fn changes_noted_during_a_comparison_start_a_countdown_when_it_finds_sync() {
+    let w = setup();
+    let held = Held::install_dry(&w);
+    w.host.tick(); // the start comparison begins and blocks inside the engine
+    held.wait_entered();
+    assert_eq!(w.state(), TriggerState::Checking);
+    w.advance(SEC);
+    w.emit(4);
+    w.host.tick();
+    assert!(w.has_event("4 changes noted"));
+    assert_eq!(
+        w.state(),
+        TriggerState::Checking,
+        "no countdown while comparing"
+    );
+    held.open();
+    settle(&w.host);
+    // The comparison saw the folders in sync, but the walk may have passed the changes already.
+    assert_eq!(w.state(), TriggerState::Quiet);
+    assert_eq!(w.kind(), StatusKind::Quiet);
+    assert_eq!(w.rig.runs().len(), 0);
+    w.advance(SEC);
+    tick(&w.host);
+    assert_eq!(
+        w.state(),
+        TriggerState::Quiet,
+        "the idle delay has not passed"
+    );
+    w.advance(9 * SEC);
+    tick(&w.host);
+    assert_eq!(w.state(), TriggerState::Quiet);
+    w.advance(2 * SEC);
+    tick(&w.host);
+    let runs = w.rig.runs();
+    assert_eq!(runs.len(), 1, "one run, which compares again");
+    assert_eq!(runs[0].trigger_kind, "watch");
+    // And a comparison with nothing noted still goes straight to Watching.
+    let w2 = setup();
+    w2.started();
+    assert_eq!(w2.state(), TriggerState::Watching);
+}
+
+/// S2: with an include list, renaming a folder is one event for the folder itself.
+#[test]
+fn a_renamed_folder_counts_even_when_the_profile_includes_only_markdown() {
+    let w = setup_full(watch(true, true), None, Some("*.md"));
+    w.started();
+    w.emit_path("docs-old");
+    tick(&w.host);
+    assert_eq!(w.kind(), StatusKind::Quiet);
+}
+
+/// S3b: the answer of a comparison started for a released watcher does not touch the row of the
+/// next one (edited and approved again, paused and resumed).
+#[test]
+fn a_comparison_of_a_released_watcher_cannot_overwrite_the_next_generation() {
+    let w = setup();
+    let first = Arc::new(Held::raw());
+    let second = Arc::new(Held::raw());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (f, s2, c) = (first.clone(), second.clone(), calls.clone());
+    w.rig.world.set_script(script(move |_, call| {
+        if call.dry_run {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            match n {
+                0 => f.block(),
+                1 => s2.block(),
+                _ => {}
+            }
+            return dry_run(0, 0);
+        }
+        completed(3)
+    }));
+    w.host.tick(); // comparison of generation 1 blocks
+    first.wait_entered();
+    super::watch::release_all(&w.host.inner);
+    w.advance(SEC);
+    w.host.tick(); // generation 2 is made and compares
+    second.wait_entered();
+    assert_eq!(w.state(), TriggerState::Checking);
+    let events_before = w.events().len();
+    // The old comparison ends: it says "in sync", and writes nothing.
+    first.open();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while w.host.inner.lock().comparing > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "old comparison never ended"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        w.state(),
+        TriggerState::Checking,
+        "generation 2 still compares"
+    );
+    assert_eq!(w.events().len(), events_before);
+    second.open();
+    settle(&w.host);
+    assert_eq!(w.state(), TriggerState::Watching);
+    assert_eq!(w.live(), 1);
+}
+
+/// S3a: a watching automation's local roots are opened now and then; a root that is gone or is
+/// not the approved folder any more is found without any event, and a watch that died is put back.
+#[test]
+fn the_health_check_finds_a_vanished_root_and_a_dead_watch() {
+    let w = setup();
+    w.started();
+    let asked = w.rig.world.probes().len();
+    for _ in 0..5 {
+        w.advance(5 * SEC);
+        w.host.tick();
+    }
+    assert_eq!(w.rig.world.probes().len(), asked, "not within 30 s");
+    // The folder is replaced behind the watcher's back: no volume event, no file event.
+    w.rig.world.set_offline(&w.left, true);
+    w.advance(10 * SEC);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Device);
+    assert!(w.has_event("not connected"));
+    assert_eq!(w.live(), 0, "the dead watch is released");
+    w.rig.world.set_offline(&w.left, false);
+    w.host.volume_changed();
+    tick(&w.host);
+    assert_eq!(w.state(), TriggerState::Watching);
+    assert_eq!(w.live(), 1, "a watch is put back");
+
+    // A watch that died while the folder is still the approved one.
+    super::watch::kill_watches(&w.host.inner, &w.id);
+    assert_eq!(w.live(), 0);
+    w.advance(31 * SEC);
+    w.host.tick();
+    assert!(w.has_event("Watcher restarted"));
+    assert_eq!(w.live(), 1);
+    let dry = dry_calls(&w.rig);
+    w.advance(3 * SEC);
+    tick(&w.host);
+    assert_eq!(dry_calls(&w.rig), dry + 1, "then a full comparison");
+    assert_eq!(w.state(), TriggerState::Watching);
+}
+
+/// S4: many automations waiting for an offline share do not hold the host loop up.
+#[test]
+fn twenty_offline_shares_do_not_stall_a_pass() {
+    let rig = Rig::new();
+    let ids: Vec<(String, String, String)> = (0..20).map(|n| share_automation(&rig, n)).collect();
+    for (_, _, share) in &ids {
+        rig.world.set_offline(share, true);
+    }
+    rig.world.probe_delay_ms.store(150, Ordering::SeqCst);
+    let host = rig.host(1, HostClass::App);
+    let device = |rig: &Rig| {
+        ids.iter()
+            .filter(|(id, _, _)| {
+                rig.fx
+                    .store
+                    .with_read(|c| runtime::get(c, id))
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.trigger_state)
+                    == Some(TriggerState::Device)
+            })
+            .count()
+    };
+    let mut slowest = std::time::Duration::ZERO;
+    for _ in 0..40 {
+        rig.advance(SEC);
+        let started = std::time::Instant::now();
+        host.tick();
+        slowest = slowest.max(started.elapsed());
+        if device(&rig) == 20 {
+            break;
+        }
+    }
+    assert!(
+        slowest < std::time::Duration::from_millis(2_500),
+        "a pass took {slowest:?}"
+    );
+    assert_eq!(
+        device(&rig),
+        20,
+        "all of them get there, spread over passes"
+    );
+    // The host's own beat is on time: its row is fresh.
+    let row = rig.host_rows().into_iter().next().expect("host row");
+    assert!(rig.now() - row.last_beat_ms <= 5_000);
+}
+
+/// NIT-2: with every comparison slot taken the hook does not write every second.
+#[test]
+fn a_full_comparison_slot_does_not_make_the_hook_write_every_second() {
+    let w = setup();
+    w.host.inner.lock().comparing = 2;
+    w.host.tick();
+    let before = w
+        .rig
+        .fx
+        .store
+        .with_read(automations::change_seq)
+        .expect("seq");
+    for _ in 0..4 {
+        w.advance(SEC);
+        w.host.tick();
+    }
+    let after = w
+        .rig
+        .fx
+        .store
+        .with_read(automations::change_seq)
+        .expect("seq");
+    assert!(after - before <= 1, "{} writes in 4 s", after - before);
+    w.host.inner.lock().comparing = 0;
+    tick(&w.host);
+    assert_eq!(
+        w.state(),
+        TriggerState::Watching,
+        "and it goes on when a slot is free"
+    );
+}
+
+/// NIT-4: a watch that keeps finding differences right after its own runs stops chaining them.
+#[test]
+fn chained_pending_reruns_are_bounded_like_the_engines() {
+    let w = setup();
+    w.started();
+    let factory = w.rig.world.factory.clone();
+    let left = w.left.clone();
+    w.rig.world.set_script(script(move |_, call| {
+        if call.dry_run {
+            // Always something left to do.
+            return dry_run(1, 0);
+        }
+        // Every run writes files, and the operating system reports them.
+        factory.emit_files(&left, 2);
+        completed(3)
+    }));
+    w.rig
+        .enqueue(&w.id, &w.profile, TriggerKind::RunNow, HostClass::App);
+    for _ in 0..12 {
+        tick(&w.host);
+        w.advance(SEC);
+        tick(&w.host);
+        w.advance(3 * SEC);
+        tick(&w.host);
+        w.advance(11 * SEC);
+        tick(&w.host);
+    }
+    assert!(
+        w.has_event("Files keep changing during the runs"),
+        "{:?}",
+        w.events()
+    );
+    let runs = w.rig.runs().len();
+    assert!(runs <= 8, "{runs} runs: the chain was not cut");
 }

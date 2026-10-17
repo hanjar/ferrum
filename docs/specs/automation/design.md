@@ -1163,9 +1163,11 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   user kinds out of `watcher.rs` and `watch.rs`, and any directory listing out of both.
 - **Event paths are untrusted.** A backend event is classified in the sink on the backend's thread (under the root, not
   excluded, not the engine's staging or backup name, not the versioning root, no `.`/`..`, no control character) and
-  reduced to a COUNT. No path is stored, logged or used for an operation; the engine compares afresh (WA-2.4). An event
-  is read as a file: an excluded folder hides everything below it. Only the excluded folder's own entry can cause a
-  spurious comparison.
+  reduced to a COUNT. No path is stored, logged or used for an operation; the engine compares afresh (WA-2.4). The
+  event does not say file or folder and the file system is not asked, so a path counts when the profile would show it as
+  either (`visible(rel, false) || visible(rel, true)`): renaming a folder is one event for the folder, and with an include
+  list such as `*.md` only the folder reading selects it. Excludes apply to every ancestor. The price is an occasional
+  spurious comparison (the excluded folder's own entry, a non-matching file under an include list).
 - **The hook only queues.** A burst that went quiet (idle delay) or reached the maximum wait becomes a `Watch` entry
   through `request::trigger_tx` (approval must VERIFY, no hold, enabled; user kinds refused), merged by the queue rules of
   FER-525 (a merged trigger never changes the kind or `enqueued_ms` of a user's entry). `trigger_tx` also accepts
@@ -1189,9 +1191,25 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   only while this process hosts. It is released when the automation is paused, deleted, held, sent to review or edited,
   when a root is lost, when this process stops hosting and at shutdown (`Host::shutdown`). The host reads the automations
   again when the store changed (cheap signature check) and fully verifies them every 30 s.
+- **Changes noted during a comparison (WA-3.4).** They are counted, and when the comparison answers "in sync" the walk may
+  have passed them already, so the state goes to Quiet with them (one idle delay, then one run that compares again)
+  instead of straight to Watching.
+- **A comparison belongs to its watcher.** Releasing a watcher (edit and approve again, pause, hold, stop hosting) retires
+  its shared state; the answer of a comparison started for it is dropped and never touches the row of the next generation.
+  Chained pending-rerun comparisons that keep finding differences stop after `MAX_RERUN_STREAK`, as `settle`'s do.
+- **Liveness of the watch (S3a).** Every 30 s a watching automation's LOCAL roots are opened (identity only, never
+  listed) by the same probe as the device check. A root that is gone or no longer the approved folder moves the
+  automation to Waiting for device and releases the watch (it is made again, with a comparison, when the folder is back);
+  a watch that is missing while the folder is fine is made again and the state is Needs recheck. This is a liveness check,
+  not change detection.
+- **Probes do not stall the host (S4).** All probes of one pass share a budget of 1 s; the rest waits for the next passes
+  (automations with a look left over go first), so the host's heartbeat is never held up by offline shares.
 - **Known limits.** `notify` 7 on Windows does not report a buffer overflow of `ReadDirectoryChangesW` (no rescan flag)
-  and does not tell when the watched folder itself is deleted; Needs recheck therefore comes from a `Rescan` flag or a
-  backend failure, and a deleted watch folder is noticed by the next comparison or volume event. A comparison needs
+  and does not tell when the watched folder itself is deleted; Needs recheck therefore comes from a `Rescan` flag, a
+  backend failure or the liveness check above, and a burst that overflowed the buffer on its own is NOT detected until
+  the next event or comparison (a backend of our own for `ReadDirectoryChangesW` is a separate task). Follow-ups: the
+  optional conditions (OP-1) are not applied to the read-only comparison, and a manual Synchronize Dirs lease is not part of
+  the run window (its events start a countdown instead of a pending rerun). A comparison needs
   `Differences` from the engine's dry run; a conflict-only difference queues a run (it ends in a hold, as any run does).
   While a hold lasts the machine is frozen and events are not logged (the watcher is released, as the task asks).
 

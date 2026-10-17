@@ -40,8 +40,9 @@
 //! hosting and at shutdown.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
@@ -74,6 +75,13 @@ const RECONCILE_EVERY_MS: i64 = 30_000;
 const DEVICE_PROBE_EVERY_MS: i64 = 30_000;
 /// After a comparison that could not be trusted, the next one waits this long.
 const RECHECK_BACKOFF_MS: i64 = 60_000;
+/// A watching automation's local roots are opened (identity only, never listed) this often to see
+/// that they are still the approved folders (S3a). A liveness check, not change detection.
+const HEALTH_EVERY_MS: i64 = 30_000;
+/// All the probes of ONE pass together take at most this long (plus the one in flight): a pass
+/// must not hold up the host's heartbeat, however many shares are offline (S4). What is left over
+/// is done in the next passes.
+const PROBE_PASS_BUDGET: Duration = Duration::from_millis(1_000);
 
 // ── What the host tells the hook ──
 
@@ -182,17 +190,45 @@ pub(crate) struct Shared {
     retry_at_ms: AtomicI64,
     ctx: Mutex<CheckCtx>,
     cancel: Mutex<CancelToken>,
+    /// The watcher of this generation was released (edited, paused, held, stopped). A comparison
+    /// that was started for it must not write anything any more (S3b): the next generation of
+    /// the same automation owns the row.
+    retired: AtomicBool,
+    /// Changes noted during a comparison that found the folders in sync: the hook starts the
+    /// quiet countdown with them (S1).
+    carry: AtomicU64,
+    /// The idle delay in ms, for the countdown `finish_check` starts.
+    idle_ms: AtomicI64,
+    /// Pending-rerun comparisons in a row that found differences (bounded like `settle`'s).
+    streak: AtomicU32,
 }
 
 impl Shared {
-    fn new(inbox: Arc<Inbox>) -> Self {
+    fn new(inbox: Arc<Inbox>, idle_ms: i64) -> Self {
         Shared {
             inbox,
             running: AtomicBool::new(false),
             retry_at_ms: AtomicI64::new(0),
             ctx: Mutex::new(CheckCtx::default()),
             cancel: Mutex::new(CancelToken::default()),
+            retired: AtomicBool::new(false),
+            carry: AtomicU64::new(0),
+            idle_ms: AtomicI64::new(idle_ms),
+            streak: AtomicU32::new(0),
         }
+    }
+
+    fn take_carry(&self) -> u64 {
+        self.carry.swap(0, Ordering::SeqCst)
+    }
+
+    fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        self.cancel_check();
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
     }
 
     pub(crate) fn set_running(&self, on: bool) {
@@ -259,9 +295,66 @@ struct Tracked {
     next_probe_ms: Option<i64>,
     /// The root that was not there when the device state began (for the event text).
     missing_path: Option<String>,
+    /// Looks at the roots that were asked for but not done yet (the pass ran out of budget).
+    want: Want,
+    /// The roots have not been looked at since this watcher was made.
+    initial_probe: bool,
+    next_health_ms: i64,
+    /// The queue entry the "merged into the queued run" event was written for.
+    merge_logged: Option<i64>,
+}
+
+/// Which roots to look at: the local drives, the shares, and whether the folders may be declared
+/// back (a device that was missing).
+#[derive(Debug, Default, Clone, Copy)]
+struct Want {
+    local: bool,
+    unc: bool,
+}
+
+impl Want {
+    fn any(self) -> bool {
+        self.local || self.unc
+    }
+
+    fn merge(&mut self, other: Want) {
+        self.local |= other.local;
+        self.unc |= other.unc;
+    }
+}
+
+/// The time left for the probes of this pass.
+struct Budget(Instant);
+
+impl Budget {
+    fn new() -> Self {
+        Budget(Instant::now() + PROBE_PASS_BUDGET)
+    }
+
+    fn left(&self) -> bool {
+        Instant::now() < self.0
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        // Whatever released this watcher, a comparison it started is moot.
+        self.shared.retire();
+    }
 }
 
 impl Tracked {
+    /// How many watches this automation should hold while its folders are there.
+    fn expected_handles(&self) -> usize {
+        if !self.trigger.on_changes {
+            return 0;
+        }
+        self.sides()
+            .iter()
+            .filter(|(watched, spec)| *watched && supports_notifications(spec))
+            .count()
+    }
+
     fn sides(&self) -> [(bool, &RootSpec); 2] {
         [
             (self.trigger.watch_left, &self.left),
@@ -514,10 +607,17 @@ pub(super) fn pass<D: HostDeps>(inner: &Arc<Inner<D>>, now: i64) {
     let due = book
         .last_reconcile_ms
         .is_none_or(|t| flags.dirty || now.saturating_sub(t) >= RECONCILE_EVERY_MS || now < t);
+    let budget = Budget::new();
     if due {
-        reconcile(inner, &mut book, now);
+        reconcile(inner, &mut book, now, &budget);
     }
-    let ids: Vec<String> = book.tracked.keys().cloned().collect();
+    // Automations with looks left over from the last pass go first, so nobody starves.
+    let mut ids: Vec<String> = book.tracked.keys().cloned().collect();
+    ids.sort_by_key(|id| {
+        book.tracked
+            .get(id)
+            .is_none_or(|t| !(t.want.any() || t.initial_probe))
+    });
     if ids.is_empty() {
         return;
     }
@@ -530,11 +630,11 @@ pub(super) fn pass<D: HostDeps>(inner: &Arc<Inner<D>>, now: i64) {
             continue;
         };
         let row = rows.get(&id);
-        step(inner, t, &id, row, now, &flags);
+        step(inner, t, &id, row, now, &flags, &budget);
     }
 }
 
-fn reconcile<D: HostDeps>(inner: &Arc<Inner<D>>, book: &mut Book, now: i64) {
+fn reconcile<D: HostDeps>(inner: &Arc<Inner<D>>, book: &mut Book, now: i64, budget: &Budget) {
     let full = now.saturating_sub(book.last_verified_ms) >= RECONCILE_EVERY_MS
         || now < book.last_verified_ms;
     let known: HashMap<String, Sig> = book
@@ -580,6 +680,7 @@ fn reconcile<D: HostDeps>(inner: &Arc<Inner<D>>, book: &mut Book, now: i64) {
             d,
             now,
             if startup { Why::Started } else { Why::Resumed },
+            budget,
         );
         book.tracked.insert(id, t);
     }
@@ -589,8 +690,15 @@ fn reconcile<D: HostDeps>(inner: &Arc<Inner<D>>, book: &mut Book, now: i64) {
 }
 
 /// A new watcher: decide where the machine starts and write it down.
-fn create<D: HostDeps>(inner: &Arc<Inner<D>>, d: Desired, now: i64, why: Why) -> Tracked {
+fn create<D: HostDeps>(
+    inner: &Arc<Inner<D>>,
+    d: Desired,
+    now: i64,
+    why: Why,
+    budget: &Budget,
+) -> Tracked {
     let id = d.id.clone();
+    let idle_ms = i64::from(d.trigger.idle_secs) * 1_000;
     let inbox = Arc::new(Inbox::default());
     let mut t = Tracked {
         sig: d.sig,
@@ -601,7 +709,7 @@ fn create<D: HostDeps>(inner: &Arc<Inner<D>>, d: Desired, now: i64, why: Why) ->
         filters: d.filters,
         versioning: d.versioning,
         handles: Vec::new(),
-        shared: Arc::new(Shared::new(inbox)),
+        shared: Arc::new(Shared::new(inbox, idle_ms)),
         burst: None,
         last_drain_ms: now,
         window_end_ms: None,
@@ -609,6 +717,10 @@ fn create<D: HostDeps>(inner: &Arc<Inner<D>>, d: Desired, now: i64, why: Why) ->
         device_seen: false,
         next_probe_ms: None,
         missing_path: None,
+        want: Want::default(),
+        initial_probe: false,
+        next_health_ms: now.saturating_add(HEALTH_EVERY_MS),
+        merge_logged: None,
     };
     // Which watched roots can be watched at all (WA-2.3).
     let watchable = t
@@ -616,7 +728,18 @@ fn create<D: HostDeps>(inner: &Arc<Inner<D>>, d: Desired, now: i64, why: Why) ->
         .iter()
         .filter(|(watched, spec)| *watched && supports_notifications(spec))
         .count();
-    let report = probe_roots(inner, &t, true, true);
+    // The first look at the roots; when this pass has no time left for it, the first step does it
+    // and the comparison waits for it.
+    let report = if budget.left() {
+        probe_roots(inner, &t, true, true)
+    } else {
+        t.initial_probe = true;
+        Report {
+            missing: None,
+            all_there: true,
+            probed_all: true,
+        }
+    };
     let (state, text, check_reason, kind) = if t.trigger.on_changes && watchable == 0 {
         (
             TriggerState::Unsupported,
@@ -752,6 +875,7 @@ struct Out {
     rebuild_handles: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step<D: HostDeps>(
     inner: &Arc<Inner<D>>,
     t: &mut Tracked,
@@ -759,11 +883,12 @@ fn step<D: HostDeps>(
     row: Option<&runtime::RuntimeRow>,
     now: i64,
     flags: &Flags,
+    budget: &Budget,
 ) {
     let Some(row) = row else { return };
-    let drained = t.shared.inbox.take();
     let state = state_of(row);
     if state == TriggerState::Unsupported {
+        let _ = t.shared.inbox.take();
         t.last_drain_ms = now;
         return;
     }
@@ -771,21 +896,59 @@ fn step<D: HostDeps>(
     let max_ms = i64::from(t.trigger.max_wait_secs) * 1_000;
     let running = t.shared.is_running();
 
-    // Which folders to look at, and whether the burst of changes is over. After a comparison
-    // that found a folder missing although the probe said it was there, the next look waits.
+    // Which folders to look at. After a comparison that found a folder missing although the probe
+    // said it was there, the next look waits.
     let retry_due = t.shared.retry_at_ms.load(Ordering::SeqCst) <= now;
     let first_look = state == TriggerState::Device && !t.device_seen && retry_due;
     let timer_probe =
         state == TriggerState::Device && retry_due && t.next_probe_ms.is_some_and(|d| now >= d);
     let device_probe = state == TriggerState::Device
         && (first_look || timer_probe || ((flags.volume || flags.resumed) && retry_due));
-    let live_probe =
-        state != TriggerState::Device && (flags.volume || drained.root_touched || drained.failed);
     let slept = flags.resumed
         && matches!(
             state,
             TriggerState::Watching | TriggerState::Quiet | TriggerState::Recheck
         );
+    // S3a: a watching automation's local roots are opened now and then (identity only).
+    let health =
+        matches!(state, TriggerState::Watching | TriggerState::Quiet) && now >= t.next_health_ms;
+    // What may have to be looked at (events are counted below, after the budget decision).
+    let peek = t.shared.inbox.peek();
+    let live_probe = state != TriggerState::Device
+        && (flags.volume || peek.root_touched || peek.failed || health);
+    let mut want = std::mem::take(&mut t.want);
+    if t.initial_probe {
+        want.merge(Want {
+            local: true,
+            unc: true,
+        });
+    }
+    if device_probe {
+        want.merge(Want {
+            local: first_look || flags.volume || flags.resumed,
+            unc: first_look || timer_probe,
+        });
+    }
+    if live_probe || slept {
+        want.merge(Want {
+            local: true,
+            unc: false,
+        });
+    }
+    if want.any() && !budget.left() {
+        // S4: this pass has used its time for probes; what is wanted waits for the next pass.
+        t.want = want;
+        return;
+    }
+
+    let drained = t.shared.inbox.take();
+    // A countdown that a comparison started (changes noted while it ran, S1).
+    if state == TriggerState::Quiet && t.burst.is_none() {
+        let carried = t.shared.take_carry();
+        if carried > 0 {
+            t.burst = Some(Burst::start(now, idle_ms, carried));
+        }
+    }
     let burst_due = state == TriggerState::Quiet
         && match t.burst.as_mut() {
             Some(b) => b.due(now, idle_ms, max_ms).is_some(),
@@ -809,6 +972,7 @@ fn step<D: HostDeps>(
             Err(_) => {
                 // The store cannot say: what was counted waits for the next pass.
                 t.shared.inbox.restore(drained);
+                t.want = want;
                 return;
             }
         }
@@ -819,41 +983,50 @@ fn step<D: HostDeps>(
         }
     };
 
+    let can_compare = runner::has_capacity(inner);
     let work = !drained.is_empty()
-        || device_probe
-        || live_probe
-        || slept
+        || want.any()
         || burst_due
         || (state == TriggerState::Quiet && win.in_window)
-        || (state == TriggerState::Watching && row.pending_rerun && win.settled)
-        || (state == TriggerState::Checking && !running && win.settled)
-        || (state == TriggerState::Recheck && retry_due && win.settled);
+        || (state == TriggerState::Watching && row.pending_rerun && win.settled && can_compare)
+        || (state == TriggerState::Checking
+            && !running
+            && win.settled
+            && can_compare
+            && !t.initial_probe)
+        || (state == TriggerState::Recheck && retry_due && win.settled && can_compare);
     if !work {
         t.last_drain_ms = now;
         return;
     }
 
     // The probes open the roots; they run before the store is touched.
-    let report = if state == TriggerState::Device && device_probe {
-        // A local drive is looked at when Windows says a volume came or went; a share on its
-        // own cadence (WA-5.3). Timer and volume events never ask about the other kind.
-        let local = first_look || flags.volume || flags.resumed;
-        let unc = first_look || timer_probe;
-        Some(probe_for_return(inner, t, local, unc))
-    } else if live_probe || slept {
-        Some(probe_roots(inner, t, true, false))
+    let report = if want.any() {
+        let r = if state == TriggerState::Device {
+            // A local drive is looked at when Windows says a volume came or went; a share on its
+            // own cadence (WA-5.3). Timer and volume events never ask about the other kind.
+            probe_for_return(inner, t, want.local, want.unc)
+        } else {
+            probe_roots(inner, t, want.local, want.unc)
+        };
+        if state == TriggerState::Device {
+            t.device_seen = true;
+            if t.has_unc_root() && want.unc {
+                // WA-5.3: a share is looked at again at most every 30 s while the device is missing.
+                t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
+            }
+        }
+        if health {
+            t.next_health_ms = now.saturating_add(HEALTH_EVERY_MS);
+        }
+        t.initial_probe = false;
+        Some(r)
     } else {
         None
     };
-    if device_probe {
-        t.device_seen = true;
-        if t.has_unc_root() && (first_look || timer_probe) {
-            // WA-5.3: a share is looked at again at most every 30 s while the device is missing.
-            t.next_probe_ms = Some(now.saturating_add(DEVICE_PROBE_EVERY_MS));
-        }
-    }
 
     let keys = inner.deps.keys();
+    let handles_short = t.handles.len() < t.expected_handles();
     let result = inner.write(|conn| {
         apply(
             conn,
@@ -869,6 +1042,8 @@ fn step<D: HostDeps>(
                 max_ms,
                 running,
                 slept,
+                health,
+                handles_short,
             },
         )
     });
@@ -917,6 +1092,10 @@ struct Inputs {
     max_ms: i64,
     running: bool,
     slept: bool,
+    /// The periodic look at the roots was part of this pass.
+    health: bool,
+    /// The watcher holds fewer watches than it should.
+    handles_short: bool,
 }
 
 fn plural(n: u64, one: &str, many: &str) -> String {
@@ -973,10 +1152,10 @@ fn apply(
             out.rebuild_handles = true;
             t.device_seen = false;
             t.next_probe_ms = None;
-            t.missing_path = None;
+            let back = t.missing_path.take();
             let queued = queue::by_profile(conn, &t.profile_id)?.is_some();
             if t.trigger.on_available && !queued {
-                let text = Why::Available.text(t.missing_path.as_deref());
+                let text = Why::Available.text(back.as_deref());
                 t.shared.ctx().why = Some(Why::Available);
                 runtime::set_trigger_state(
                     conn,
@@ -1014,6 +1193,26 @@ fn apply(
     if state == TriggerState::Device {
         // Still waiting; whatever the watchers said while a folder was missing means nothing.
         return Ok(out);
+    }
+    if i.health
+        && i.handles_short
+        && matches!(state, TriggerState::Watching | TriggerState::Quiet)
+        && i.report.as_ref().is_some_and(|r| r.missing.is_none())
+    {
+        // The folders are there and are the approved ones, but a watch is gone (it died, or an
+        // earlier restart failed): put it back, and compare because events may have been lost.
+        t.burst = None;
+        state = TriggerState::Recheck;
+        t.shared.retry_at_ms.store(0, Ordering::SeqCst);
+        out.rebuild_handles = true;
+        runtime::set_trigger_state(conn, id, TriggerState::Recheck, None, None, None, now)?;
+        events::add_event(
+            conn,
+            id,
+            now,
+            EventKind::Warn,
+            "Watcher restarted \u{2014} full comparison when safe",
+        )?;
     }
 
     // ── 2. The watcher lost events (WA-6) ──
@@ -1107,27 +1306,34 @@ fn apply(
                     ),
                 )?;
             }
-        } else if queue::by_profile(conn, &t.profile_id)?.is_some() {
-            // WA-3.3: a run for these folders already waits; the changes are part of it.
+        } else if let Some(entry) = queue::by_profile(conn, &t.profile_id)? {
+            // WA-3.3: a run for these folders already waits; the changes are part of it. The
+            // event is written only when the trigger really merged, and once per queued entry.
             if t.trigger.on_changes {
-                let _ = request::trigger_tx(
-                    conn,
-                    keys,
-                    id,
-                    TriggerKind::Watch,
-                    "Changes while a run waits",
-                    now,
-                );
-                events::add_event(
-                    conn,
-                    id,
-                    now,
-                    EventKind::Mute,
-                    &format!(
-                        "{} merged into the queued run",
-                        plural(changes, "change", "changes")
+                let merged = matches!(
+                    request::trigger_tx(
+                        conn,
+                        keys,
+                        id,
+                        TriggerKind::Watch,
+                        "Changes while a run waits",
+                        now,
                     ),
-                )?;
+                    Ok(request::QueueAnswer::Merged)
+                );
+                if merged && t.merge_logged != Some(entry.id) {
+                    t.merge_logged = Some(entry.id);
+                    events::add_event(
+                        conn,
+                        id,
+                        now,
+                        EventKind::Mute,
+                        &format!(
+                            "{} merged into the queued run",
+                            plural(changes, "change", "changes")
+                        ),
+                    )?;
+                }
             }
         } else if t.trigger.on_changes
             && matches!(state, TriggerState::Watching | TriggerState::Quiet)
@@ -1175,6 +1381,9 @@ fn apply(
     if !i.win.in_window && !i.win.active {
         t.window_announced = false;
     }
+    if queue::by_profile(conn, &t.profile_id)?.is_none() {
+        t.merge_logged = None;
+    }
 
     // ── 5. The countdown is over (WA-1.1, WA-1.4): queue ONE run ──
     if state == TriggerState::Quiet {
@@ -1193,6 +1402,7 @@ fn apply(
         }
         if let Some(why) = why {
             t.burst = None;
+            t.shared.streak.store(0, Ordering::SeqCst);
             let text = match why {
                 Due::Idle => format!("Changes \u{b7} quiet for {} s", t.trigger.idle_secs),
                 Due::MaxWait => format!(
@@ -1314,6 +1524,11 @@ pub(super) fn finish_check<D: HostDeps>(
     let keys = inner.deps.keys();
     let id = automation_id;
     let _ = inner.write(|conn| {
+        // S3b: a comparison that belongs to a watcher that was released since (edited and
+        // approved again, paused, held) writes nothing: the row is the next generation's.
+        if shared.is_retired() {
+            return Ok(());
+        }
         let Some(row) = runtime::get(conn, id)? else {
             return Ok(());
         };
@@ -1323,8 +1538,38 @@ pub(super) fn finish_check<D: HostDeps>(
         }
         match answer {
             CheckAnswer::InSync => {
-                runtime::set_trigger_state(conn, id, TriggerState::Watching, None, None, None, now)?;
+                shared.streak.store(0, Ordering::SeqCst);
                 runtime::set_pending_rerun(conn, id, false, now)?;
+                if noted > 0 {
+                    // S1: changes arrived while the folders were being compared; the walk may
+                    // have passed them already. The comparison said "in sync" about the folders
+                    // as it saw them, so a quiet countdown follows and one run (which compares
+                    // again) comes out of it.
+                    let idle = shared.idle_ms.load(Ordering::SeqCst);
+                    shared.carry.store(noted, Ordering::SeqCst);
+                    runtime::set_trigger_state(
+                        conn,
+                        id,
+                        TriggerState::Quiet,
+                        Some(now.saturating_add(idle)),
+                        Some(now),
+                        None,
+                        now,
+                    )?;
+                    events::add_event(
+                        conn,
+                        id,
+                        now,
+                        EventKind::Info,
+                        &format!(
+                            "Folders in sync, but {} while it compared \u{2014} waiting for {} s without changes",
+                            plural(noted, "change arrived", "changes arrived"),
+                            idle / 1_000
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                runtime::set_trigger_state(conn, id, TriggerState::Watching, None, None, None, now)?;
                 let line = if self_events > 0 {
                     match run_id {
                         Some(run) => format!(
@@ -1336,8 +1581,6 @@ pub(super) fn finish_check<D: HostDeps>(
                             plural(self_events, "change", "changes")
                         ),
                     }
-                } else if noted > 0 {
-                    "Fresh comparison: folders are in sync \u{2014} no run needed".to_string()
                 } else {
                     "Fresh comparison: folders are in sync".to_string()
                 };
@@ -1347,6 +1590,22 @@ pub(super) fn finish_check<D: HostDeps>(
                 runtime::set_trigger_state(conn, id, TriggerState::Watching, None, None, None, now)?;
                 runtime::set_pending_rerun(conn, id, false, now)?;
                 let (kind, text) = why.entry();
+                // A watch that keeps finding differences right after its own runs stops chaining
+                // them, as the engine's pending reruns do (MAX_RERUN_STREAK).
+                if why == Why::Pending {
+                    let n = shared.streak.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n > super::MAX_RERUN_STREAK {
+                        shared.streak.store(0, Ordering::SeqCst);
+                        events::add_event(
+                            conn,
+                            id,
+                            now,
+                            EventKind::Warn,
+                            "Files keep changing during the runs \u{2014} the next run waits for the next trigger",
+                        )?;
+                        return Ok(());
+                    }
+                }
                 match request::trigger_tx(conn, keys, id, kind, text, now) {
                     Ok(_) => events::add_event(
                         conn,
@@ -1409,4 +1668,14 @@ pub(super) fn finish_check<D: HostDeps>(
         Ok(())
     });
     inner.nudge();
+}
+
+/// Test: the watches die silently (as `notify` 7 on Windows can let them), the way a health check
+/// has to find out.
+#[cfg(test)]
+pub(super) fn kill_watches<D: HostDeps>(inner: &Arc<Inner<D>>, id: &str) {
+    let mut book = inner.watch.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(t) = book.tracked.get_mut(id) {
+        t.handles.clear();
+    }
 }

@@ -97,6 +97,8 @@ pub struct World {
     pub offline: Mutex<Vec<String>>,
     /// Every root `root_available` was asked about, in order.
     pub probe_log: Mutex<Vec<String>>,
+    /// Real milliseconds every `root_available` call takes (a slow share).
+    pub probe_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl World {
@@ -285,6 +287,10 @@ impl HostDeps for FakeDeps {
 
     fn root_available(&self, root: &crate::automation::model::RootSpec) -> Avail {
         self.world.probe_log.lock().unwrap().push(root.path.clone());
+        let delay = self.world.probe_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
         if self
             .world
             .offline
@@ -503,6 +509,7 @@ impl Rig {
             factory: Arc::new(FakeFactory::default()),
             offline: Mutex::new(Vec::new()),
             probe_log: Mutex::new(Vec::new()),
+            probe_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
         Rig { fx, world }
     }

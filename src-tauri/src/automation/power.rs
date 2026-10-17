@@ -77,6 +77,13 @@ pub(crate) struct VolumeHeader {
     pub flags: u16,
 }
 
+/// Does this `WM_DEVICECHANGE` carry a `DEV_BROADCAST_HDR` in `lParam`? Only the two events the
+/// host uses do. For any other `wParam` (`DBT_DEVNODES_CHANGED`, ...) `lParam` is not a pointer the
+/// system vouches for - another process on the desktop can send anything - so it is never read.
+pub(crate) fn carries_header(wparam: usize) -> bool {
+    wparam == DBT_DEVICEARRIVAL || wparam == DBT_DEVICEREMOVECOMPLETE
+}
+
 /// What `WM_DEVICECHANGE` means for the watch triggers. Pure. Anything that is not the arrival or
 /// the complete removal of a LOCAL volume is ignored.
 pub(crate) fn classify_volume(wparam: usize, header: Option<VolumeHeader>) -> Option<VolumeChange> {
@@ -139,8 +146,9 @@ mod imp {
     /// Read the header of a `WM_DEVICECHANGE` broadcast.
     ///
     /// # Safety
+    /// Call only for `DBT_DEVICEARRIVAL` / `DBT_DEVICEREMOVECOMPLETE` (see `carries_header`).
     /// `lparam` is either 0 or a pointer to a `DEV_BROADCAST_HDR` that stays valid for the
-    /// duration of the message (the documented contract of `WM_DEVICECHANGE`). Only the 12 bytes
+    /// duration of the message (the documented contract of those events). Only the 12 bytes
     /// of the header are read first; the volume flags (offset 16) are read only after the header
     /// itself said it is a volume structure of at least 20 bytes.
     unsafe fn volume_header(lparam: LPARAM) -> Option<VolumeHeader> {
@@ -238,8 +246,9 @@ mod imp {
                 None
             };
             let power = classify(msg, wparam, setting.as_deref());
-            let volume = if msg == super::WM_DEVICECHANGE {
-                // SAFETY: the contract of `volume_header` is the contract of this message.
+            let volume = if msg == super::WM_DEVICECHANGE && super::carries_header(wparam) {
+                // SAFETY: for these two `wParam` values the contract of `volume_header` is the
+                // contract of this message; for every other one `lParam` is not touched.
                 classify_volume(wparam, unsafe { volume_header(lparam) })
             } else {
                 None
@@ -486,6 +495,10 @@ mod imp {
                     DBT_DEVICEREMOVECOMPLETE,
                     local.as_ptr() as isize,
                 );
+                // wParams that carry no header: lParam is garbage and must never be read.
+                for wparam in [0x0007usize, 0x0018, 0x8001, 0x8003, 0x8005, 0] {
+                    SendMessageW(w.hwnd(), WM_DEVICECHANGE, wparam, 0x1234);
+                }
                 // A network volume, another device type, an unrelated wParam and a null lParam.
                 SendMessageW(
                     w.hwnd(),
@@ -541,6 +554,24 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_arrival_and_removal_carry_a_header() {
+        assert!(carries_header(DBT_DEVICEARRIVAL));
+        assert!(carries_header(DBT_DEVICEREMOVECOMPLETE));
+        for wparam in [
+            0usize,
+            0x0007,
+            0x0018,
+            0x8001,
+            0x8002,
+            0x8003,
+            0x8005,
+            usize::MAX,
+        ] {
+            assert!(!carries_header(wparam), "{wparam:#x}");
+        }
+    }
 
     #[test]
     fn volume_classification_is_pure_and_closed() {

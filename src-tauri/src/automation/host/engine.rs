@@ -35,7 +35,8 @@ fn refused(code: &'static str, text: &str) -> EngineReport {
 }
 
 /// Run the engine for a run the gate cleared. `call.dry_run` must match the proof: only a
-/// recheck or watch-comparison proof is read-only, and a run proof can never be turned into a dry run or vice versa.
+/// recheck or watch-comparison proof is read-only, and a run proof can never be turned into a
+/// dry run or vice versa.
 pub fn run_gated(
     proof: &GateOk,
     call: &EngineCall<'_>,
