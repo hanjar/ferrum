@@ -95,17 +95,23 @@ describe('AutomationPage list (MH-1..MH-4)', () => {
     expect(strip.textContent).toContain('Running 3/6');
   });
 
-  it('Run now is dimmed and never calls the backend', async () => {
-    const { backend } = setup();
+  it('Run now is dimmed with the backend reason when the row cannot run, otherwise it asks the backend', async () => {
+    const { backend } = setup({
+      runNow: vi.fn(async () => fixture('automation-run-now-queued.json') as never),
+    });
     await screen.findByText('Nightly projects backup');
     const buttons = screen.getAllByRole('button', { name: /^Run now/ }) as HTMLButtonElement[];
     expect(buttons.length).toBe(3);
-    for (const b of buttons) {
-      expect(b.disabled).toBe(true);
-      await fireEvent.click(b);
-    }
-    expect(backend.runNow).not.toHaveBeenCalled();
+    const list = rows();
+    list.forEach((r, i) => {
+      expect(buttons[i].disabled).toBe(!r.canRunNow);
+      if (!r.canRunNow) expect(buttons[i].title).toBe(r.runNowReason);
+    });
+    for (const b of buttons) await fireEvent.click(b);
+    expect(backend.runNow).toHaveBeenCalledTimes(list.filter((r) => r.canRunNow).length);
+    expect(backend.runNow).toHaveBeenCalledWith(list.find((r) => r.canRunNow)!.id);
     expect(backend.retry).not.toHaveBeenCalled();
+    await waitFor(() => expect(toast.message).toBe('Queued — starts shortly'));
   });
 
   it('the Enabled switch asks the backend and reloads', async () => {

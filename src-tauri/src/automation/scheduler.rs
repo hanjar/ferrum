@@ -21,6 +21,10 @@
 //!   or as a DST gap. A clock that jumps back therefore cannot fire the same occurrence again.
 //!   A clock that jumped far FORWARD and came back leaves later occurrences suppressed until real
 //!   time catches up with the stored mark: the failure direction is "no run", never "extra run".
+//!   The host bounds this: a mark more than 26 hours ahead of the clock (more than a zone offset or
+//!   a DST shift can explain) is clamped to `now` and a Warn event is written. Trade-off: if the
+//!   clock goes back by more than 26 hours after an occurrence and stays there until the false
+//!   clock passes the same local time again, that occurrence can run twice. The Warn event shows it.
 //! - **The cursor** (`cursor_ms`) is the last instant the scheduler looked. It only marks where
 //!   missed-run detection starts after the host was away; it is clamped to `now`, so a clock that
 //!   moved back cannot hide anything behind it. A schedule without a cursor (just approved or

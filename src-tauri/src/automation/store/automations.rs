@@ -168,8 +168,8 @@ pub fn reset_runtime(
     now_ms: i64,
 ) -> Result<(), StoreError> {
     conn.execute(
-        "INSERT INTO automation_runtime(automation_id, host_class, trigger_state, state_since_ms, updated_ms)
-         VALUES (?1, ?2, ?3, ?4, ?4)
+        "INSERT INTO automation_runtime(automation_id, host_class, trigger_state, state_since_ms, schedule_cursor_ms, updated_ms)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?4)
          ON CONFLICT(automation_id) DO UPDATE SET
            host_class = ?2, trigger_state = ?3, state_since_ms = ?4,
            quiet_until_ms = NULL, burst_started_ms = NULL, pending_rerun = 0,

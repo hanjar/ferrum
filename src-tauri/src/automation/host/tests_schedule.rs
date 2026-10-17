@@ -255,10 +255,12 @@ fn a_dst_gap_is_a_skipped_entry_and_no_run() {
         tz: "Europe/Amsterdam".into(),
         missed: MissedPolicy::RunOnce,
     });
-    let a = rig.fx.new_automation("Amsterdam", &profile, p);
     // 2026-03-29: the clocks go from 02:00 to 03:00; 02:30 does not exist.
     let before = 1_774_742_400_000; // 2026-03-29T00:00:00Z
+    // The approval happens at `before`: its cursor starts there (the first approval of a new
+    // automation sets it to the approve time, FER-527), so nothing earlier counts as missed.
     set_clock(&rig, before);
+    let a = rig.fx.new_automation("Amsterdam", &profile, p);
     let host = rig.host(1, HostClass::App);
     tick(&host);
     set_clock(&rig, before + 2 * HOUR);
@@ -449,12 +451,18 @@ fn a_paused_schedule_does_not_fire_and_resuming_does_not_replay() {
 fn a_host_runs_only_schedules_of_its_own_class() {
     let rig = Rig::new();
     let (a, _) = scheduled(&rig, "App only", MissedPolicy::RunOnce);
+    let at_approval = rt(&rig, &a).schedule_cursor_ms;
+    assert_eq!(at_approval, Some(rig.now()), "set by the first approval");
     let host = rig.host(1, HostClass::Background);
     tick(&host);
     set_clock(&rig, OCC1 + 5 * SEC);
     tick(&host);
     assert!(rig.world.calls().is_empty() && rig.queue_len() == 0);
-    assert_eq!(rt(&rig, &a).schedule_cursor_ms, None, "untouched");
+    assert_eq!(
+        rt(&rig, &a).schedule_cursor_ms,
+        at_approval,
+        "untouched by a host of the other class"
+    );
 }
 
 // ── A clock that jumped far forward and came back (review S1) ──
@@ -519,6 +527,35 @@ fn approve_and_resume_pull_a_future_mark_back_and_start_the_cursor_at_now() {
     set_state(&rig, &a, None, Some(T0 - DAY));
     reset(&rig, &a);
     assert_eq!(rt(&rig, &a).last_fired_occurrence_ms, Some(T0 - DAY));
+}
+
+#[test]
+fn the_first_approval_of_a_new_automation_starts_the_cursor_at_approve_time() {
+    // NIT-R2-1: the INSERT branch of `reset_runtime` (no runtime row yet) must not leave the cursor NULL.
+    let rig = Rig::new();
+    let (a, _) = scheduled(&rig, "First", MissedPolicy::Skip);
+    rig.fx
+        .store
+        .with_write(|c| -> Result<(), StoreError> {
+            c.execute(
+                "DELETE FROM automation_runtime WHERE automation_id = ?1",
+                [&a],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        rig.fx
+            .store
+            .with_read(|c| runtime::get(c, &a))
+            .unwrap()
+            .is_none()
+    );
+    reset(&rig, &a);
+    let row = rt(&rig, &a);
+    assert_eq!(row.schedule_cursor_ms, Some(rig.now()));
+    assert_eq!(row.last_fired_occurrence_ms, None);
 }
 
 // ── Compare and set (review S2) ──

@@ -6,12 +6,14 @@
    */
   import { onDestroy, onMount } from 'svelte';
   import Icon from '../Icon.svelte';
-  import StatusChip from './StatusChip.svelte';
   import AutomationList from './AutomationList.svelte';
   import AutomationEditor from './AutomationEditor.svelte';
   import AutomationReview from './AutomationReview.svelte';
+  import AutomationDetail from './AutomationDetail.svelte';
+  import RunHistory from './RunHistory.svelte';
+  import PauseStopDialog from './PauseStopDialog.svelte';
   import { automation, type AutomationStore } from '../../stores/automationStore.svelte';
-  import { listenAutomationChanged } from '../../ipc/automation';
+  import { listenAutomationChanged, listenAutomationProgress } from '../../ipc/automation';
   import { ui } from '../../uiState.svelte';
 
   let {
@@ -26,23 +28,27 @@
 
   let modalEl: HTMLDivElement | undefined = $state();
   let unlisten: (() => void) | null = null;
+  let unlistenProgress: (() => void) | null = null;
   let destroyed = false;
 
   onMount(() => {
     modalEl?.focus();
     void store.load();
     // MH-10: another process changed the store; re-read what is shown.
-    void listenAutomationChanged(() => {
-      void store.load();
-      if (store.tab === 'history') void store.loadHistory();
-    }).then((fn) => {
+    void listenAutomationChanged(() => void store.onChanged()).then((fn) => {
       if (destroyed) fn();
       else unlisten = fn;
+    });
+    // RQ-5: run progress (ids, phase and counts only).
+    void listenAutomationProgress((p) => store.applyProgress(p)).then((fn) => {
+      if (destroyed) fn();
+      else unlistenProgress = fn;
     });
   });
   onDestroy(() => {
     destroyed = true;
     unlisten?.();
+    unlistenProgress?.();
     store.dispose();
     store.closeEditor();
   });
@@ -53,7 +59,9 @@
     if (e.key !== 'Escape') return;
     e.preventDefault();
     if (store.review?.approving) return;
-    if (store.discardPending) store.discardPending = false;
+    if (store.dialog) store.closeDialog();
+    else if (store.discardPending) store.discardPending = false;
+    else if (store.view === 'detail') store.closeDetail();
     else if (store.view === 'review') store.backFromReview();
     else if (store.view === 'editor') store.leaveEditor();
     else onclose?.();
@@ -61,20 +69,11 @@
 
   function closePage() {
     if (store.review?.approving) return;
-    if (store.view === 'list') {
+    if (store.view === 'list' || store.view === 'detail') {
       onclose?.();
     } else if (store.leaveEditor()) {
       onclose?.();
     }
-  }
-
-  function when(ms: number): string {
-    return new Date(ms).toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
   }
 
   const title = $derived(
@@ -84,7 +83,9 @@
         : 'New automation'
       : store.view === 'review'
         ? 'Review & approve'
-        : 'Automation',
+        : store.view === 'detail'
+          ? 'Automation details'
+          : 'Automation',
   );
 </script>
 
@@ -183,32 +184,13 @@
       {#if store.history.runs.length === 0 && !store.history.loading && !store.history.error}
         <p class="muted" data-testid="history-empty">No runs to show.</p>
       {/if}
-      <table class="history">
-        <thead>
-          <tr>
-            <th>Run</th><th>Automation</th><th>Trigger</th><th>Started</th><th>Result</th>
-            <th>Succeeded</th><th>Failed</th><th>Not started</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each store.history.runs as run (run.id)}
-            <tr data-run={run.id}>
-              <td>#{run.id}</td>
-              <td>{run.automationName ?? 'Manual run'}</td>
-              <td>{run.triggerText}</td>
-              <td>{when(run.startedMs)}</td>
-              <td><StatusChip status={run.result} /></td>
-              <td>{run.counts.ok}</td>
-              <td>{run.counts.failed}</td>
-              <td>{run.counts.notStarted}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      <RunHistory {store} runs={store.history.runs} />
       <p class="muted">
         Counts are file operations from the engine's comparison — not filesystem events.
       </p>
     {/if}
+  {:else if store.view === 'detail' && store.detail}
+    <AutomationDetail {store} detail={store.detail} />
   {:else if store.view === 'editor' && store.editor}
     <AutomationEditor
       {store}
@@ -218,6 +200,10 @@
     />
   {:else if store.view === 'review' && store.review}
     <AutomationReview {store} review={store.review} oneditprofile={() => openSyncProfiles()} />
+  {/if}
+
+  {#if store.dialog}
+    <PauseStopDialog {store} dialog={store.dialog} />
   {/if}
 </div>
 
@@ -343,20 +329,5 @@
     margin: 0;
     font-size: 11.5px;
     color: var(--text3);
-  }
-  .history {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
-  .history th {
-    text-align: left;
-    font-weight: 600;
-    color: var(--text2);
-    padding: 4px 6px;
-  }
-  .history td {
-    padding: 6px;
-    border-top: 1px solid var(--line);
   }
 </style>

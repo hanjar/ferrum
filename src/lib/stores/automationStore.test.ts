@@ -276,11 +276,13 @@ describe('AutomationStore', () => {
       status: 'needsChoice',
     });
     await store.toggleEnabled(store.rows[0]);
-    expect(store.notice?.text).toMatch(/run is in progress/);
+    // needsChoice opens the Pause dialog (RQ-8.2); nothing is paused until a button is chosen.
+    expect(store.dialog).toEqual({ kind: 'pause', id: store.rows[0].id, name: store.rows[0].name });
+    expect(backend.pause).not.toHaveBeenCalled();
     expect(backend.setEnabled).toHaveBeenNthCalledWith(1, store.rows[1].id, !store.rows[1].enabled);
   });
 
-  it('never calls Run now or Retry (blocked by FER-564)', async () => {
+  it('approving never calls Run now, Retry, Stop or Recheck', async () => {
     const { store, backend } = make();
     await reachReview(store);
     await store.runTest();

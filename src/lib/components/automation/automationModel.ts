@@ -5,7 +5,11 @@
  * nothing here can mark anything "approved".
  */
 import type {
+  AutomationEvent,
+  AutomationRun,
   AutomationStatusKind,
+  RunCounts,
+  RunOp,
   AutomationConditions,
   AutomationDraft,
   AutomationFreq,
@@ -363,6 +367,8 @@ export function automationErrorMessage(code: string): string {
       return 'Some settings are not valid. Go back and check them.';
     case 'needs_review':
       return 'Review the profile change before running';
+    case 'paused':
+      return 'This automation is paused. Resume it first.';
     case 'needs_attention':
     case 'held':
       return 'A held run needs your attention first.';
@@ -443,3 +449,150 @@ export const STATUS_TONE: Record<AutomationStatusKind, StatusTone> = {
   review: 'warn',
   warn: 'warn',
 };
+
+// ── Detail page, run progress and history (P1.6) ──
+
+/** Operations per page of a run's operation list (RQ-5: lists longer than 200 rows are paged). */
+export const OPS_PAGE = 200;
+
+/** Operations of a run that have not been done yet: total minus succeeded, failed, held and changed. */
+export function remainingOps(opsTotal: number, c: RunCounts): number {
+  return Math.max(0, opsTotal - c.ok - c.failed - c.held - c.skippedChanged);
+}
+
+/** "3 succeeded · 0 failed · 3 remaining" (RQ-5). */
+export function progressCounts(run: Pick<AutomationRun, 'opsTotal' | 'counts'>): string {
+  const c = run.counts;
+  return `${c.ok} succeeded · ${c.failed} failed · ${remainingOps(run.opsTotal, c)} remaining`;
+}
+
+/** Phase line of a running run (RQ-5). `stopping` is the backend's "Stopping after the current file". */
+export function phaseText(
+  run: Pick<AutomationRun, 'phase' | 'opsTotal' | 'counts'>,
+  stopping = false,
+): string {
+  if (stopping) return 'Stopping after the current file…';
+  switch (run.phase) {
+    case 'gate':
+    case 'compare':
+    case 'plan':
+      return 'Comparing folders…';
+    case 'sync': {
+      const done = run.counts.ok + run.counts.failed + run.counts.skippedChanged;
+      return `Syncing ${Math.min(done + 1, run.opsTotal)} of ${run.opsTotal}`;
+    }
+    case 'settle':
+      return 'Finishing up…';
+    case 'done':
+      return 'Finished';
+  }
+}
+
+/** Share of operations that are decided, 0..1, for the progress bar (by operations). */
+export function progressFraction(run: Pick<AutomationRun, 'opsTotal' | 'counts'>): number {
+  if (run.opsTotal <= 0) return 0;
+  const c = run.counts;
+  return Math.min(1, (c.ok + c.failed + c.held + c.skippedChanged) / run.opsTotal);
+}
+
+/** True when the run is being stopped (status sub-line of the backend). */
+export function isStopping(...subs: (string | undefined)[]): boolean {
+  return subs.some((s) => s?.startsWith('Stopping after the current file') === true);
+}
+
+export const OP_STATUS_LABEL: Record<RunOp['status'], string> = {
+  done: 'Done',
+  inProgress: 'In progress',
+  failed: 'Failed',
+  notStarted: 'Not started',
+  held: 'Held',
+  pending: 'Pending',
+  changed: 'Changed during the run',
+};
+
+export const OP_KIND_LABEL: Record<RunOp['kind'], string> = {
+  copyNew: 'Copy new',
+  update: 'Update',
+  createFolder: 'Create folder',
+  copyFolder: 'Copy folder',
+  delete: 'Delete',
+  deleteToVersions: 'Delete (keep version)',
+  conflict: 'Conflict',
+};
+
+/** Tone of an operation status, for the icon and tint beside its label. */
+export function opTone(status: RunOp['status']): StatusTone {
+  switch (status) {
+    case 'done':
+      return 'ok';
+    case 'failed':
+      return 'bad';
+    case 'held':
+    case 'changed':
+      return 'warn';
+    case 'inProgress':
+      return 'info';
+    default:
+      return 'mute';
+  }
+}
+
+/**
+ * Recheck is offered for the run the automation's hold names (RQ-10: a fresh read-only comparison
+ * of the held run). Never for a run that is still going.
+ */
+export function canRecheck(run: AutomationRun): boolean {
+  return run.needsAttention && run.endedMs !== undefined && run.recheck?.state !== 'running';
+}
+
+/**
+ * "Retry remaining N" (RQ-10.2): only after a Recheck found N > 0 and the run was not a conflict.
+ * A conflict is never retried; the user decides it in Sync.
+ */
+export function retryRemaining(run: AutomationRun): number {
+  const r = run.recheck;
+  if (!run.needsAttention || !r || r.state !== 'remaining' || r.remaining <= 0) return 0;
+  if (run.outcome === 'conflict') return 0;
+  return r.remaining;
+}
+
+/** "Review in Sync" belongs to a run that held conflicts (RQ-6). */
+export function canReviewInSync(run: AutomationRun): boolean {
+  return run.outcome === 'conflict' || run.counts.held > 0 || run.recheck?.state === 'conflict';
+}
+
+export const EVENT_GLYPH: Record<AutomationEvent['kind'], { glyph: string; label: string }> = {
+  ok: { glyph: '✓', label: 'OK' },
+  warn: { glyph: '!', label: 'Warning' },
+  bad: { glyph: '✕', label: 'Problem' },
+  mute: { glyph: '·', label: 'Ignored' },
+  info: { glyph: 'i', label: 'Info' },
+};
+
+/** Events shown on the detail page without paging (MH-5). */
+export const DETAIL_EVENTS = 14;
+/** Recent runs shown on the detail page (MH-5). */
+export const DETAIL_RECENT_RUNS = 4;
+
+export function formatWhen(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/** "Oct 12, 02:00 → 02:01", or "Oct 12, 02:00 → running". */
+export function whenRange(startedMs: number, endedMs?: number): string {
+  const end =
+    endedMs === undefined
+      ? 'running'
+      : new Date(endedMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `${formatWhen(startedMs)} → ${end}`;
+}
+
+/** One-line summary of a run's trigger for lists. */
+export function triggerWithMerge(run: Pick<AutomationRun, 'triggerText' | 'mergedCount'>): string {
+  return run.mergedCount > 0 ? `${run.triggerText} (+${run.mergedCount} merged)` : run.triggerText;
+}
