@@ -46,6 +46,7 @@ use crate::sync_engine::plan::{
 };
 use crate::sync_engine::settle::{ItemOutcome, reconcile_baseline};
 use crate::sync_engine::versioning::{Expect, VersionStore};
+use crate::sync_engine::write_guard::{check_entry, check_planned};
 use crate::sync_incremental::{IncrementalInfo, prepare};
 
 /// Operations per copy batch and the bytes after which a batch is closed (the just-in-time check
@@ -1443,10 +1444,19 @@ impl<'a> Runner<'a> {
         let Some(root) = self.handles.root(op.target) else {
             return OpResult::Failed(no_root());
         };
+        // FER-562: the folder being created (and the parents made on the way) must not land in
+        // a protected or Startup folder. Checked before anything is created, then again on the
+        // handle that was really opened.
+        if let Err(c) = check_planned(&*self.req.env.guard, root, comps) {
+            return OpResult::Failed(c);
+        }
         let held = match open_chain(root, parents, true) {
             Ok(h) => h,
             Err(e) => return OpResult::Failed(e.classify()),
         };
+        if let Err(c) = check_entry(&*self.req.env.guard, held.dir(), Some(last)) {
+            return OpResult::Failed(c);
+        }
         let name = std::ffi::OsStr::new(last);
         match publish::create_dir_new(held.dir(), name) {
             Ok(_) => OpResult::Done,
@@ -1484,6 +1494,9 @@ impl<'a> Runner<'a> {
             Err(ChainError::Link) => return OpResult::Skipped(Some(Reason::LinkInPath)),
             Err(e) => return OpResult::Failed(e.classify()),
         };
+        if let Err(c) = check_entry(&*self.req.env.guard, held.dir(), Some(last)) {
+            return OpResult::Failed(c);
+        }
         match publish::remove_empty_dir(held.dir(), std::ffi::OsStr::new(last)) {
             Ok(true) => OpResult::Done,
             Ok(false) => OpResult::Skipped(Some(Reason::NotEmpty)),
@@ -1657,6 +1670,16 @@ impl<'a> Runner<'a> {
             }
             return out;
         };
+        // FER-562: before any parent folder is created.
+        for (idx, _) in &ready {
+            let refs: Vec<&str> = comps_of[idx].iter().map(String::as_str).collect();
+            if let Err(c) = check_planned(&*self.req.env.guard, target_root, &refs) {
+                for (i, _) in &ready {
+                    out.push((*i, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        }
         let held = match open_chain(target_root, parents, true) {
             Ok(h) => h,
             Err(e) => {
@@ -1667,6 +1690,17 @@ impl<'a> Runner<'a> {
                 return out;
             }
         };
+
+        // FER-562: the final path of the destination folder, and of every entry of the batch.
+        for (idx, _) in &ready {
+            let name = comps_of[idx].last().map(String::as_str);
+            if let Err(c) = check_entry(&*self.req.env.guard, held.dir(), name) {
+                for (i, _) in &ready {
+                    out.push((*i, OpResult::Failed(c)));
+                }
+                return out;
+            }
+        }
 
         // Versioning keeps the previous version of an overwritten file: move it aside first.
         if overwrite && versioning {
@@ -1833,3 +1867,7 @@ mod tests2;
 #[cfg(test)]
 #[path = "execute_tests3.rs"]
 mod tests3;
+
+#[cfg(test)]
+#[path = "execute_tests4.rs"]
+mod tests4;

@@ -165,8 +165,14 @@ impl VersionStore {
         cancel: &CancelToken,
     ) -> Result<Moved, Classified> {
         let comps = self.components(side, rel_parent);
+        // FER-562: before the versions folders are created, and again on the opened handle.
+        let mut planned = comps.clone();
+        planned.push(name);
+        crate::sync_engine::write_guard::check_planned(&*env.guard, &self.root, &planned)?;
         let dest = nofollow::open_chain_owned(&self.root, &comps, true)
             .map_err(|e: ChainError| e.classify())?;
+        // FER-562: the final path of the versions folder being written to.
+        crate::sync_engine::write_guard::check_entry(&*env.guard, &dest, Some(name))?;
         let os = OsStr::new(name);
         let check = |size, ms| expect.matches(size, ms);
         // A cloud placeholder is copied (which reads and so hydrates its bytes) and then deleted;
