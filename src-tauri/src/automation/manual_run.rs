@@ -122,7 +122,7 @@ impl PreviewBoard {
         })
     }
 
-    fn begin_preview(&self) -> Option<PreviewSlot> {
+    pub(crate) fn begin_preview(&self) -> Option<PreviewSlot> {
         let n = self.previewing.fetch_add(1, Ordering::SeqCst);
         if n >= MAX_CONCURRENT_PREVIEWS {
             self.previewing.fetch_sub(1, Ordering::SeqCst);

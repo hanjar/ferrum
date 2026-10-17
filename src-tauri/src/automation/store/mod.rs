@@ -6,6 +6,8 @@
 //!
 //! Errors never carry paths or SQL text; commands map them to the closed-set codes of design §7.
 
+pub mod approvals;
+pub mod automations;
 pub mod hosts;
 pub mod leases;
 pub mod migrate;
@@ -331,7 +333,20 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(mirrored, SCHEMA_VERSION.to_string());
-                for table in ["profiles", "profile_revisions", "leases", "hosts"] {
+                for table in [
+                    "profiles",
+                    "profile_revisions",
+                    "leases",
+                    "hosts",
+                    "automations",
+                    "approvals",
+                    "automation_runtime",
+                    "queue",
+                    "runs",
+                    "run_ops",
+                    "events",
+                    "controls",
+                ] {
                     let n: i64 = conn
                         .query_row(
                             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -518,6 +533,118 @@ mod tests {
                 .unwrap_err(),
             StoreError::Unavailable
         );
+    }
+
+    /// A v1 store as the previous release left it, with one profile in it.
+    fn v1_store(dir: &Path) {
+        let conn = Connection::open(dir.join("automation.db")).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .unwrap();
+        migrate::create_v1_for_tests(&conn, "0.1.0").unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, name_key, revision, policy, policy_digest, created_ms, updated_ms) VALUES ('id-1', 'Old profile', 'old profile', 3, ?1, 'd', 1, 2)",
+            [empty_policy_json()],
+        )
+        .unwrap();
+    }
+
+    /// LC-5 (FER-522): the v1 -> v2 fixture migration keeps the v1 data, adds the automation
+    /// tables, mirrors the version in `meta`, and leaves no backup behind.
+    #[test]
+    fn lc_5_migration_v1_to_v2_keeps_the_data_and_adds_the_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        v1_store(dir.path());
+        let store = Store::open(dir.path(), "0.2.0");
+        store
+            .with_write(|conn| -> Result<(), StoreError> {
+                let version: i64 = conn
+                    .pragma_query_value(None, "user_version", |r| r.get(0))
+                    .unwrap();
+                assert_eq!(version, 2);
+                let mirrored: String = conn
+                    .query_row(
+                        "SELECT value FROM meta WHERE key = 'schema_version'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(mirrored, "2");
+                let (name, revision): (String, i64) = conn
+                    .query_row(
+                        "SELECT name, revision FROM profiles WHERE id = 'id-1'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!((name.as_str(), revision), ("Old profile", 3));
+                // The new tables work: an automation needs an existing profile (foreign key) and
+                // an approval needs its automation.
+                assert!(
+                    conn.execute(
+                        "INSERT INTO automations(id, name, kind, profile_id, policy, enabled, config_rev, created_ms, updated_ms) VALUES ('a', 'A', 'watch', 'missing', '{}', 1, 1, 1, 1)",
+                        [],
+                    )
+                    .is_err(),
+                    "automations.profile_id references profiles"
+                );
+                conn.execute(
+                    "INSERT INTO automations(id, name, kind, profile_id, policy, enabled, config_rev, created_ms, updated_ms) VALUES ('a', 'A', 'watch', 'id-1', '{}', 1, 1, 1, 1)",
+                    [],
+                )
+                .unwrap();
+                assert!(
+                    conn.execute(
+                        "INSERT INTO automations(id, name, kind, profile_id, policy, enabled, config_rev, created_ms, updated_ms) VALUES ('b', 'B', 'bogus', 'id-1', '{}', 1, 1, 1, 1)",
+                        [],
+                    )
+                    .is_err(),
+                    "kind is checked"
+                );
+                // A profile used by an automation cannot be removed by a stray DELETE.
+                assert!(conn.execute("DELETE FROM profiles WHERE id = 'id-1'", []).is_err());
+                Ok(())
+            })
+            .unwrap();
+        assert!(names(dir.path()).iter().all(|n| !n.contains(".bak-")));
+    }
+
+    /// LC-5 (FER-522): a v2 step that fails keeps the v1 backup, leaves the v1 store untouched and
+    /// a later good open migrates from it.
+    #[test]
+    fn lc_5_a_failing_v2_migration_keeps_the_backup_and_the_v1_original() {
+        let dir = tempfile::tempdir().unwrap();
+        v1_store(dir.path());
+        let db = dir.path().join("automation.db");
+        let result = migrate::run_with_failure_at(
+            &Connection::open(&db).unwrap(),
+            dir.path(),
+            1,
+            "0.2.0",
+            Some(2),
+        );
+        assert_eq!(result, Err(StoreError::Unavailable));
+        assert!(dir.path().join("automation.db.bak-v1").exists());
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='automations'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "the v1 store is untouched");
+        let profiles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM profiles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(profiles, 1);
+        drop(conn);
+        let store = Store::open(dir.path(), "0.2.0");
+        store.check_writable().unwrap();
+        assert!(!dir.path().join("automation.db.bak-v1").exists());
     }
 
     // ── Rework 1 ──

@@ -304,10 +304,11 @@ fn a_second_connection_sees_the_manual_lease() {
 #[test]
 fn page_load_releases_the_manual_leases() {
     let (dir, store) = store();
-    let state = AutomationState {
-        store: store.clone(),
-        leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
-    };
+    let state = AutomationState::from_parts(
+        store.clone(),
+        Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+        None,
+    );
     let (left, right) = folders(&dir, "left", "right");
     let LeaseAcquireDto::Acquired(_) =
         lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap()
@@ -330,10 +331,11 @@ fn page_load_releases_the_manual_leases() {
 #[test]
 fn async_page_load_hook_frees_the_folders_off_thread() {
     let (dir, store) = store();
-    let state = AutomationState {
-        store: store.clone(),
-        leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
-    };
+    let state = AutomationState::from_parts(
+        store.clone(),
+        Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+        None,
+    );
     let (left, right) = folders(&dir, "left", "right");
     let LeaseAcquireDto::Acquired(_) =
         lease_acquire_in(&store, &state.leases, &left, &right, &canon).unwrap()

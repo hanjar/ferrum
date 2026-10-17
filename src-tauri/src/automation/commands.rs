@@ -13,14 +13,19 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::automation::approval;
 use crate::automation::confirm_text::{self, Prompt};
+use crate::automation::dpapi::{ApprovalKeys, DpapiKeyFile, NoKeys};
+use crate::automation::dto;
 use crate::automation::lease::{LeaseEnv, LeaseRegistry, ManualAcquire};
 use crate::automation::manual_run;
 use crate::automation::model::{
     self, Draft, FieldError, PolicyDraft, ProfilePolicy, RootIdentity, WireCompare,
     WireDeletePolicy, WireMode, WireSide,
 };
+use crate::automation::profile_baseline::ProfileBaselineStore;
 use crate::automation::store::{Store, StoreError, profiles};
+use crate::automation::test_run::{self, DryRun, TestLedger};
 use crate::profile;
 use crate::sync_engine::roots::{
     self, FsProbe, READINESS_BUDGET, RootError, RootProbe, RootProbeOutcome, probe_with,
@@ -35,18 +40,58 @@ pub struct AutomationState {
     pub store: Arc<Store>,
     /// Manual root leases of this process (design §3.4); the webview only holds their tokens.
     pub leases: Arc<LeaseRegistry>,
+    /// The DPAPI-protected approval key (design §8.4).
+    pub keys: Arc<dyn ApprovalKeys>,
+    /// Test runs of THIS process, the only ones an approval accepts (SE-3.2).
+    pub tests: Arc<TestLedger>,
+    /// Baselines of profile and automation runs: a separate, MAC'd store the manual
+    /// `sync_baseline_*` commands cannot reach (FER-522).
+    pub baselines: ProfileBaselineStore,
 }
 
 impl AutomationState {
     pub fn open() -> Self {
-        let store = match store_dir() {
-            Some(dir) => Store::open(&dir, env!("CARGO_PKG_VERSION")),
+        let dir = store_dir();
+        let store = match &dir {
+            Some(dir) => Store::open(dir, env!("CARGO_PKG_VERSION")),
             // No resolvable local data folder: the store is unavailable, never relocated.
             None => Store::unavailable(),
         };
+        Self::from_parts(
+            Arc::new(store),
+            Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+            dir.as_deref(),
+        )
+    }
+
+    /// Assemble the state around an opened store. `dir` is the store directory: the approval key
+    /// and the profile baselines live next to the database. `None` = nothing can be approved.
+    pub fn from_parts(
+        store: Arc<Store>,
+        leases: Arc<LeaseRegistry>,
+        dir: Option<&std::path::Path>,
+    ) -> Self {
+        // A store that is unavailable or untrusted (for example its folder is a junction) gets no
+        // key file and no baseline folder: nothing may be created next to it (SE-5).
+        let usable = !matches!(
+            store.check_writable(),
+            Err(StoreError::Unavailable | StoreError::Untrusted)
+        );
+        let dir = if usable { dir } else { None };
+        let keys: Arc<dyn ApprovalKeys> = match dir {
+            Some(dir) => Arc::new(DpapiKeyFile::new(dir)),
+            None => Arc::new(NoKeys),
+        };
+        let baselines = match dir {
+            Some(dir) => ProfileBaselineStore::open(dir, keys.clone()),
+            None => ProfileBaselineStore::unavailable(),
+        };
         Self {
-            store: Arc::new(store),
-            leases: Arc::new(LeaseRegistry::new(LeaseEnv::system())),
+            store,
+            leases,
+            keys,
+            tests: Arc::new(TestLedger::new()),
+            baselines,
         }
     }
 }
@@ -497,6 +542,7 @@ fn summary_of(
     rec: &profiles::ProfileRecord,
     policy: &ProfilePolicy,
     readiness: ReadinessDto,
+    used_by: i64,
 ) -> ProfileSummaryDto {
     ProfileSummaryDto {
         id: rec.id.clone(),
@@ -507,7 +553,7 @@ fn summary_of(
         mode_label: model::mode_label(&policy.mode),
         delete_label: model::delete_label(&policy.delete_policy),
         readiness,
-        used_by: 0, // P1.1: automations using this profile (SP-9.5).
+        used_by,
     }
 }
 
@@ -566,18 +612,35 @@ pub fn list_in(
     probe: &ProbeArc<dyn RootProbe>,
 ) -> Result<Vec<ProfileSummaryDto>, CommandError> {
     // The store lock is held only for the read; the live probes run after it is released.
-    let records = store.with_read(profiles::list)?;
+    let (records, used) = store.with_read(
+        |conn| -> Result<(Vec<profiles::ProfileRecord>, Vec<i64>), StoreError> {
+            let records = profiles::list(conn)?;
+            let used = records
+                .iter()
+                .map(|r| profiles::used_by(conn, &r.id))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((records, used))
+        },
+    )?;
     let mut out = Vec::with_capacity(records.len());
-    for wave in records.chunks(READINESS_WAVE) {
+    for (wave, counts) in records
+        .chunks(READINESS_WAVE)
+        .zip(used.chunks(READINESS_WAVE))
+    {
         let summaries: Vec<ProfileSummaryDto> = std::thread::scope(|scope| {
             let handles: Vec<_> = wave
                 .iter()
-                .map(|rec| scope.spawn(move || summary_row(rec, probe)))
+                .zip(counts)
+                .map(|(rec, used)| scope.spawn(move || summary_row(rec, probe, *used)))
                 .collect();
             handles
                 .into_iter()
-                .zip(wave)
-                .map(|(handle, rec)| handle.join().unwrap_or_else(|_| invalid_summary(rec)))
+                .zip(wave.iter().zip(counts))
+                .map(|(handle, (rec, used))| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| invalid_summary(rec, *used))
+                })
                 .collect()
         });
         out.extend(summaries);
@@ -588,19 +651,20 @@ pub fn list_in(
 fn summary_row(
     rec: &profiles::ProfileRecord,
     probe: &ProbeArc<dyn RootProbe>,
+    used_by: i64,
 ) -> ProfileSummaryDto {
     match parse_policy(&rec.policy) {
         Ok(policy) => {
             let readiness = readiness_dto(&policy, probe, READINESS_BUDGET);
-            summary_of(rec, &policy, readiness)
+            summary_of(rec, &policy, readiness, used_by)
         }
         // An invalid stored row is never fixed silently (design §4.4): it shows as a profile
         // that needs review.
-        Err(_) => invalid_summary(rec),
+        Err(_) => invalid_summary(rec, used_by),
     }
 }
 
-fn invalid_summary(rec: &profiles::ProfileRecord) -> ProfileSummaryDto {
+fn invalid_summary(rec: &profiles::ProfileRecord, used_by: i64) -> ProfileSummaryDto {
     ProfileSummaryDto {
         id: rec.id.clone(),
         name: rec.name.clone(),
@@ -612,7 +676,7 @@ fn invalid_summary(rec: &profiles::ProfileRecord) -> ProfileSummaryDto {
         readiness: ReadinessDto::NotReady {
             reason: reasons::PROFILE_INVALID.into(),
         },
-        used_by: 0,
+        used_by,
     }
 }
 
@@ -1037,7 +1101,202 @@ pub async fn sync_lease_release(
         .map_err(|_| internal())?
 }
 
-/// Whether profile runs may skip content reads with the indexer journal (IX-1): the user's
+// ── Automation commands (design §7.2, P1.1) ──
+//
+// Thin wrappers: every decision lives in `automation::approval` / `test_run`, driven there by
+// injected seams. None of these commands takes a "confirmed" flag; the native dialog is shown
+// here, by the backend, from data the backend validated and stored (SE-1, SE-2).
+
+/// Whether the background runner can run automations. The runner arrives with P3; until then an
+/// automation with the `background` runtime cannot pass its test and cannot be approved.
+fn background_ready() -> bool {
+    false
+}
+
+/// The engine's read-only dry run of a profile for the automation test (AP-4.1), against the
+/// separate profile baseline store.
+fn engine_dry_run(
+    baselines: &crate::sync_baseline::SyncBaselineStore,
+    env: &crate::sync_engine::env::EngineEnv,
+    incremental: bool,
+    policy: &ProfilePolicy,
+) -> DryRun {
+    use crate::sync_engine::execute::{EngineOutcome, EngineRequest, run};
+    let mut req = EngineRequest::new(policy, baselines, &crate::sync_engine::NoSink, env);
+    req.dry_run = true;
+    req.incremental = incremental;
+    let report = run(&req);
+    match report.outcome {
+        EngineOutcome::DryRun {
+            plan,
+            conflicts,
+            guard,
+        } => DryRun::Done {
+            summary: plan,
+            conflicts,
+            guard,
+        },
+        EngineOutcome::Failed { error } => match error.code {
+            "blocked" | "cap_exceeded" => {
+                DryRun::Blocked(report.blockers.iter().map(|b| (*b).to_string()).collect())
+            }
+            code => DryRun::Failed(code.to_string()),
+        },
+        _ => DryRun::Failed("incomplete".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn automation_validate(
+    state: State<'_, AutomationState>,
+    draft: model::AutomationDraft,
+) -> Result<dto::AutomationValidateDto, CommandError> {
+    let store = state.store.clone();
+    let probe: Arc<dyn RootProbe> = Arc::new(FsProbe);
+    tauri::async_runtime::spawn_blocking(move || {
+        approval::validate_in(&store, &draft, &probe, READINESS_BUDGET, background_ready())
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Read-only test of an automation draft (AP-4). `id` is the automation being edited (absent for
+/// a new one: the answer names the id it will get).
+#[tauri::command]
+pub async fn automation_test<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AutomationState>,
+    previews: State<'_, manual_run::PreviewBoard>,
+    id: Option<String>,
+    draft: model::AutomationDraft,
+) -> Result<dto::TestResultDto, CommandError> {
+    let store = state.store.clone();
+    let ledger = state.tests.clone();
+    let baselines = state.baselines.engine_store().clone();
+    let board = previews.inner().clone();
+    let incremental = journal_skip_enabled(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        // A test is a full compare: it shares the preview slots so a flood of tests cannot
+        // pile up engine runs.
+        let _slot = board.begin_preview().ok_or_else(|| {
+            CommandError::new(
+                "in_use",
+                "Another comparison is running - try again in a moment",
+            )
+        })?;
+        let env = crate::sync_engine::env::EngineEnv::production();
+        let probe: Arc<dyn RootProbe> = Arc::new(FsProbe);
+        let dry = |policy: &ProfilePolicy| engine_dry_run(&baselines, &env, incremental, policy);
+        let deps = test_run::TestDeps {
+            probe: &probe,
+            budget: READINESS_BUDGET,
+            dry_run: &dry,
+            access: &test_run::fs_access,
+            background_ready: background_ready(),
+        };
+        approval::test_in(
+            &store,
+            &ledger,
+            approval::TestRequest { id, draft },
+            &deps,
+            &now_ms,
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Approve (and enable) an automation after a passed test. The backend shows the native
+/// confirmation; the webview only learns the outcome.
+#[tauri::command]
+pub async fn automation_approve<R: tauri::Runtime>(
+    state: State<'_, AutomationState>,
+    window: tauri::Window<R>,
+    id: Option<String>,
+    expected_config_rev: Option<i64>,
+    draft: model::AutomationDraft,
+    test_id: String,
+) -> Result<dto::ApproveResultDto, CommandError> {
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    let ledger = state.tests.clone();
+    let owner = owner_hwnd(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let deps = approval::Deps {
+            keys: keys.as_ref(),
+            ledger: &ledger,
+            clock: &now_ms,
+        };
+        approval::approve_in(
+            &store,
+            approval::ApproveRequest {
+                id,
+                expected_config_rev,
+                draft,
+                test_id,
+            },
+            &deps,
+            |prompt| crate::native_dialog::confirm_or_busy(owner, prompt.caption, &prompt.text),
+        )
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Enable (resume: native confirmation, approval re-verified) or disable (safe direction, no
+/// dialog) an automation.
+#[tauri::command]
+pub async fn automation_set_enabled<R: tauri::Runtime>(
+    state: State<'_, AutomationState>,
+    window: tauri::Window<R>,
+    id: String,
+    enabled: bool,
+) -> Result<dto::SetEnabledResultDto, CommandError> {
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    let ledger = state.tests.clone();
+    let owner = owner_hwnd(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let deps = approval::Deps {
+            keys: keys.as_ref(),
+            ledger: &ledger,
+            clock: &now_ms,
+        };
+        approval::set_enabled_in(&store, &id, enabled, &deps, |prompt| {
+            crate::native_dialog::confirm_or_busy(owner, prompt.caption, &prompt.text)
+        })
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Pause an automation (the configuration part; stopping a running run joins in with the host).
+/// Safe direction: no native dialog.
+#[tauri::command]
+pub async fn automation_pause(
+    state: State<'_, AutomationState>,
+    id: String,
+    mode: dto::PauseMode,
+) -> Result<dto::PauseResultDto, CommandError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || approval::pause_in(&store, &id, mode, &now_ms))
+        .await
+        .map_err(|_| internal())?
+}
+
+/// Delete an automation. The webview confirms in its own dialog (safe direction).
+#[tauri::command]
+pub async fn automation_delete(
+    state: State<'_, AutomationState>,
+    id: String,
+) -> Result<dto::DeleteAutomationDto, CommandError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || approval::delete_in(&store, &id))
+        .await
+        .map_err(|_| internal())?
+}
+
+// Whether profile runs may skip content reads with the indexer journal (IX-1): the user's
 /// Settings flag, read here too so the webview alone can never turn it on.
 fn journal_skip_enabled<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     profile::config_dir(app)
@@ -1052,12 +1311,12 @@ fn journal_skip_enabled<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 pub async fn sync_profile_preview<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AutomationState>,
-    baselines: State<'_, crate::sync_baseline::SyncBaselineStore>,
     previews: State<'_, manual_run::PreviewBoard>,
     id: String,
 ) -> Result<manual_run::PreviewDto, CommandError> {
     let store = state.store.clone();
-    let baselines = baselines.inner().clone();
+    // Profile runs use the separate, MAC'd baseline store (FER-522), never the manual one.
+    let baselines = state.baselines.engine_store().clone();
     let board = previews.inner().clone();
     let incremental = journal_skip_enabled(&app);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1122,7 +1381,6 @@ pub async fn sync_profile_run<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AutomationState>,
     window: tauri::Window<R>,
-    baselines: State<'_, crate::sync_baseline::SyncBaselineStore>,
     previews: State<'_, manual_run::PreviewBoard>,
     id: String,
     preview_id: String,
@@ -1130,7 +1388,8 @@ pub async fn sync_profile_run<R: tauri::Runtime>(
 ) -> Result<manual_run::RunStartedDto, CommandError> {
     let store = state.store.clone();
     let lease_env = state.leases.env().clone();
-    let baselines = baselines.inner().clone();
+    // Profile runs use the separate, MAC'd baseline store (FER-522), never the manual one.
+    let baselines = state.baselines.engine_store().clone();
     let board = previews.inner().clone();
     let owner = owner_hwnd(&window);
     let incremental = journal_skip_enabled(&app);
@@ -1176,7 +1435,7 @@ pub async fn sync_profile_run<R: tauri::Runtime>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::automation::model::{DraftGuard, WireCompare, WireDeletePolicy, WireMode, WireSide};
     use crate::automation::store::Store;
@@ -2112,7 +2371,7 @@ mod tests {
 
     // ── IPC contract (P1-1): request fixtures shared with the TypeScript tests. ──
 
-    mod ipc {
+    pub(crate) mod ipc {
         //! The wire contract of the request side (P1-1). The webview calls a command with a flat
         //! object `{ id, expectedRevision, draft }`; Tauri hands each Rust parameter the value
         //! under its camelCase name. The Rust wrappers and the TypeScript wrappers are both held
@@ -2123,7 +2382,7 @@ mod tests {
 
         const SOURCE: &str = include_str!("commands.rs");
 
-        fn fixture(name: &str) -> serde_json::Value {
+        pub(crate) fn fixture(name: &str) -> serde_json::Value {
             let dir = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../contract-fixtures/automation/"
@@ -2151,7 +2410,7 @@ mod tests {
 
         /// The IPC argument keys of a command: its parameters minus the injected ones (state,
         /// window, app handle), camelCased the way Tauri names them.
-        fn wire_keys(command: &str) -> Vec<String> {
+        pub(crate) fn wire_keys(command: &str) -> Vec<String> {
             let start = SOURCE
                 .find(&format!("pub async fn {command}"))
                 .unwrap_or_else(|| panic!("{command} is defined"));
@@ -2206,7 +2465,7 @@ mod tests {
             keys
         }
 
-        fn fixture_keys(value: &serde_json::Value) -> Vec<String> {
+        pub(crate) fn fixture_keys(value: &serde_json::Value) -> Vec<String> {
             let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
             keys.sort();
             keys
@@ -2366,3 +2625,7 @@ mod tests {
 #[cfg(test)]
 #[path = "commands_lease_tests.rs"]
 mod lease_tests;
+
+#[cfg(test)]
+#[path = "commands_approval_tests.rs"]
+mod approval_tests;

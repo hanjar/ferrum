@@ -5,7 +5,10 @@
 //! webview-supplied display text, SE-2/threat T4), shortened to [`PART_MAX_CHARS`] characters
 //! with an ellipsis in the middle, and the whole text stays within [`PROMPT_MAX_CHARS`].
 
-use crate::automation::model::{ProfilePolicy, SyncMode, delete_label, mode_label, shorten_middle};
+use crate::automation::model::{
+    AutomationPolicy, DeletePolicy, Freq, MissedPolicy, ProfilePolicy, Runtime, SyncMode, Trigger,
+    delete_label, mode_label, shorten_middle,
+};
 use crate::hotlist::model::is_format_char;
 
 /// One part of a prompt is at most this many characters (§10.3).
@@ -158,6 +161,153 @@ pub fn run_prompt(
         ),
     }
 }
+
+// ── Automation approval and resume (design §10.3, SE-2.1, SE-2.2) ──
+
+/// Captions of the automation confirmations.
+pub const APPROVE_CAPTION: &str = "Ferrum - enable automation?";
+pub const REAPPROVE_CAPTION: &str = "Ferrum - re-approve automation?";
+pub const RESUME_CAPTION: &str = "Ferrum - resume automation?";
+
+const AUTOMATION_CLOSING: &str = "Ferrum asks again whenever the profile's folders, direction, delete policy, filters, trigger or runtime change.";
+
+/// Which question the dialog asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAction {
+    /// A new automation (approval after a passed test).
+    Enable,
+    /// An existing automation saved again or reviewed after a profile change.
+    Reapprove,
+    /// Resume (enable) a paused automation (SE-2.1).
+    Resume,
+}
+
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// The trigger part of the dialog ("Every day at 02:00 (Asia/Jakarta); a missed run is skipped").
+pub fn trigger_line(trigger: &Trigger) -> String {
+    match trigger {
+        Trigger::Schedule(s) => {
+            let when = match &s.freq {
+                Freq::Once { date } => format!("Once on {} at {}", part(date), part(&s.time)),
+                Freq::Daily {} => format!("Every day at {}", part(&s.time)),
+                Freq::Weekly { days } => {
+                    let names: Vec<&str> = days
+                        .iter()
+                        .filter_map(|d| WEEKDAYS.get(usize::from(*d)).copied())
+                        .collect();
+                    format!("Every {} at {}", names.join(", "), part(&s.time))
+                }
+            };
+            let missed = match s.missed {
+                MissedPolicy::Skip => "a missed run is skipped",
+                MissedPolicy::RunOnce => "a missed run happens once when possible",
+            };
+            format!("{when} ({}); {missed}.", part(&s.tz))
+        }
+        Trigger::Watch(w) => {
+            let roots = match (w.watch_left, w.watch_right) {
+                (true, true) => "both folders",
+                (true, false) => "the left folder",
+                (false, true) => "the right folder",
+                (false, false) => "no folder",
+            };
+            let on = match (w.on_changes, w.on_available) {
+                (true, true) => "changes and when a folder becomes available",
+                (true, false) => "changes",
+                (false, true) => "a folder becoming available",
+                (false, false) => "nothing",
+            };
+            format!(
+                "Watches {roots} for {on}; starts after {} s without changes (waits at most {} s).",
+                w.idle_secs, w.max_wait_secs
+            )
+        }
+    }
+}
+
+fn runtime_line(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Background => "Runs while you're signed in, even when Ferrum is closed.",
+        Runtime::App => "Runs only while Ferrum is open.",
+    }
+}
+
+/// Keep the whole text within [`PROMPT_MAX_CHARS`], cutting from the END so the warnings that
+/// come first always survive (SE-2).
+fn bound(text: String) -> String {
+    if text.chars().count() <= PROMPT_MAX_CHARS {
+        return text;
+    }
+    let mut cut: String = text.chars().take(PROMPT_MAX_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// Prompt for approving, re-approving or resuming an automation. Built from validated, stored
+/// data only. Order (design §10.3): warning lines → action line → profile line → trigger line →
+/// runtime line → closing line.
+pub fn approval_prompt(
+    action: ApprovalAction,
+    name: &str,
+    profile_name: &str,
+    profile_revision: i64,
+    profile: &ProfilePolicy,
+    automation: &AutomationPolicy,
+) -> Prompt {
+    let mut lines: Vec<String> = Vec::new();
+    if matches!(profile.delete_policy, DeletePolicy::Permanent) {
+        lines.push(PERMANENT_WARNING.into());
+    }
+    if !profile.guard.enabled {
+        lines.push(GUARD_OFF_WARNING.into());
+    }
+    if matches!(
+        profile.mode,
+        SyncMode::TwoWay {
+            propagate_deletes: true
+        }
+    ) {
+        lines.push(PROPAGATE_WARNING.into());
+    }
+    let what = format!(
+        "\"{}\" rev {profile_revision} ({} → {}, {}, {})",
+        part(profile_name),
+        part(&profile.left.path),
+        part(&profile.right.path),
+        part(&mode_label(&profile.mode)),
+        part(&delete_label(&profile.delete_policy)),
+    );
+    match action {
+        ApprovalAction::Enable => {
+            lines.push(format!("Enable automation \"{}\"?", part(name)));
+            lines.push(format!("It will run sync profile {what}."));
+        }
+        ApprovalAction::Reapprove => {
+            lines.push(format!("Re-approve automation \"{}\"?", part(name)));
+            lines.push(format!("It will run sync profile {what}."));
+        }
+        // SE-2.1: Resume "<name>"? It will run "<profile>" rev 3 (...) <trigger>, <runtime>.
+        ApprovalAction::Resume => {
+            lines.push(format!("Resume \"{}\"?", part(name)));
+            lines.push(format!("It will run sync profile {what}."));
+        }
+    }
+    lines.push(trigger_line(&automation.trigger));
+    lines.push(runtime_line(automation.runtime).into());
+    lines.push(AUTOMATION_CLOSING.into());
+    Prompt {
+        caption: match action {
+            ApprovalAction::Enable => APPROVE_CAPTION,
+            ApprovalAction::Reapprove => REAPPROVE_CAPTION,
+            ApprovalAction::Resume => RESUME_CAPTION,
+        },
+        text: bound(lines.join("\n\n")),
+    }
+}
+
+#[cfg(test)]
+mod approval_tests;
 
 #[cfg(test)]
 mod tests {

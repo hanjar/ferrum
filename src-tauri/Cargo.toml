@@ -32,6 +32,8 @@ getrandom = "0.3"
 tauri-plugin-log = "2"
 trash = "5"
 sha2 = "0.10"
+# Automation P1.1 (design §8.4): approval and profile-baseline MACs (already in the lock).
+hmac = "0.12"
 sha1 = "0.10"
 md-5 = "0.10"
 crc32fast = "1"
@@ -69,6 +71,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_NetworkManagement_WNet",
     # Automation P0.2: local time for the versioning folder stamp (GetLocalTime).
     "Win32_System_SystemInformation",
+    # Automation P1.1 (design §8.4): DPAPI (CryptProtectData) protects the approval MAC key.
+    "Win32_Security_Cryptography",
 ] }
 # Automation P0.3: the automation store (same version and `bundled` feature as the activity
 # store; design §4.2, §6.2).

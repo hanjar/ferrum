@@ -255,7 +255,13 @@ pub fn run() {
             automation::commands::sync_profile_preview,
             automation::commands::sync_profile_run,
             automation::commands::sync_lease_acquire,
-            automation::commands::sync_lease_release
+            automation::commands::sync_lease_release,
+            automation::commands::automation_validate,
+            automation::commands::automation_test,
+            automation::commands::automation_approve,
+            automation::commands::automation_set_enabled,
+            automation::commands::automation_pause,
+            automation::commands::automation_delete
         ])
         .manage(media_protocol::MediaRegistry::new())
         .manage(hotlist::store::Store::new())

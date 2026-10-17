@@ -15,9 +15,10 @@ use rusqlite::{Connection, params};
 
 use super::StoreError;
 
-/// Schema version this binary was compiled with. Version 1 ships with the store foundation;
+/// Schema version this binary was compiled with. Version 1 ships with the store foundation,
+/// version 2 (P1.1) adds automations, approvals, runtime, queue, runs, events and controls;
 /// later packages bump it and add one step each.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Name of the migration lock file inside the store directory.
 pub const LOCK_FILE: &str = "automation.migrate.lock";
@@ -179,9 +180,28 @@ fn apply_step(conn: &Connection, version: i64, app_version: &str) -> Result<(), 
             }
             Ok(())
         }
+        2 => {
+            conn.execute_batch(V2)
+                .map_err(|_| StoreError::Unavailable)?;
+            conn.execute(
+                "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(|_| StoreError::Unavailable)
+        }
         // Later packages add `n => ...` steps here.
         _ => Err(StoreError::Unavailable),
     }
+}
+
+/// A store exactly as schema version 1 left it (the fixture of every later migration test): the
+/// real v1 step plus `user_version = 1`.
+#[cfg(test)]
+pub(super) fn create_v1_for_tests(conn: &Connection, app_version: &str) -> Result<(), StoreError> {
+    apply_step(conn, 1, app_version)?;
+    conn.pragma_update(None, "user_version", 1)
+        .map_err(|_| StoreError::Unavailable)
 }
 
 /// Schema v1 (Automation design §4.3), verbatim. All timestamps are Unix epoch milliseconds;
@@ -225,4 +245,115 @@ CREATE TABLE hosts(
   schema_version INTEGER NOT NULL,
   session_id INTEGER NOT NULL,
   last_beat_ms INTEGER NOT NULL);
+";
+
+/// Schema v2 (Automation design §4.3 and §3.5), verbatim: the automation tables. P1.1 uses
+/// `automations`, `approvals`, `automation_runtime`, `queue`, `events` and (for the running-run
+/// check) `runs`; `run_ops` and `controls` are created now so P1.2/P1.3 need no further schema
+/// step.
+const V2: &str = "
+CREATE TABLE automations(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('schedule','watch')),
+  profile_id TEXT NOT NULL REFERENCES profiles(id),
+  policy TEXT NOT NULL,
+  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+  config_rev INTEGER NOT NULL,
+  created_ms INTEGER NOT NULL,
+  updated_ms INTEGER NOT NULL);
+
+CREATE TABLE approvals(
+  automation_id TEXT PRIMARY KEY REFERENCES automations(id) ON DELETE CASCADE,
+  hash_version INTEGER NOT NULL,
+  policy_hash TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL,
+  config_rev INTEGER NOT NULL,
+  approved_ms INTEGER NOT NULL,
+  mac TEXT NOT NULL);
+
+CREATE TABLE automation_runtime(
+  automation_id TEXT PRIMARY KEY REFERENCES automations(id) ON DELETE CASCADE,
+  host_class TEXT NOT NULL CHECK(host_class IN ('app','background')),
+  trigger_state TEXT NOT NULL,
+  state_since_ms INTEGER NOT NULL,
+  quiet_until_ms INTEGER,
+  burst_started_ms INTEGER,
+  pending_rerun INTEGER NOT NULL DEFAULT 0,
+  check_reason TEXT,
+  attention TEXT,
+  schedule_cursor_ms INTEGER,
+  last_fired_occurrence_ms INTEGER,
+  next_occurrence_ms INTEGER,
+  updated_ms INTEGER NOT NULL);
+
+CREATE TABLE queue(
+  id INTEGER PRIMARY KEY,
+  automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL,
+  host_class TEXT NOT NULL,
+  trigger_kind TEXT NOT NULL,
+  trigger_text TEXT NOT NULL,
+  retry_of INTEGER,
+  merged_count INTEGER NOT NULL DEFAULT 0,
+  merged_reasons TEXT NOT NULL DEFAULT '[]',
+  enqueued_ms INTEGER NOT NULL,
+  UNIQUE(profile_id));
+
+CREATE TABLE runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  automation_id TEXT,
+  automation_name TEXT,
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL,
+  policy_hash TEXT,
+  host_class TEXT NOT NULL,
+  trigger_kind TEXT NOT NULL,
+  trigger_text TEXT NOT NULL,
+  merged_count INTEGER NOT NULL DEFAULT 0,
+  retry_of INTEGER,
+  started_ms INTEGER NOT NULL,
+  ended_ms INTEGER,
+  phase TEXT NOT NULL,
+  outcome TEXT,
+  ops_total INTEGER NOT NULL DEFAULT 0,
+  counts TEXT NOT NULL DEFAULT '{}',
+  error_text TEXT,
+  note TEXT,
+  resolved_by INTEGER,
+  resolved_text TEXT,
+  recheck TEXT);
+
+CREATE TABLE run_ops(
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  side TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  size INTEGER,
+  status TEXT NOT NULL,
+  error_code TEXT,
+  error_text TEXT,
+  PRIMARY KEY(run_id, seq));
+
+CREATE TABLE events(
+  id INTEGER PRIMARY KEY,
+  automation_id TEXT NOT NULL,
+  at_ms INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('ok','warn','bad','mute','info')),
+  text TEXT NOT NULL,
+  run_id INTEGER);
+
+CREATE TABLE controls(
+  id INTEGER PRIMARY KEY,
+  automation_id TEXT,
+  run_id INTEGER,
+  action TEXT NOT NULL CHECK(action IN ('runNow','stop','pauseFinish','pauseStop','recheck','retry','reload','restartRunner')),
+  created_ms INTEGER NOT NULL,
+  handled_ms INTEGER,
+  result TEXT);
+
+CREATE INDEX events_by_auto ON events(automation_id, at_ms DESC);
+CREATE INDEX runs_by_auto ON runs(automation_id, started_ms DESC);
 ";

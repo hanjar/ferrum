@@ -788,6 +788,310 @@ pub fn new_profile_id() -> Option<String> {
     ))
 }
 
+// ── Automation model (design §4.4, P1.1) ──
+//
+// The stored policy of one automation and its IPC draft are the same shape: the wire type IS
+// the stored type, validated after deserialization. `deny_unknown_fields` everywhere is the SE-1
+// backstop - nothing behaving like a `confirmed` flag can ride along.
+
+/// Retries of a transient error per run (RQ-7.1): `0..=MAX_RETRIES`, default [`DEFAULT_RETRIES`].
+pub const MAX_RETRIES: u8 = 3;
+pub const DEFAULT_RETRIES: u8 = 2;
+/// Quiet period of a watch trigger, seconds (WA-1).
+pub const IDLE_SECS_RANGE: std::ops::RangeInclusive<u32> = 2..=3600;
+/// Longest wait for a folder that never goes quiet, seconds (WA-1.4, design Q3).
+pub const MAX_WAIT_SECS_RANGE: std::ops::RangeInclusive<u32> = 60..=86_400;
+pub const DEFAULT_MAX_WAIT_SECS: u32 = 900;
+/// Longest IANA zone id accepted (`America/Argentina/ComodRivadavia` is 32).
+pub const TZ_MAX_CHARS: usize = 64;
+
+/// Where an automation runs (RT-1): only while Ferrum is open, or in the background runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Runtime {
+    App,
+    Background,
+}
+
+/// What to do about a schedule slot that passed while nothing was running (SC-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MissedPolicy {
+    Skip,
+    RunOnce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum Freq {
+    /// One run on `date` (`YYYY-MM-DD`, the zone's calendar).
+    Once {
+        date: String,
+    },
+    Daily {},
+    /// Weekdays `0 = Sunday .. 6`, sorted and unique.
+    Weekly {
+        days: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScheduleTrigger {
+    pub freq: Freq,
+    /// `HH:MM`, 24 hours.
+    pub time: String,
+    /// IANA zone id (syntax checked here; the scheduler resolves it).
+    pub tz: String,
+    pub missed: MissedPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WatchTrigger {
+    pub watch_left: bool,
+    pub watch_right: bool,
+    pub on_changes: bool,
+    pub on_available: bool,
+    pub idle_secs: u32,
+    pub max_wait_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum Trigger {
+    Schedule(ScheduleTrigger),
+    Watch(WatchTrigger),
+}
+
+impl Trigger {
+    /// The `kind` column of `automations`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Trigger::Schedule(_) => "schedule",
+            Trigger::Watch(_) => "watch",
+        }
+    }
+}
+
+/// Optional run conditions (OP-1); all off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Conditions {
+    #[serde(default)]
+    pub skip_on_battery: bool,
+    #[serde(default)]
+    pub skip_on_metered: bool,
+}
+
+fn default_retries() -> u8 {
+    DEFAULT_RETRIES
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationPolicy {
+    pub trigger: Trigger,
+    pub runtime: Runtime,
+    #[serde(default = "default_retries")]
+    pub retries: u8,
+    #[serde(default)]
+    pub conditions: Conditions,
+}
+
+/// The IPC draft of an automation (design §7.2 `draft`): a name, the sync profile it runs and
+/// the automation policy. The profile id is an id the backend looks up; the webview never sends
+/// profile contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationDraft {
+    pub name: String,
+    pub profile_id: String,
+    pub policy: AutomationPolicy,
+}
+
+/// A draft that passed every check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedAutomation {
+    /// Trimmed display name (AP-2.1: 1..=80).
+    pub name: String,
+    pub profile_id: String,
+    pub policy: AutomationPolicy,
+}
+
+/// `YYYY-MM-DD` as a real calendar date (leap years honoured).
+fn is_calendar_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let digits = |r: std::ops::Range<usize>| -> Option<u32> {
+        let part = &s[r];
+        if part.bytes().all(|c| c.is_ascii_digit()) {
+            part.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (Some(y), Some(m), Some(d)) = (digits(0..4), digits(5..7), digits(8..10)) else {
+        return false;
+    };
+    if !(2000..=2200).contains(&y) || !(1..=12).contains(&m) || d == 0 {
+        return false;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if leap => 29,
+        _ => 28,
+    };
+    d <= days
+}
+
+/// `HH:MM`, 24 hours, exactly two digits each.
+fn is_clock_time(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 5 || b[2] != b':' {
+        return false;
+    }
+    let num = |a: u8, c: u8| -> Option<u32> {
+        (a.is_ascii_digit() && c.is_ascii_digit())
+            .then(|| u32::from(a - b'0') * 10 + u32::from(c - b'0'))
+    };
+    matches!((num(b[0], b[1]), num(b[3], b[4])), (Some(h), Some(m)) if h < 24 && m < 60)
+}
+
+/// IANA zone id syntax: `UTC`, `Asia/Jakarta`, `America/Argentina/Buenos_Aires`, `Etc/GMT+7`.
+/// Characters `A-Za-z0-9_+-` per component, components separated by `/`, none empty. Whether the
+/// zone EXISTS is the scheduler's question (it owns the time zone data).
+fn is_zone_syntax(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= TZ_MAX_CHARS
+        && s.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-'))
+        })
+}
+
+impl AutomationPolicy {
+    /// Validate the policy against the profile it will run (AP-2.1, SC-1, WA-2, SE-7). All
+    /// errors are collected so the editor can list them (AP-2.4). Field paths use dots
+    /// (`trigger.time`); codes are a closed snake_case vocabulary and never carry user text.
+    pub fn validate(&self, profile: &ProfilePolicy) -> Vec<FieldError> {
+        let mut errors: Vec<FieldError> = Vec::new();
+        if self.retries > MAX_RETRIES {
+            errors.push(fe("retries", "retries_out_of_range"));
+        }
+        match &self.trigger {
+            Trigger::Schedule(s) => {
+                if !is_clock_time(&s.time) {
+                    errors.push(fe("trigger.time", "time_invalid"));
+                }
+                if !is_zone_syntax(&s.tz) {
+                    errors.push(fe("trigger.tz", "tz_invalid"));
+                }
+                match &s.freq {
+                    Freq::Once { date } => {
+                        if !is_calendar_date(date) {
+                            errors.push(fe("trigger.date", "date_invalid"));
+                        }
+                    }
+                    Freq::Daily {} => {}
+                    Freq::Weekly { days } => {
+                        let sorted_unique = days.windows(2).all(|w| w[0] < w[1]);
+                        if days.is_empty() {
+                            errors.push(fe("trigger.days", "days_required"));
+                        } else if days.iter().any(|d| *d > 6) || !sorted_unique {
+                            errors.push(fe("trigger.days", "days_invalid"));
+                        }
+                    }
+                }
+            }
+            Trigger::Watch(w) => {
+                if !w.watch_left && !w.watch_right {
+                    errors.push(fe("trigger.watch", "watch_root_required"));
+                }
+                if !w.on_changes && !w.on_available {
+                    errors.push(fe("trigger.on", "watch_event_required"));
+                }
+                if !IDLE_SECS_RANGE.contains(&w.idle_secs) {
+                    errors.push(fe("trigger.idleSecs", "idle_out_of_range"));
+                }
+                if !MAX_WAIT_SECS_RANGE.contains(&w.max_wait_secs) {
+                    errors.push(fe("trigger.maxWaitSecs", "max_wait_out_of_range"));
+                }
+                // WA-2.3 / design Q2: only local drives have native change notifications.
+                for (watched, spec, field) in [
+                    (w.watch_left, &profile.left, "trigger.watchLeft"),
+                    (w.watch_right, &profile.right, "trigger.watchRight"),
+                ] {
+                    if watched && matches!(spec.identity, RootIdentity::Network { .. }) {
+                        errors.push(fe(field, "watch_unsupported_root"));
+                    }
+                }
+            }
+        }
+        errors
+    }
+}
+
+impl AutomationDraft {
+    /// Validate name, profile id shape and policy (the profile itself is looked up by the
+    /// caller; its policy is needed for the trigger checks).
+    pub fn validate(
+        &self,
+        profile: &ProfilePolicy,
+    ) -> Result<ValidatedAutomation, Vec<FieldError>> {
+        let mut errors: Vec<FieldError> = Vec::new();
+        let name = self.name.trim();
+        if name.is_empty() {
+            errors.push(fe("name", "name_required"));
+        } else if name.chars().count() > NAME_MAX_CHARS {
+            errors.push(fe("name", "name_too_long"));
+        }
+        if has_unsafe_char(&self.name) {
+            errors.push(fe("name", "name_control"));
+        }
+        if !is_profile_id(&self.profile_id) {
+            errors.push(fe("profileId", "profile_required"));
+        }
+        errors.extend(self.policy.validate(profile));
+        if errors.is_empty() {
+            Ok(ValidatedAutomation {
+                name: name.to_string(),
+                profile_id: self.profile_id.clone(),
+                policy: self.policy.clone(),
+            })
+        } else {
+            Err(errors)
+        }
+    }
+}
+
+/// Display name of a profile field code in an event line ("delete policy").
+pub fn field_label(field: &str) -> &'static str {
+    match field {
+        "leftRoot" => "left folder",
+        "rightRoot" => "right folder",
+        "leftIdentity" => "left folder identity",
+        "rightIdentity" => "right folder identity",
+        "mode" => "direction",
+        "deletePolicy" => "delete policy",
+        "compare" => "compare mode",
+        "filters" => "filters",
+        "guard" => "delete guard",
+        _ => "settings",
+    }
+}
+
+#[cfg(test)]
+mod automation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
