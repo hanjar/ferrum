@@ -834,6 +834,37 @@ profile_revision` and `automations.config_rev == config_rev` → MAC verifies. R
 where reason is one of `profileChanged{from,to}`, `policyChanged`, `notApproved`, `keyUnavailable`,
 `unsupportedVersion`.
 
+### 8.6 P1.1 implementation notes (as built)
+
+- **MAC layout.** Every field of the MAC input is length-prefixed (or a fixed `u64le`), not
+  concatenated bare, and the MAC also covers `hash_version` and `profile_id`. The exact layout is in
+  the module comment of `automation/policy.rs` and `docs/ipc.md`.
+- **`verify` order.** Approval row → hash version → profile id → **profile revision** → recomputed
+  `H` → `config_rev` → MAC. The revision is compared before `H` so that a profile edit reports
+  `profileChanged{from,to}` (the revision is inside `H`, so comparing `H` first would always say
+  `policyChanged`). A MAC that does not verify under a usable key is `notApproved`: the approval
+  does not authenticate on this machine for this user (tampered row, restored backup, key
+  recreated after loss).
+- **Test input.** `automation_test` takes `{ id?, draft }`: the policy hash covers the automation id,
+  so an edit is tested under its own id and a NEW automation gets its id from the test answer
+  (`automationId`). `automation_approve` takes the id of a new automation from the test ledger; the
+  webview never chooses one. A test record is single-use and re-checked for the 15-minute window
+  after the native confirmation.
+- **Profile and automation baselines (FER-522 decision).** Runs of profiles and automations use a
+  separate baseline store (`<automation dir>\baselines\`) whose files carry a MAC under a subkey of
+  the approval key (`automation/profile_baseline.rs`, `sync_baseline::BaselineAuth`). A file
+  without a valid MAC loads as `FirstRun { Untrusted }`, so no deletion is ever propagated from it;
+  `verify_profile_baseline(store, pair)` tells the runner (P1.3) `Trusted | Absent | Untrusted |
+RootsUnavailable` before it plans. The manual `sync_baseline_*` commands only hold the unsigned
+  manual store. Known limit: an older AUTHENTIC baseline replayed over a newer one still verifies.
+- **Schema v2** creates every table of §4.3 and §3.5 at once (`automations`, `approvals`,
+  `automation_runtime`, `queue`, `runs`, `run_ops`, `events`, `controls`); P1.2/P1.3 add logic, not a
+  schema step. `runs.id` is `AUTOINCREMENT` (never reused).
+- **Not yet built (later packages):** `next` occurrences of a schedule and the existence check of the
+  IANA zone (P1.4 owns the time zone data; P1.1 checks syntax), the background runner readiness
+  (P3: a `background` automation cannot pass its test until then), the gate and run part of pause
+  (P1.3).
+
 ## 9. State machines
 
 ### 9.1 Status precedence (`status::compute`)

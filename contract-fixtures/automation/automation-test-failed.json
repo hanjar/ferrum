@@ -1,0 +1,18 @@
+{
+  "testId": "c0ffee00-1234-4abc-8def-0123456789ab",
+  "automationId": "7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "policyHash": "5902abc04ac2ed79e3dd3a5769fab88747136c312abdfdc8f6aae94d48099dc8",
+  "steps": [
+    {
+      "id": "profile",
+      "status": "ok",
+      "text": "Sync profile \"Projects backup\" rev 3 is valid and ready."
+    },
+    {
+      "id": "source",
+      "status": "fail",
+      "text": "C:\\Users\\you\\Projects cannot be read with your account. Check its permissions and test again."
+    }
+  ],
+  "passed": false
+}

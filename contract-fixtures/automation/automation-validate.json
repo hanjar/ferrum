@@ -1,0 +1,16 @@
+{
+  "errors": [],
+  "checks": [
+    {
+      "id": "profile",
+      "status": "ok",
+      "text": "The sync profile is ready."
+    },
+    {
+      "id": "runtime",
+      "status": "ok",
+      "text": "Runs while Ferrum is open."
+    }
+  ],
+  "next": []
+}
