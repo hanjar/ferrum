@@ -159,6 +159,9 @@ impl From<StoreError> for CommandError {
                 "in_use",
                 "The profile is used by an automation - delete or change it first",
             ),
+            StoreError::Invalid => {
+                Self::new("invalid_input", "A value was outside its allowed range")
+            }
         }
     }
 }

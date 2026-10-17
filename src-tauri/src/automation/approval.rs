@@ -30,7 +30,7 @@ use crate::automation::model::{
 use crate::automation::policy::{self, HASH_VERSION, MacInput, Verdict};
 use crate::automation::store::approvals::{self, ApprovalRecord};
 use crate::automation::store::automations::{self, ApprovedAutomation, EventKind};
-use crate::automation::store::{Store, StoreError, profiles};
+use crate::automation::store::{Store, StoreError, profiles, runtime};
 use crate::automation::test_run::{self, TestDeps, TestLedger, TestRecord};
 
 /// Clock seam: milliseconds since the Unix epoch.
@@ -719,6 +719,8 @@ fn disable(
         automations::set_enabled(&tx, id, false, now)?;
         // Queued entries are cancelled; the run part (finish or stop) arrives with the host (P1.3).
         automations::clear_queue(&tx, id)?;
+        // RQ-8.2: pausing also drops the pending rerun.
+        runtime::set_pending_rerun(&tx, id, false, now)?;
         let text = match forced {
             Some(PauseMode::Stop) => "Paused \u{b7} the current run is stopped",
             Some(PauseMode::Finish) => "Paused \u{b7} the current run finishes first",

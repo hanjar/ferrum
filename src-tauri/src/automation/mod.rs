@@ -13,6 +13,8 @@ pub mod manual_run;
 pub mod model;
 pub mod policy;
 pub mod profile_baseline;
+pub mod read;
+pub mod status;
 pub mod store;
 pub mod test_run;
 
