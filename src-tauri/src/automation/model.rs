@@ -355,21 +355,25 @@ impl Draft {
 
         // FER-562: no root in Ferrum's own folders or a Windows Startup folder; a root that holds
         // one is refused when the profile writes to it.
+        // No file system access here (roots are already canonical), so a slow share cannot
+        // hold the editor.
         {
             let writable = written_sides(&mode);
+            let mut asked: Vec<(&'static str, String, bool)> = Vec::new();
             for (side, facts) in [(Side::Left, &left), (Side::Right, &right)] {
-                if let Some(f) = facts
-                    && let Some(v) =
-                        FerrumGuard.root_violation(&f.canonical, writable.contains(&side))
-                {
-                    errors.push(fe(side.field(), v.field_code()));
+                if let Some(f) = facts {
+                    asked.push((side.field(), f.canonical.clone(), writable.contains(&side)));
                 }
             }
             if let DeletePolicy::Versioning { root } = &delete_policy
                 && !root.is_empty()
-                && let Some(v) = FerrumGuard.root_violation(root, true)
             {
-                errors.push(fe("versioningRoot", v.field_code()));
+                asked.push(("versioningRoot", root.clone(), true));
+            }
+            for (field, path, w) in &asked {
+                if let Some(v) = FerrumGuard.root_violation(path, *w) {
+                    errors.push(fe(field, v.field_code()));
+                }
             }
         }
 
@@ -1285,9 +1289,12 @@ mod tests {
                 "read {inside}"
             );
         }
-        // A share that reaches this very machine can alias a protected folder: refused.
+        // A share that reaches this very machine can alias a protected folder: refused with
+        // its own code, on a read-only side too.
         let e = check(&draft("n", r"D:\From", r"\\localhost\c$\Users\x"));
-        assert_eq!(codes(&e, "right"), ["root_protected_folder"]);
+        assert_eq!(codes(&e, "right"), ["root_local_share"]);
+        let e = check(&draft("n", r"\\127.0.0.1\share", r"D:\To"));
+        assert_eq!(codes(&e, "left"), ["root_local_share"]);
         let e = check(&draft("n", r"D:\From", r"C:\Ferrum"));
         assert_eq!(codes(&e, "right"), ["root_contains_protected_folder"]);
         assert!(
@@ -1329,6 +1336,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn fer_562_roots_in_or_above_startup_are_refused() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let probe = FakeProbe::default();
         let startup =
             std::env::var("APPDATA").unwrap() + r"\Microsoft\Windows\Start Menu\Programs\Startup";

@@ -121,10 +121,14 @@ describe('wording', () => {
       'root_contains_protected_folder',
       'root_startup_folder',
       'root_contains_startup_folder',
+      'root_local_share',
     ]) {
       expect(fieldMessage({ field: 'right', code })).not.toContain('was refused');
     }
     expect(readinessReason({ status: 'notReady', reason: 'rootProtected' })).toContain('Startup');
+    expect(readinessReason({ status: 'notReady', reason: 'rootLocalShare' })).toContain(
+      'local path',
+    );
   });
 
   it('uses the singular and plural of SP-9.5', () => {

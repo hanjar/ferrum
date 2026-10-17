@@ -33,6 +33,9 @@ pub enum RootViolation {
     InsideStartup,
     /// Contains a Windows Startup folder and the profile can write to it.
     ContainsStartup,
+    /// A share that points at this very computer: it can alias any local folder, protected or
+    /// not, so it is refused as such (the local path works instead).
+    LocalShare,
 }
 
 impl RootViolation {
@@ -43,16 +46,21 @@ impl RootViolation {
             RootViolation::ContainsProtected => "root_contains_protected_folder",
             RootViolation::InsideStartup => "root_startup_folder",
             RootViolation::ContainsStartup => "root_contains_startup_folder",
+            RootViolation::LocalShare => "root_local_share",
         }
     }
 }
 
 /// The write policy of a sync run.
 pub trait WriteGuard: Send + Sync {
-    /// Is writing, overwriting or removing the entry at `path` (an already resolved, final path)
-    /// refused?
+    /// Is writing, overwriting or removing the entry at `path` refused? `path` is ALREADY a
+    /// resolved final path (the final path of a folder handle plus names): implementations
+    /// compare it without touching the file system, because the engine asks once per entry.
     fn refuses(&self, path: &Path) -> bool;
     /// Is the root `path` (canonical) refused? `writable`: the profile can change things inside.
+    /// Does NO file system access: roots arrive canonical (the probe resolved junctions, mapped
+    /// drives and symlinks already, and the gate / readiness compare it with the stored form),
+    /// so a slow or dead share can never stall this check.
     fn root_violation(&self, path: &str, writable: bool) -> Option<RootViolation>;
 }
 
@@ -62,24 +70,30 @@ pub struct FerrumGuard;
 impl WriteGuard for FerrumGuard {
     fn refuses(&self, path: &Path) -> bool {
         let s = path.to_string_lossy();
-        crate::protected_dirs::check_write_target(&s).is_err()
-            || crate::startup_guard::is_inside(path)
+        (s.starts_with(r"\\")
+            && crate::path_guard::is_local_machine_unc(
+                &crate::protected_dirs::resolve_lexical(path).to_string_lossy(),
+            ))
+            || crate::protected_dirs::touches_resolved(path, false)
+            || crate::startup_guard::touches_resolved(path, false)
     }
 
     fn root_violation(&self, path: &str, writable: bool) -> Option<RootViolation> {
-        let p = Path::new(path);
-        if crate::protected_dirs::check_write_target(path).is_err() {
+        let r = crate::protected_dirs::resolve_lexical(Path::new(path));
+        if crate::path_guard::is_local_machine_unc(&r.to_string_lossy()) {
+            return Some(RootViolation::LocalShare);
+        }
+        if crate::protected_dirs::touches_resolved(&r, false) {
             return Some(RootViolation::InsideProtected);
         }
-        if crate::startup_guard::is_inside(p) {
+        if crate::startup_guard::touches_resolved(&r, false) {
             return Some(RootViolation::InsideStartup);
         }
         if writable {
-            // `check_write_source` also refuses an ancestor of a protected folder.
-            if crate::protected_dirs::check_write_source(path).is_err() {
+            if crate::protected_dirs::touches_resolved(&r, true) {
                 return Some(RootViolation::ContainsProtected);
             }
-            if crate::startup_guard::is_startup_or_ancestor_path(p) {
+            if crate::startup_guard::touches_resolved(&r, true) {
                 return Some(RootViolation::ContainsStartup);
             }
         }
@@ -94,9 +108,10 @@ fn refused() -> Classified {
     }
 }
 
-/// The final (resolved, no `\\?\`) path of an open folder handle, or an error when the OS cannot
-/// tell (fail closed on Windows).
-fn final_dir(dir: &DirHandle) -> Result<PathBuf, Classified> {
+/// The final (resolved, no `\?\`) path of an open folder handle, or an error when the OS cannot
+/// tell (fail closed on Windows). One call per folder or batch; the entries below it are then
+/// checked with [`check_under`], which does not touch the disk.
+pub fn final_base(dir: &DirHandle) -> Result<PathBuf, Classified> {
     match publish::final_path(dir) {
         Some(p) => Ok(PathBuf::from(crate::path_guard::strip_verbatim(&p))),
         #[cfg(windows)]
@@ -109,32 +124,12 @@ fn final_dir(dir: &DirHandle) -> Result<PathBuf, Classified> {
     }
 }
 
-/// Check the entry `name` inside the open folder `dir` (`None`: the folder itself).
-pub fn check_entry(
-    guard: &dyn WriteGuard,
-    dir: &DirHandle,
-    name: Option<&str>,
-) -> Result<(), Classified> {
-    let mut path = final_dir(dir)?;
-    if let Some(name) = name {
-        path.push(name);
-    }
-    if guard.refuses(&path) {
-        return Err(refused());
-    }
-    Ok(())
-}
-
-/// Check the entry `comps` below the open folder `root` BEFORE any of its missing folders is
-/// created: `open_chain(.., create)` makes folders as it walks, so the verdict has to come first.
-/// The chain never follows a reparse point, so the final path of `root` plus the components is
-/// where the walk ends up.
-pub fn check_planned(
-    guard: &dyn WriteGuard,
-    root: &DirHandle,
-    comps: &[&str],
-) -> Result<(), Classified> {
-    let mut path = final_dir(root)?;
+/// Check the entry `comps` below the resolved folder `base` (see [`final_base`]). Pure string
+/// work: no file system access. Use it BEFORE `open_chain(.., create)` makes missing folders
+/// (the verdict has to come first); the chain never follows a reparse point, so `base` plus the
+/// components is where the walk ends up.
+pub fn check_under(guard: &dyn WriteGuard, base: &Path, comps: &[&str]) -> Result<(), Classified> {
+    let mut path = base.to_path_buf();
     for c in comps {
         path.push(c);
     }
@@ -142,6 +137,26 @@ pub fn check_planned(
         return Err(refused());
     }
     Ok(())
+}
+
+/// Check the entry `name` inside the open folder `dir` (`None`: the folder itself): one handle
+/// lookup, for callers that check a single entry.
+pub fn check_entry(
+    guard: &dyn WriteGuard,
+    dir: &DirHandle,
+    name: Option<&str>,
+) -> Result<(), Classified> {
+    let base = final_base(dir)?;
+    check_under(guard, &base, name.as_slice())
+}
+
+/// [`check_under`] with one handle lookup, for the callers that check a single path.
+pub fn check_planned(
+    guard: &dyn WriteGuard,
+    root: &DirHandle,
+    comps: &[&str],
+) -> Result<(), Classified> {
+    check_under(guard, &final_base(root)?, comps)
 }
 
 #[cfg(test)]
@@ -167,7 +182,8 @@ mod tests {
         std::fs::create_dir_all(cfg.join("sub")).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         protected_dirs::register([cfg.clone()]);
-        let s = |p: &Path| p.to_string_lossy().into_owned();
+        // Roots reach the guard in canonical form (long names); a CI temp dir may be 8.3.
+        let s = |p: &Path| protected_dirs::resolve(p).to_string_lossy().into_owned();
         let g = FerrumGuard;
         for writable in [false, true] {
             assert_eq!(
@@ -190,9 +206,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A share that points at this computer has its own verdict, read-only or not; the per-entry
+    /// check is pure string work on an already resolved path.
+    #[test]
+    fn local_shares_and_resolved_entry_checks() {
+        let _g = protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let g = FerrumGuard;
+        for writable in [false, true] {
+            assert_eq!(
+                g.root_violation(r"\\localhost\c$\Users\x", writable),
+                Some(RootViolation::LocalShare)
+            );
+            assert_eq!(
+                g.root_violation(r"\\127.0.0.1\share", writable),
+                Some(RootViolation::LocalShare)
+            );
+        }
+        assert_eq!(g.root_violation(r"\\fileserver\data", true), None);
+        protected_dirs::register([PathBuf::from(r"C:\Ferrum\State")]);
+        assert!(g.refuses(Path::new(r"C:\Ferrum\State\config.json")));
+        assert!(g.refuses(Path::new(r"c:\ferrum\STATE")));
+        assert!(!g.refuses(Path::new(r"C:\Ferrum\State2\x")));
+        assert!(!g.refuses(Path::new(r"C:\Ferrum")));
+        assert!(!g.refuses(Path::new(r"\\fileserver\data\x")));
+        // A folder base plus names, no disk access: `check_under` joins and asks the policy.
+        assert!(check_under(&g, Path::new(r"C:\Ferrum"), &["State", "a.txt"]).is_err());
+        assert!(check_under(&g, Path::new(r"C:\Ferrum"), &["Other", "a.txt"]).is_ok());
+        protected_dirs::register(Vec::<PathBuf>::new());
+    }
+
     #[cfg(windows)]
     #[test]
     fn startup_roots_and_their_ancestors() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let g = FerrumGuard;
         let startup =
             std::env::var("APPDATA").unwrap() + r"\Microsoft\Windows\Start Menu\Programs\Startup";
@@ -261,6 +311,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_real_startup_folder_is_refused_by_its_handle() {
+        let _g = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let startup =
             std::env::var("APPDATA").unwrap() + r"\Microsoft\Windows\Start Menu\Programs\Startup";
         let Ok(h) = publish::open_root_read(Path::new(&startup)) else {

@@ -212,6 +212,7 @@ const FIELD_MESSAGES: Record<string, string> = {
   root_startup_folder: "This is a Windows Startup folder; Ferrum doesn't write there.",
   root_contains_startup_folder:
     'This folder contains the Windows Startup folder, and the profile writes to it. Choose a narrower folder.',
+  root_local_share: 'Use the local path instead of a share pointing at this computer.',
   side_required: 'Choose a direction.',
   side_not_allowed: 'Two-way profiles have no direction.',
   propagate_not_allowed: 'Deletion propagation applies to two-way profiles only.',
@@ -261,6 +262,8 @@ const READINESS_REASONS: Record<string, string> = {
   recycleBinUnavailable:
     "Recycle Bin isn't available on a folder — choose a versioning folder or permanent delete.",
   versioningRootInvalid: "The versioning folder isn't usable.",
+  rootLocalShare:
+    'A folder is a share pointing at this computer. Open the profile and use the local path.',
   rootProtected:
     "A folder is, or contains, Ferrum's own settings or the Windows Startup folder. Open the profile and choose another folder.",
   profileInvalid: 'The saved profile is invalid. Open it to review.',

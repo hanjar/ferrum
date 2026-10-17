@@ -291,6 +291,8 @@ mod reasons {
     pub const PROFILE_INVALID: &str = "profileInvalid";
     /// FER-562: a folder is, or (when written) contains, Ferrum's own state folder or Startup.
     pub const ROOT_PROTECTED: &str = "rootProtected";
+    /// FER-562: a share that points at this very computer.
+    pub const ROOT_LOCAL_SHARE: &str = "rootLocalShare";
 }
 
 fn kind_of(identity: &RootIdentity) -> String {
@@ -372,22 +374,33 @@ pub fn readiness_dto(
     }
     // FER-562: a profile saved before the guard existed (or whose folders were protected since)
     // stays "not ready" instead of writing into Ferrum's state or Startup.
+    // String work on the stored canonical paths (no file system access), so a slow share cannot
+    // exceed the readiness budget here.
     if first_problem.is_none() && !checking {
-        use crate::sync_engine::write_guard::{FerrumGuard, WriteGuard};
+        use crate::sync_engine::write_guard::{FerrumGuard, RootViolation, WriteGuard};
         let writable = model::written_sides(&policy.mode);
-        let sides = [
-            (model::Side::Left, &policy.left.path),
-            (model::Side::Right, &policy.right.path),
+        let mut asked = vec![
+            (
+                policy.left.path.clone(),
+                writable.contains(&model::Side::Left),
+            ),
+            (
+                policy.right.path.clone(),
+                writable.contains(&model::Side::Right),
+            ),
         ];
-        let mut bad = sides.iter().any(|(s, p)| {
-            FerrumGuard
-                .root_violation(p, writable.contains(s))
-                .is_some()
-        });
-        if let model::DeletePolicy::Versioning { root } = &policy.delete_policy {
-            bad |= !root.is_empty() && FerrumGuard.root_violation(root, true).is_some();
+        if let model::DeletePolicy::Versioning { root } = &policy.delete_policy
+            && !root.is_empty()
+        {
+            asked.push((root.clone(), true));
         }
-        if bad {
+        let found: Vec<RootViolation> = asked
+            .iter()
+            .filter_map(|(p, w)| FerrumGuard.root_violation(p, *w))
+            .collect();
+        if found.contains(&RootViolation::LocalShare) {
+            first_problem = Some(reasons::ROOT_LOCAL_SHARE.into());
+        } else if !found.is_empty() {
             first_problem = Some(reasons::ROOT_PROTECTED.into());
         }
     }

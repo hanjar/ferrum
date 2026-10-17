@@ -204,7 +204,8 @@ status, reason? }`; `reason` is a closed code such as `sharing_violation`, `acce
   `root_protected` (a root, or the versioning root, is inside Ferrum's own state folders or a Windows Startup
   folder, or contains one while the profile writes to it; nothing is changed). Profile validation reports the
   same as field errors `root_protected_folder`, `root_contains_protected_folder`, `root_startup_folder`,
-  `root_contains_startup_folder`; readiness reports `rootProtected`. Per item, an operation whose final path is
+  `root_contains_startup_folder`; a root (read-only too) on a share that points at this computer is
+  `root_local_share` (run error `root_local_share`, readiness `rootLocalShare`); readiness reports `rootProtected`. Per item, an operation whose final path is
   in such a folder ends `failed` with reason `protected_folder`.
   Links (symlink/junction entries) end `skipped` with reason `link_unsupported`.
 - Safety properties tested in the engine (design §5.4-§5.7): folders only get a non-recursive
