@@ -3564,7 +3564,7 @@ mod fer512_ipc_gate_tests {
     }
 
     /// FER-562: the manual "Synchronize Directories" flow writes through `enqueue_copy` (one call per
-    /// destination folder of the plan) and the delete dialog (`delete`). Both start with the gates
+    /// destination folder of the plan) and the delete dialog (`delete_entries`). Both start with the gates
     /// below, so a plan whose destination folder lands in the app's state or in Startup, however
     /// deep below the chosen root, is refused before anything is queued.
     #[test]

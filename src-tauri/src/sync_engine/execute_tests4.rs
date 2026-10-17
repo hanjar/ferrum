@@ -25,6 +25,12 @@ fn run_with(rig: &Rig, profile: &ProfilePolicy, env: &EngineEnv) -> EngineReport
     run(&req)
 }
 
+/// The versions folder next to the (canonical, long-name) roots: the run gate compares the stored
+/// path with its canonical form, so a temp path in 8.3 spelling (CI runners) must not be used.
+fn versions_dir(rig: &Rig) -> std::path::PathBuf {
+    rig.left.parent().unwrap().join("versions")
+}
+
 fn guarded_env(deny: &[&Path]) -> EngineEnv {
     let mut env = test_env();
     env.guard = Arc::new(DenyList(deny.iter().map(|p| p.to_path_buf()).collect()));
@@ -100,7 +106,7 @@ fn deletes_and_versioning_moves_inside_a_protected_folder_are_refused() {
         write(&rig.right.join("gone.txt"), b"g");
         let policy = if versioning {
             DeletePolicy::Versioning {
-                root: rig.base().join("versions").to_string_lossy().into_owned(),
+                root: versions_dir(&rig).to_string_lossy().into_owned(),
             }
         } else {
             DeletePolicy::Permanent
@@ -127,7 +133,7 @@ fn a_protected_versions_folder_receives_nothing() {
     let rig = Rig::new();
     write(&rig.left.join("keep.txt"), b"k");
     write(&rig.right.join("gone.txt"), b"g");
-    let versions = rig.base().join("versions");
+    let versions = versions_dir(&rig);
     let root = versions.to_string_lossy().into_owned();
     let profile = rig.profile(mirror(), DeletePolicy::Versioning { root });
     let env = guarded_env(&[&versions]);
