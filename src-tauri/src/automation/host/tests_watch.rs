@@ -528,6 +528,126 @@ fn a_failed_watch_is_a_lost_watch() {
     assert_eq!(w.rig.runs().len(), 0);
 }
 
+/// FER-565: a watch whose worker reports that it is gone, while the folder is still the approved
+/// one, is put back at once and the events it may have missed are compared.
+#[test]
+fn a_watch_that_reports_its_death_is_replaced_and_a_recheck_follows() {
+    let w = setup();
+    w.started();
+    assert_eq!(w.live(), 1);
+    let asked = w.rig.world.factory.asked().len();
+    let dry = dry_calls(&w.rig);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(
+        w.rig.world.factory.asked().len(),
+        asked + 1,
+        "a new watch was asked for"
+    );
+    assert_eq!(w.live(), 1, "the dead one is gone, a live one is in place");
+    assert!(w.has_event("Watcher missed events"));
+    assert!(matches!(
+        w.state(),
+        TriggerState::Recheck | TriggerState::Checking
+    ));
+    w.advance(3 * SEC);
+    tick(&w.host);
+    assert_eq!(dry_calls(&w.rig), dry + 1, "then a full comparison");
+    assert_eq!(w.state(), TriggerState::Watching);
+    // The new watch works.
+    w.emit(1);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Quiet);
+}
+
+/// FER-565: a watch that died without a word (its worker is gone, nothing was reported) is found
+/// by the 30 s look and replaced, with a full comparison.
+#[test]
+fn a_watch_that_is_no_longer_alive_is_found_by_the_health_check() {
+    let w = setup();
+    w.started();
+    let dry = dry_calls(&w.rig);
+    w.rig.world.factory.die(&w.left, false);
+    // Still held: the handle is there, only dead.
+    assert_eq!(w.live(), 1);
+    w.advance(31 * SEC);
+    w.host.tick();
+    assert!(w.has_event("Watcher restarted"));
+    assert_eq!(w.live(), 1);
+    assert!(matches!(
+        w.state(),
+        TriggerState::Recheck | TriggerState::Checking
+    ));
+    w.advance(3 * SEC);
+    tick(&w.host);
+    assert_eq!(dry_calls(&w.rig), dry + 1, "then a full comparison");
+    assert_eq!(w.state(), TriggerState::Watching);
+}
+
+/// FER-565: the watch died because the folder is gone: no new watch, the folder is waited for.
+#[test]
+fn a_watch_that_dies_with_its_folder_waits_for_the_device() {
+    let w = setup();
+    w.started();
+    w.rig.world.set_offline(&w.left, true);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Device);
+    assert_eq!(w.live(), 0);
+    w.rig.world.set_offline(&w.left, false);
+    w.host.volume_changed();
+    tick(&w.host);
+    assert_eq!(w.state(), TriggerState::Watching);
+    assert_eq!(w.live(), 1);
+}
+
+/// S3: a watch that dies soon after it was made is not put back in a loop. The first quick death
+/// is replaced at once, the second waits for the backoff and the 30 s look, the third makes the
+/// folder Unsupported. A watch that lived long enough starts the count again.
+#[test]
+fn a_watch_that_keeps_dying_at_once_is_not_rebuilt_in_a_loop() {
+    let w = setup();
+    w.started();
+    w.advance(20 * SEC);
+    // Dies after a while: replaced at once, and it is not counted as quick.
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 1);
+    // First quick death: replaced at once.
+    let asked = w.rig.world.factory.asked().len();
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 1, "the first quick death is replaced");
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1);
+    // Second quick death: no new watch now.
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 0, "the second one waits");
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1);
+    w.advance(2 * SEC);
+    w.host.tick();
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1, "no loop");
+    // After the backoff the comparison runs, and the 30 s look makes the watch again.
+    let mut rebuilt = false;
+    for _ in 0..12 {
+        w.advance(10 * SEC);
+        tick(&w.host);
+        if w.live() == 1 {
+            rebuilt = true;
+            break;
+        }
+    }
+    assert!(rebuilt, "the look put the watch back");
+    // Third quick death in a row: Unsupported, with a plain text.
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.state(), TriggerState::Unsupported);
+    assert!(w.has_event("keep stopping"));
+    assert_eq!(w.live(), 0);
+}
+
 // ── WA-5: offline roots ──
 
 #[test]
@@ -877,7 +997,11 @@ fn code_of(path: &str) -> String {
 /// the engine or a user's request.
 #[test]
 fn the_watcher_and_its_hook_have_no_way_to_the_engine() {
-    for file in ["src/automation/watcher.rs", "src/automation/host/watch.rs"] {
+    for file in [
+        "src/automation/watcher.rs",
+        "src/automation/rdcw.rs",
+        "src/automation/host/watch.rs",
+    ] {
         let code = code_of(file);
         // The test module of watcher.rs is not part of the guard.
         let code = code.split("#[cfg(test)]").next().unwrap_or("").to_string();
@@ -910,7 +1034,11 @@ fn the_watcher_and_its_hook_have_no_way_to_the_engine() {
 /// factory, and no timer reads a directory.
 #[test]
 fn nothing_in_the_watch_code_lists_a_directory() {
-    for file in ["src/automation/watcher.rs", "src/automation/host/watch.rs"] {
+    for file in [
+        "src/automation/watcher.rs",
+        "src/automation/rdcw.rs",
+        "src/automation/host/watch.rs",
+    ] {
         let code = code_of(file);
         let code = code.split("#[cfg(test)]").next().unwrap_or("").to_string();
         for needle in [

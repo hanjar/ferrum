@@ -1156,7 +1156,7 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
 ### 9.8 P2.1 implementation notes (as built)
 
 - **Modules.** `automation/watcher.rs` is the source of change events and nothing else (no store, queue, gate or
-  engine): the `WatchFactory` trait (production: `notify`, recursive), the event filter, the inbox of counts and the
+  engine): the `WatchFactory` trait (production on Windows: the own `ReadDirectoryChangesW` backend in `automation/rdcw.rs`, recursive; `notify` stays for other platforms and for the pane watches in `watch.rs`), the event filter, the inbox of counts and the
   burst timer. `automation/host/watch.rs` is the host's hook, `power.rs` adds local volume arrival and removal
   (`WM_DEVICECHANGE`), `host/runner.rs` runs the read-only comparison. `HostDeps::watch_factory` is the ONLY source of
   change events; the tests replace it with a factory they feed by hand. Source tests keep the gate, proof, engine and
@@ -1206,16 +1206,37 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   not change detection.
 - **Limits of the health look, and its price.** It finds a root that is gone, replaced, or restored (a folder restored
   from the Recycle Bin keeps its identity and is found by the same look while the automation waits for the device, at
-  most every 30 s, local roots included). It cannot find a `notify` watch that died while the folder is intact, nor a
-  buffer overflow: both stay undetected until the next event or comparison, and are closed by the own backend (FER-565).
-  Opening a folder every 30 s can keep an external HDD from spinning down; this is accepted for now. A replaced folder is
-  reported as "is not the approved folder - edit the profile to use it", a missing one as "not connected".
+  most every 30 s, local roots included). It is the SECOND layer: the first is the own backend below, which reports a
+  lost watch and a buffer overflow as they happen (FER-565). The look stays because it also finds a root that was
+  replaced or restored without any watch error, and a handle that `alive()` reports dead without a `Failed` event having
+  arrived. Opening a folder every 30 s can keep an external HDD from spinning down; this is accepted for now. A replaced
+  folder is reported as "is not the approved folder - edit the profile to use it", a missing one as "not connected".
+- **The own backend (FER-565, `automation/rdcw.rs`).** One worker thread per watched root. The directory is opened with
+  `FILE_LIST_DIRECTORY` and the full share mode (read, write, delete) plus `FILE_FLAG_BACKUP_SEMANTICS |
+FILE_FLAG_OVERLAPPED`, so the folder stays usable by everyone else. A 64 KiB buffer, `bWatchSubtree`, filter = file and
+  folder names, attributes, size, last write, creation. The worker sleeps in `WaitForMultipleObjects` on the I/O event and
+  a stop event (no timer). It reports: a batch of paths as `Change`; a completion of 0 bytes or `ERROR_NOTIFY_ENUM_DIR`
+  or a batch that does not parse as `Overflow` (the host: Needs recheck); any other error (root deleted, access lost,
+  re-arm failed) as `Failed` after marking the handle not alive (the host: look at the roots; folder gone -> Waiting for
+  device, folder there -> a new watch at once and Needs recheck; a comparison that is running counts it as a noted
+  change). The next read is armed before the sink runs, so the kernel buffer collects while the sink works.
+  `parse` checks DWORD alignment, header and name bounds, even name length, known action and a forward `NextEntryOffset`
+  before it reads and has no `unsafe`. Releasing a watch cancels the read (`CancelIoEx`) and WAITS for the completion
+  before the buffer, the `OVERLAPPED` and the handles are freed (if the completion never comes the memory is leaked, never
+  freed under the kernel); the host never joins the worker from the worker itself. UNC roots stay Unsupported.
+- **Backend hardening (FER-565 review R1).** The stop event is first in the wait list, so a flood of changes cannot
+  hide it. Every way out of the worker except a real stop (a failed wait, a panic, an error) marks the handle not alive
+  and reports `Failed` (an `Exit` guard). The first read is armed on the worker thread, the buffer and `OVERLAPPED` are
+  raw `Box::into_raw` allocations while a read can be pending, and after each completion the handle's final path is
+  compared with the one it had at the start: a root renamed away is reported as lost. In the host, a watch that dies
+  less than 10 s after it was made is a quick death: the first is replaced at once, the second waits for the 30 s look
+  (and the 60 s recheck backoff), the third makes the folder Unsupported ("keep stopping"); a watch that lived longer
+  resets the count. Follow-up: a soft cap on the number of watcher threads (each has a 256 KiB stack).
 - **Probes do not stall the host (S4).** All probes of one pass share a budget of 1 s; the rest waits for the next passes
   (automations with a look left over go first), so the host's heartbeat is never held up by offline shares.
-- **Known limits.** `notify` 7 on Windows does not report a buffer overflow of `ReadDirectoryChangesW` (no rescan flag)
-  and does not tell when the watched folder itself is deleted; Needs recheck therefore comes from a `Rescan` flag, a
-  backend failure or the liveness check above, and a burst that overflowed the buffer on its own is NOT detected until
-  the next event or comparison (a backend of our own for `ReadDirectoryChangesW` is a separate task). Follow-ups: the
+- **Known limits.** The gap of `notify` 7 (no overflow report, a silently dead watch) is closed by the own backend.
+  A change made through a junction or reparse point to another volume is not seen (not followed, as the walker does
+  not follow them). Follow-ups: the
   optional conditions (OP-1) are not applied to the read-only comparison, and a manual Synchronize Dirs lease is not part of
   the run window (its events start a countdown instead of a pending rerun). A comparison needs
   `Differences` from the engine's dry run; a conflict-only difference queues a run (it ends in a hold, as any run does).
