@@ -1357,9 +1357,11 @@ fn parked_text(rig: &Rig, a: &str) -> usize {
         .count()
 }
 
+/// Pinned so that nobody flips it by accident: automatic runs are on since FER-525 (P1.4); the
+/// tests of the parked behaviour switch it off per thread (`set_unattended_for_tests(false)`).
 #[test]
-fn the_switch_is_off_in_the_shipped_code() {
-    const { assert!(!super::UNATTENDED_RUNS_ENABLED) };
+fn the_switch_is_on_in_the_shipped_code() {
+    const { assert!(super::UNATTENDED_RUNS_ENABLED) };
 }
 
 #[test]

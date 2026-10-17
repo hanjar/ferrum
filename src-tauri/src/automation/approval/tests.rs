@@ -968,16 +968,23 @@ fn validate_reports_errors_and_readiness_checks() {
     let (profile, _, draft) = draft_of(&fx, "Nightly");
     let probe = Fixture::probe();
     let budget = std::time::Duration::from_secs(2);
-    let ok = validate_in(&fx.store, &draft, &probe, budget, false).unwrap();
+    let ok = validate_in(&fx.store, &draft, &probe, budget, false, T0).unwrap();
     assert!(ok.errors.is_empty());
     assert_eq!(ok.checks.len(), 2);
     assert!(ok.checks.iter().all(|c| c.status == StepStatus::Ok));
-    assert!(ok.next.is_empty());
+    // SC-1.2: the next three runs of the daily 02:00 Jakarta schedule.
+    assert_eq!(ok.next.len(), 3);
+    assert!(
+        ok.next
+            .windows(2)
+            .all(|w| w[1].at_ms - w[0].at_ms == 86_400_000)
+    );
+    assert!(ok.next[0].at_ms > T0 && ok.next[0].label.ends_with("02:00 WIB"));
 
     let mut bad = draft.clone();
     bad.policy.retries = 5;
     bad.policy.runtime = Runtime::Background;
-    let out = validate_in(&fx.store, &bad, &probe, budget, false).unwrap();
+    let out = validate_in(&fx.store, &bad, &probe, budget, false, T0).unwrap();
     assert!(out.errors.iter().any(|e| e.field == "retries"));
     assert!(
         out.checks
@@ -987,9 +994,146 @@ fn validate_reports_errors_and_readiness_checks() {
 
     let mut orphan = draft.clone();
     orphan.profile_id = "99999999-9999-4999-8999-999999999999".into();
-    let out = validate_in(&fx.store, &orphan, &probe, budget, false).unwrap();
+    let out = validate_in(&fx.store, &orphan, &probe, budget, false, T0).unwrap();
     assert_eq!(out.errors[0].field, "profileId");
     let _ = profile;
+}
+
+fn with_trigger(
+    draft: &AutomationDraft,
+    freq: model::Freq,
+    time: &str,
+    tz: &str,
+) -> AutomationDraft {
+    let mut d = draft.clone();
+    d.policy.trigger = model::Trigger::Schedule(model::ScheduleTrigger {
+        freq,
+        time: time.into(),
+        tz: tz.into(),
+        missed: model::MissedPolicy::Skip,
+    });
+    d
+}
+
+#[test]
+fn validate_enforces_the_once_rules_with_the_codes_the_editor_maps() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Once");
+    let probe = Fixture::probe();
+    let budget = std::time::Duration::from_secs(2);
+    // T0 = 2025-10-09T08:53:20Z = 15:53 on the 9th in Jakarta.
+    let once = |date: &str, time: &str| {
+        with_trigger(
+            &draft,
+            model::Freq::Once { date: date.into() },
+            time,
+            "Asia/Jakarta",
+        )
+    };
+    let run = |d: &AutomationDraft| validate_in(&fx.store, d, &probe, budget, false, T0).unwrap();
+    let has = |out: &AutomationValidateDto, field: &str, code: &str| {
+        out.errors
+            .iter()
+            .any(|e| e.field == field && e.code == code)
+    };
+    let ok = run(&once("2025-10-09", "15:54"));
+    assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+    assert_eq!(ok.next.len(), 1, "a Once has one run");
+    assert_eq!(ok.next[0].label, "Thu 09 Oct, 15:54 WIB");
+    let passed = run(&once("2025-10-09", "15:53"));
+    assert!(has(&passed, "trigger.time", "time_passed"));
+    assert!(passed.next.is_empty());
+    assert!(has(
+        &run(&once("2025-10-08", "23:00")),
+        "trigger.date",
+        "date_out_of_range"
+    ));
+    assert!(
+        run(&once("2025-10-22", "00:00")).errors.is_empty(),
+        "13 days ahead"
+    );
+    assert!(has(
+        &run(&once("2025-10-23", "00:00")),
+        "trigger.date",
+        "date_out_of_range"
+    ));
+    // A zone that does not exist is the same error the editor shows for a bad zone.
+    let bad_zone = with_trigger(&draft, model::Freq::Daily {}, "10:00", "Mars/Olympus");
+    let out = run(&bad_zone);
+    assert!(has(&out, "trigger.tz", "tz_invalid"));
+    assert_eq!(
+        out.errors
+            .iter()
+            .filter(|e| e.field == "trigger.tz")
+            .count(),
+        1,
+        "reported once"
+    );
+    assert!(out.next.is_empty());
+    // Daily and weekly: three runs, a week wraps.
+    let weekly = with_trigger(
+        &draft,
+        model::Freq::Weekly { days: vec![1, 5] },
+        "09:00",
+        "UTC",
+    );
+    let out = run(&weekly);
+    assert_eq!(out.next.len(), 3);
+    assert!(
+        out.next[0].label.starts_with("Fri 10 Oct"),
+        "{:?}",
+        out.next
+    );
+}
+
+#[test]
+fn test_and_approve_enforce_the_once_and_zone_rules_in_the_backend() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Once rules");
+    // T0 = 2025-10-09T08:53:20Z = 15:53 on the 9th in Jakarta.
+    let once = |date: &str, time: &str| {
+        with_trigger(
+            &draft,
+            model::Freq::Once { date: date.into() },
+            time,
+            "Asia/Jakarta",
+        )
+    };
+    let good = once("2025-10-10", "09:00");
+    let result = fx.test(None, &good);
+    assert!(result.passed);
+    for bad in [
+        once("2025-10-09", "15:00"), // time passed
+        once("2025-10-08", "23:00"), // date passed
+        once("2025-10-23", "09:00"), // 14 days ahead
+        with_trigger(&draft, model::Freq::Daily {}, "10:00", "Mars/Olympus"),
+    ] {
+        let tested = with_test_deps(|deps| {
+            test_in(
+                &fx.store,
+                &fx.ledger,
+                TestRequest {
+                    id: None,
+                    draft: bad.clone(),
+                },
+                deps,
+                fx.clock(),
+            )
+        });
+        assert_eq!(tested.unwrap_err().code, "invalid_input");
+        let approved = approve_in(
+            &fx.store,
+            ApproveRequest {
+                id: None,
+                expected_config_rev: None,
+                draft: bad.clone(),
+                test_id: result.test_id.clone(),
+            },
+            &fx.deps(),
+            |_| true,
+        );
+        assert_eq!(approved.unwrap_err().code, "invalid_input");
+    }
 }
 
 #[test]

@@ -106,7 +106,7 @@ export interface NextRun {
 export interface AutomationValidateResult {
   errors: FieldError[];
   checks: Step[];
-  /** Upcoming schedule occurrences; filled by the scheduler (empty until then). */
+  /** The next three runs of a schedule trigger (label in the schedule's zone); empty for a watch or while the schedule has an error. */
   next: NextRun[];
 }
 

@@ -268,7 +268,7 @@ result.
 
 | Command                  | Payload                                      | Result                                                                                     | Notes                                                                                                                                |
 | ------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `automation_validate`    | `{ draft }`                                  | `{ errors: FieldError[], checks: Step[], next: [] }`                                       | no side effects; `next` (schedule occurrences) stays empty until the scheduler (P1.4)                                                |
+| `automation_validate`    | `{ draft }`                                  | `{ errors: FieldError[], checks: Step[], next: {atMs,label}[] }`                           | no side effects; `next` = next 3 runs (SC-1.2); Once errors `date_out_of_range` / `time_passed`, unknown zone `tz_invalid`           |
 | `automation_test`        | `{ id?, draft }`                             | `{ testId, automationId, policyHash, steps: Step[], passed }`                              | read-only (engine dry run); records `(policyHash, passed, at)` in the in-memory test ledger; `id` = automation being edited          |
 | `automation_approve`     | `{ id?, expectedConfigRev?, draft, testId }` | `{ status: 'approved', automation } \| { status: 'canceled' } \| { status: 'stale' }`      | needs a passed test of the same hash from this app session within 15 min; native confirmation; one transaction                       |
 | `automation_set_enabled` | `{ id, enabled }`                            | `{ status: 'enabled' \| 'paused' \| 'canceled' \| 'needsChoice' }` or error `needs_review` | enable = resume: approval verified before AND after the native confirmation; disable = no dialog, `needsChoice` while a run is going |
@@ -424,7 +424,7 @@ Behaviour the contract relies on:
 - **Merged triggers** (design §9.5): when the owner of a merged queue entry is paused, edited, deleted, held or in review,
   the merged triggers move to the first other healthy automation of the profile.
 
-**Automatic runs are off.** While `UNATTENDED_RUNS_ENABLED` is false (the shipped state) the host starts the engine
+**Automatic runs** are ON since FER-525 (P1.4: `UNATTENDED_RUNS_ENABLED = true`, a separate commit that can be reverted alone). While `UNATTENDED_RUNS_ENABLED` is false (the state before that commit) the host starts the engine
 only for a Run now or Retry the user asked for. A queue entry of any other kind (schedule, watch, catch-up, pending
 rerun, "folder is back") is not started: it stays in the queue, `automation_list` shows `Queued` with the sub-line
 "Waiting - run it with Run now", and one event says so. An entry the gate kept waiting (device, conditions, busy

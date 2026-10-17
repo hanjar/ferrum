@@ -1008,7 +1008,9 @@ impl AutomationPolicy {
                 if !is_clock_time(&s.time) {
                     errors.push(fe("trigger.time", "time_invalid"));
                 }
-                if !is_zone_syntax(&s.tz) {
+                // Syntax first; then the bundled zone database decides whether the zone exists
+                // (the scheduler owns the zone data).
+                if !is_zone_syntax(&s.tz) || !crate::automation::scheduler::zone_known(&s.tz) {
                     errors.push(fe("trigger.tz", "tz_invalid"));
                 }
                 match &s.freq {

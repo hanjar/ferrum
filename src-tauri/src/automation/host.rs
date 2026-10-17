@@ -59,9 +59,11 @@ pub mod prod;
 pub mod request;
 mod requeue;
 mod runner;
+mod schedule;
 
 pub use gate::{GateCtx, GateKind, GateOk, GateRefusal, RunMode, gate};
 pub use requeue::{requeue_siblings, requeue_siblings_if};
+pub use schedule::Recompute;
 
 #[cfg(test)]
 mod test_support;
@@ -69,20 +71,23 @@ mod test_support;
 mod tests;
 #[cfg(test)]
 mod tests_flows;
+#[cfg(test)]
+mod tests_schedule;
 
 /// The host refreshes its row this often (design §3.3: every 5 s).
 pub const BEAT_EVERY_MS: i64 = 5_000;
-/// **Automatic runs are OFF.** While this is `false` the engine runs only when the user asks at
-/// that moment (Run now, Retry). Everything that would start it on its own is parked: pending
-/// reruns, the fresh comparison after a folder came back (`Available`), entries of triggers
-/// (schedule, watch, catch-up, startup), entries the gate kept waiting (device, conditions,
-/// busy folders) that would run later by themselves, and the move of merged triggers to a
-/// sibling. A parked entry stays in the queue and says "Waiting - run it with Run now".
+/// **Automatic runs.** While this is `false` the engine runs only when the user asks at that
+/// moment (Run now, Retry). Everything that would start it on its own is parked: pending reruns,
+/// the fresh comparison after a folder came back (`Available`), entries of triggers (schedule,
+/// watch, catch-up, startup), entries the gate kept waiting (device, conditions, busy folders)
+/// that would run later by themselves, and the move of merged triggers to a sibling. A parked
+/// entry stays in the queue and says "Waiting - run it with Run now".
 ///
-/// AUTO-P0.2c (P0.2 review P3-2 and P3-3: re-check the target at the commit of an in-place
-/// overwrite; restore the old target when a versioning overwrite fails or is cancelled) is
-/// REQUIRED before this is switched on.
-pub const UNATTENDED_RUNS_ENABLED: bool = false;
+/// Switched ON by FER-525 (P1.4), once the scheduler exists, AUTO-P0.2c (P0.2 review P3-2 and
+/// P3-3, FER-564) is in and the schedule hook's entries are gated like every other entry. It is
+/// a separate commit so it can be reverted alone; with it off the schedule still queues, and
+/// the entries are parked.
+pub const UNATTENDED_RUNS_ENABLED: bool = true;
 
 #[cfg(test)]
 thread_local! {
@@ -248,6 +253,8 @@ pub(crate) struct State {
     pub rerun_streak: HashMap<String, u32>,
     /// Entries already announced as parked ("Waiting - run it with Run now").
     pub parked_logged: HashMap<i64, i64>,
+    /// The schedule hook's bookkeeping (`schedule.rs`).
+    pub sched: schedule::Book,
     pub last_recovery_ms: Option<i64>,
     pub shutdown: bool,
 }
@@ -352,6 +359,14 @@ impl<D: HostDeps> Host<D> {
         self.inner.nudge();
     }
 
+    /// The system clock, the time zone or the power state changed (`power.rs`): the schedules are
+    /// looked at again at the next tick, and occurrences that passed meanwhile are handled as
+    /// missed (SC-3.3). Safe to call from any thread.
+    pub fn recompute_schedules(&self, why: Recompute) {
+        self.inner.lock().sched.ask(why);
+        self.inner.nudge();
+    }
+
     /// Run ids this process is executing right now.
     pub fn active_runs(&self) -> Vec<i64> {
         let mut ids: Vec<i64> = self.inner.lock().active.keys().copied().collect();
@@ -374,6 +389,7 @@ impl<D: HostDeps> Host<D> {
         self.recover_orphans(now);
         self.handle_controls(now);
         self.reconcile_active();
+        schedule::pass(inner, now);
         self.start_next(now);
     }
 
@@ -451,6 +467,8 @@ impl<D: HostDeps> Host<D> {
             changed
         };
         if changed {
+            // An approval, an edit, a pause or a resume: the schedules are read again.
+            inner.lock().sched.ask(Recompute::Edited);
             inner.deps.emit(&HostEvent::Changed { seq });
         }
     }
@@ -506,6 +524,8 @@ impl<D: HostDeps> Host<D> {
             Ok(Claim::Acquired { .. }) => {
                 state.hosting = true;
                 state.needs_recovery = true;
+                // Whatever came due while no host was here is found now (SC-3.3).
+                state.sched.ask(Recompute::Started);
             }
             // Another live process hosts, or the store cannot say (read-only, unavailable):
             // this process does not execute.

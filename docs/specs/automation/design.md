@@ -1080,7 +1080,7 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   logged with the OS error.
 - **Engine.** A run asks `lease.covers()` at least every 2 s (P0.2 review P3-12) in addition to `is_lost()`, between
   operations and from the watcher that cancels a copy in flight.
-- **Automatic runs are OFF (`host::UNATTENDED_RUNS_ENABLED = false`, decision after the P1.3 review).**
+- **Automatic runs were OFF in P1.3 (`host::UNATTENDED_RUNS_ENABLED = false`, decision after the P1.3 review); FER-525 (P1.4) turns them ON in its own, revertible commit. The text below describes the OFF behaviour, which tests still exercise per thread.**
   The engine runs only when the user asks at that moment (Run now, Retry). Parked, not run: pending reruns, the
   fresh comparison after a folder came back (`Available`), entries of triggers (schedule, watch, catch-up, startup),
   entries the gate kept waiting (device, conditions, busy folders) that would start later by themselves, and the
@@ -1120,6 +1120,34 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
 - **Known limits.** One run at a time per host. The per-operation list of a run is written when the run ends (the live
   view shows counts). Conditions: battery is read from Windows; a metered connection cannot be told yet, so a policy
   that skips metered connections waits (fail closed) until OP-1.
+
+### 9.7 P1.4 implementation notes (as built)
+
+- **Modules.** `automation/scheduler.rs` is pure (no store, no clock, no folder; every call takes `now_ms`),
+  `automation/power.rs` is the hidden window, `host/schedule.rs` is the host's hook. Zones come from the bundled `jiff`
+  database (`tzdb-bundle-always`), never from the machine.
+- **Evaluation.** `Schedule::evaluate(state, now, policy)` looks at the slots in `(max(cursor, last_fired), now]`: an
+  occurrence at most 120 s old (inclusive) fires, an older one is missed, a DST gap slot is a Skipped entry (SC-2.1), a
+  fold is one slot at the first instant. `last_fired_occurrence_ms` also covers missed and gap slots, so nothing is
+  handled twice whatever the clock does; the cursor is clamped to `now` and starts at `now` for a schedule that was just
+  approved or resumed (`reset_runtime` clears it), so paused or pre-approval time is never "missed".
+- **The hook only queues.** One pass (when the store changed, on host start, resume, clock or zone change, at the next
+  occurrence, at least every 60 s) writes, in one transaction per pass: `Schedule` / `CatchUp` queue entries via
+  `request::trigger_tx` (approval must VERIFY, no hold, enabled - same as Run now; user kinds are refused), Skipped history
+  rows, and the schedule columns of the runtime row (compare-and-set against the rows it read). It never builds a
+  `GateOk` and never calls the engine; every queued entry is gated again by `runner::start_cycle` (verify, folder probes,
+  lease, delete-policy prerequisites). Source tests keep the gate, proof and engine names out of `schedule.rs` and
+  every impure name out of `scheduler.rs`.
+- **SC-4.** A device that is offline when an occurrence fires needs no special code: the entry waits in the queue, the gate
+  answers "keep" (Waiting for device) and the run starts when the folder is back.
+- **Condition (2) of the P1.3 review.** A trigger merged into a Run now never changes the entry's kind or `enqueued_ms`;
+  only the user's own Run now / Retry restamps it (`enqueued_ms = now`). A user request older than 10 minutes, or stamped
+  more than 60 s ahead of the clock (the clock moved back), is stale.
+- **Validation.** `automation_validate` fills `next` (3 runs, label in the schedule zone) and enforces Once: date from
+  today to today + 13 days in the schedule zone (`date_out_of_range`), a time that has passed (`time_passed`); an unknown
+  zone is `tz_invalid` (also refused by the model at test and approve).
+- **Known limit.** A system clock that jumps far forward and back leaves the occurrences after the stored mark suppressed
+  until real time catches up (fail closed: no run, never an extra run).
 
 ## 10. Threat model and security controls
 
