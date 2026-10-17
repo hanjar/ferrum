@@ -6,8 +6,8 @@
 //! with an ellipsis in the middle, and the whole text stays within [`PROMPT_MAX_CHARS`].
 
 use crate::automation::model::{
-    AutomationPolicy, DeletePolicy, Freq, MissedPolicy, ProfilePolicy, Runtime, SyncMode, Trigger,
-    delete_label, mode_label, shorten_middle,
+    AutomationPolicy, CompareMode, DeletePolicy, Freq, MissedPolicy, ProfilePolicy, Runtime, Side,
+    SyncMode, Trigger, delete_label, mode_label, shorten_middle,
 };
 use crate::hotlist::model::is_format_char;
 
@@ -67,7 +67,7 @@ pub fn save_profile_prompt(
     ) {
         lines.push(PERMANENT_WARNING.into());
     }
-    if !policy.guard.enabled {
+    if !policy.guard.effective() {
         lines.push(GUARD_OFF_WARNING.into());
     }
     if matches!(
@@ -89,7 +89,7 @@ pub fn save_profile_prompt(
         part(&policy.left.path),
         part(&policy.right.path),
         part(&delete_label(&policy.delete_policy)),
-        if policy.guard.enabled {
+        if policy.guard.effective() {
             "guard on".to_string()
         } else {
             "guard off".to_string()
@@ -244,12 +244,56 @@ fn bound(text: String) -> String {
     cut
 }
 
+/// Short form of a pattern list: the count and the first few patterns ("2 (*.tmp, Thumbs.db)").
+fn patterns_summary(list: &[String]) -> String {
+    if list.is_empty() {
+        return "none".into();
+    }
+    let shown: Vec<&str> = list.iter().take(3).map(String::as_str).collect();
+    let more = if list.len() > shown.len() {
+        ", …"
+    } else {
+        ""
+    };
+    part(&format!("{} ({}{more})", list.len(), shown.join(", ")))
+}
+
+/// The folders in the order the data flows: source then target for one-way and mirror, both
+/// labelled for two-way ("left: X; right: Y").
+fn folders_line(profile: &ProfilePolicy) -> String {
+    let left = part(&profile.left.path);
+    let right = part(&profile.right.path);
+    match &profile.mode {
+        SyncMode::OneWay { from } | SyncMode::Mirror { from } => match from {
+            Side::Left => format!("From left: {left}; to right: {right}."),
+            Side::Right => format!("From right: {right}; to left: {left}."),
+        },
+        SyncMode::TwoWay { .. } => format!("Both sides change. left: {left}; right: {right}."),
+    }
+}
+
+/// The delete guard line, ALWAYS shown (an ineffective guard reads as off, SE-1).
+fn guard_line(guard: &crate::automation::model::DeleteGuard) -> String {
+    if guard.effective() {
+        format!(
+            "Delete guard: stops above {} items and {}%.",
+            guard.max_count, guard.max_percent
+        )
+    } else {
+        "Delete guard: off.".into()
+    }
+}
+
 /// Prompt for approving, re-approving or resuming an automation. Built from validated, stored
-/// data only. Order (design §10.3): warning lines → action line → profile line → trigger line →
+/// data only. Order (design §10.3): warning lines → action line → profile lines → trigger line →
 /// runtime line → closing line.
+///
+/// `name` is the name the automation HAS (the stored one for a re-approval or a resume);
+/// `renamed_to` is the draft's name when a re-approval also renames it.
 pub fn approval_prompt(
     action: ApprovalAction,
     name: &str,
+    renamed_to: Option<&str>,
     profile_name: &str,
     profile_revision: i64,
     profile: &ProfilePolicy,
@@ -259,7 +303,7 @@ pub fn approval_prompt(
     if matches!(profile.delete_policy, DeletePolicy::Permanent) {
         lines.push(PERMANENT_WARNING.into());
     }
-    if !profile.guard.enabled {
+    if !profile.guard.effective() {
         lines.push(GUARD_OFF_WARNING.into());
     }
     if matches!(
@@ -270,29 +314,36 @@ pub fn approval_prompt(
     ) {
         lines.push(PROPAGATE_WARNING.into());
     }
-    let what = format!(
-        "\"{}\" rev {profile_revision} ({} → {}, {}, {})",
+    match action {
+        ApprovalAction::Enable => lines.push(format!("Enable automation \"{}\"?", part(name))),
+        // A re-approval also (re)enables the automation, so the question says so.
+        ApprovalAction::Reapprove => lines.push(format!(
+            "Re-approve and enable automation \"{}\"?",
+            part(name)
+        )),
+        // SE-2.1: Resume "<name>"? It will run "<profile>" rev 3 (...) <trigger>, <runtime>.
+        ApprovalAction::Resume => lines.push(format!("Resume \"{}\"?", part(name))),
+    }
+    if let Some(new_name) = renamed_to.filter(|n| *n != name) {
+        lines.push(format!("It will be renamed to \"{}\".", part(new_name)));
+    }
+    lines.push(format!(
+        "It will run sync profile \"{}\" rev {profile_revision} ({}, {}).",
         part(profile_name),
-        part(&profile.left.path),
-        part(&profile.right.path),
         part(&mode_label(&profile.mode)),
         part(&delete_label(&profile.delete_policy)),
-    );
-    match action {
-        ApprovalAction::Enable => {
-            lines.push(format!("Enable automation \"{}\"?", part(name)));
-            lines.push(format!("It will run sync profile {what}."));
-        }
-        ApprovalAction::Reapprove => {
-            lines.push(format!("Re-approve automation \"{}\"?", part(name)));
-            lines.push(format!("It will run sync profile {what}."));
-        }
-        // SE-2.1: Resume "<name>"? It will run "<profile>" rev 3 (...) <trigger>, <runtime>.
-        ApprovalAction::Resume => {
-            lines.push(format!("Resume \"{}\"?", part(name)));
-            lines.push(format!("It will run sync profile {what}."));
-        }
-    }
+    ));
+    lines.push(folders_line(profile));
+    lines.push(format!(
+        "Compare: {}. Filters: include {}; exclude {}.",
+        match profile.compare {
+            CompareMode::SizeAndDate => "size and date",
+            CompareMode::Content => "content",
+        },
+        patterns_summary(&profile.filters.include),
+        patterns_summary(&profile.filters.exclude),
+    ));
+    lines.push(guard_line(&profile.guard));
     lines.push(trigger_line(&automation.trigger));
     lines.push(runtime_line(automation.runtime).into());
     lines.push(AUTOMATION_CLOSING.into());

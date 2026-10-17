@@ -588,3 +588,36 @@ fn dpapi_key_deleted_or_from_another_scope_is_key_unavailable() {
         Verdict::NeedsReview(NeedsReview::NotApproved)
     );
 }
+
+/// FER-522 rework 1 (design §10.4): the `enabled` flag is NOT an authorization. A row that says
+/// `enabled = 1` but has no approval, a broken one, or a stale one is never `Valid`; the gate of
+/// every run calls `verify` and ignores the flag.
+#[test]
+fn the_enabled_flag_is_not_an_authorization() {
+    let (fx, id, _, _) = approved_fixture();
+    assert_eq!(verdict(&fx, &id), Verdict::Valid);
+    // Enabled, but the approval is gone.
+    exec(
+        &fx,
+        "UPDATE automations SET enabled = 1; DELETE FROM approvals",
+    );
+    assert_eq!(
+        verdict(&fx, &id),
+        Verdict::NeedsReview(NeedsReview::NotApproved)
+    );
+    // Someone flips `enabled` on an automation whose approval was made for other contents.
+    let (fx, id, _, _) = approved_fixture();
+    exec(
+        &fx,
+        "UPDATE automations SET enabled = 1, policy = replace(policy, '02:00', '03:00')",
+    );
+    assert_eq!(
+        verdict(&fx, &id),
+        Verdict::NeedsReview(NeedsReview::PolicyChanged)
+    );
+    // And a disabled automation with a valid approval is still `Valid`: the verdict does not
+    // read the flag at all.
+    let (fx, id, _, _) = approved_fixture();
+    exec(&fx, "UPDATE automations SET enabled = 0");
+    assert_eq!(verdict(&fx, &id), Verdict::Valid);
+}

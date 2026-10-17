@@ -70,6 +70,7 @@ fn the_parts_come_in_the_documented_order() {
     let prompt = approval_prompt(
         ApprovalAction::Enable,
         "Nightly photos",
+        None,
         "Photos to NAS",
         3,
         &p,
@@ -111,6 +112,7 @@ fn the_permanent_warning_appears_exactly_for_permanent_policies() {
         let prompt = approval_prompt(
             ApprovalAction::Resume,
             "N",
+            None,
             "P",
             1,
             &profile(delete, true, one_way()),
@@ -130,6 +132,7 @@ fn resume_follows_the_se_2_1_shape() {
     let prompt = approval_prompt(
         ApprovalAction::Resume,
         "Nightly photos",
+        None,
         "Photos to NAS",
         3,
         &p,
@@ -139,7 +142,7 @@ fn resume_follows_the_se_2_1_shape() {
     assert!(t.starts_with("Resume \"Nightly photos\"?"), "{t}");
     for part in [
         "\"Photos to NAS\" rev 3",
-        r"D:\Photos → E:\Backup",
+        r"From left: D:\Photos; to right: E:\Backup.",
         "Update left → right",
         "Recycle Bin",
         "Every day at 02:00 (Asia/Jakarta); a missed run happens once when possible.",
@@ -151,13 +154,18 @@ fn resume_follows_the_se_2_1_shape() {
     let again = approval_prompt(
         ApprovalAction::Reapprove,
         "N",
+        None,
         "P",
         1,
         &p,
         &daily(Runtime::App),
     );
     assert_eq!(again.caption, REAPPROVE_CAPTION);
-    assert!(again.text.starts_with("Re-approve automation \"N\"?"));
+    assert!(
+        again
+            .text
+            .starts_with("Re-approve and enable automation \"N\"?")
+    );
 }
 
 /// §10.3 / SE-2: bounded to 2 000 characters, longest parts shortened, warnings survive.
@@ -179,7 +187,15 @@ fn the_text_is_bounded_and_keeps_the_warnings() {
         s.time = long.clone();
         s.freq = Freq::Once { date: long.clone() };
     }
-    let prompt = approval_prompt(ApprovalAction::Reapprove, &long, &long, 999_999, &p, &a);
+    let prompt = approval_prompt(
+        ApprovalAction::Reapprove,
+        &long,
+        None,
+        &long,
+        999_999,
+        &p,
+        &a,
+    );
     let len = prompt.text.chars().count();
     assert!(len <= PROMPT_MAX_CHARS, "{len} characters");
     assert!(prompt.text.starts_with(PERMANENT_WARNING));
@@ -207,6 +223,7 @@ fn control_and_bidi_characters_do_not_reach_the_dialog() {
     let prompt = approval_prompt(
         ApprovalAction::Enable,
         "Night\u{202d}ly\u{0}",
+        None,
         "Pro\u{feff}file",
         2,
         &p,
@@ -274,4 +291,145 @@ fn trigger_lines_cover_every_trigger() {
     );
     assert!(watch(false, true, true, false).contains("the right folder for changes;"));
     assert!(watch(true, false, false, true).contains("a folder becoming available"));
+}
+
+// ── FER-522 rework 1: guard line, folders, filters, re-approve wording ──
+
+fn text_of(action: ApprovalAction, p: &ProfilePolicy) -> String {
+    approval_prompt(action, "N", None, "P", 2, p, &daily(Runtime::App)).text
+}
+
+/// The delete guard line is ALWAYS shown, with its thresholds, or "off".
+#[test]
+fn the_guard_line_is_always_present() {
+    let on = profile(DeletePolicy::RecycleBin, true, one_way());
+    assert!(
+        text_of(ApprovalAction::Enable, &on)
+            .contains("Delete guard: stops above 50 items and 20%.")
+    );
+    let mut custom = on.clone();
+    custom.guard.max_count = 7;
+    custom.guard.max_percent = 33;
+    assert!(
+        text_of(ApprovalAction::Resume, &custom)
+            .contains("Delete guard: stops above 7 items and 33%.")
+    );
+    let off = profile(DeletePolicy::RecycleBin, false, one_way());
+    let t = text_of(ApprovalAction::Enable, &off);
+    assert!(t.contains("Delete guard: off.") && t.contains(GUARD_OFF_WARNING));
+}
+
+/// A guard that can never trip (100 %, zero count) is OFF: warning and "off" line, exactly like a
+/// disabled guard (SE-1).
+#[test]
+fn an_ineffective_guard_reads_as_off() {
+    for (count, percent) in [(50u32, 100u8), (50, 200), (0, 20)] {
+        let mut p = profile(DeletePolicy::RecycleBin, true, one_way());
+        p.guard.max_count = count;
+        p.guard.max_percent = percent;
+        let t = text_of(ApprovalAction::Enable, &p);
+        assert!(t.starts_with(GUARD_OFF_WARNING), "{count}/{percent}: {t}");
+        assert!(t.contains("Delete guard: off."));
+        assert!(!t.contains("stops above"));
+    }
+}
+
+/// The folders follow the direction of the mode; two-way labels both sides.
+#[test]
+fn the_folders_line_follows_the_direction() {
+    let mut p = profile(DeletePolicy::RecycleBin, true, one_way());
+    assert!(
+        text_of(ApprovalAction::Enable, &p).contains(r"From left: D:\Photos; to right: E:\Backup.")
+    );
+    p.mode = SyncMode::Mirror { from: Side::Right };
+    assert!(
+        text_of(ApprovalAction::Enable, &p).contains(r"From right: E:\Backup; to left: D:\Photos.")
+    );
+    p.mode = SyncMode::TwoWay {
+        propagate_deletes: false,
+    };
+    assert!(
+        text_of(ApprovalAction::Enable, &p)
+            .contains(r"Both sides change. left: D:\Photos; right: E:\Backup.")
+    );
+}
+
+/// Compare mode and a short summary of the filters are part of what is approved.
+#[test]
+fn compare_mode_and_filters_are_shown() {
+    let mut p = profile(DeletePolicy::RecycleBin, true, one_way());
+    let t = text_of(ApprovalAction::Enable, &p);
+    assert!(
+        t.contains("Compare: size and date. Filters: include none; exclude none."),
+        "{t}"
+    );
+    p.compare = CompareMode::Content;
+    p.filters.include = vec!["*.jpg".into()];
+    p.filters.exclude = (0..5).map(|i| format!("*.t{i}")).collect();
+    let t = text_of(ApprovalAction::Enable, &p);
+    assert!(t.contains("Compare: content."));
+    assert!(t.contains("include 1 (*.jpg)"));
+    assert!(t.contains("exclude 5 (*.t0, *.t1, *.t2, …)"), "{t}");
+}
+
+/// A re-approval says it also enables, and states a rename separately from the stored name.
+#[test]
+fn reapprove_says_enable_and_names_the_stored_name() {
+    let p = profile(DeletePolicy::RecycleBin, true, one_way());
+    let a = daily(Runtime::App);
+    let t = approval_prompt(
+        ApprovalAction::Reapprove,
+        "Stored name",
+        Some("New name"),
+        "P",
+        2,
+        &p,
+        &a,
+    )
+    .text;
+    assert!(
+        t.contains("Re-approve and enable automation \"Stored name\"?"),
+        "{t}"
+    );
+    assert!(t.contains("It will be renamed to \"New name\"."));
+    let same = approval_prompt(
+        ApprovalAction::Reapprove,
+        "Same",
+        Some("Same"),
+        "P",
+        2,
+        &p,
+        &a,
+    )
+    .text;
+    assert!(!same.contains("renamed"));
+}
+
+/// Even with everything long, the warnings stay first and the whole text stays within 2 000.
+#[test]
+fn the_fuller_text_stays_bounded() {
+    let long = "y".repeat(500);
+    let mut p = profile(
+        DeletePolicy::Permanent,
+        false,
+        SyncMode::TwoWay {
+            propagate_deletes: true,
+        },
+    );
+    p.filters.include = vec![long.clone(); 3];
+    p.filters.exclude = vec![long.clone(); 9];
+    p.left.path = long.clone();
+    p.right.path = long.clone();
+    let t = approval_prompt(
+        ApprovalAction::Reapprove,
+        &long,
+        Some(&long),
+        &long,
+        7,
+        &p,
+        &daily(Runtime::Background),
+    )
+    .text;
+    assert!(t.chars().count() <= PROMPT_MAX_CHARS);
+    assert!(t.starts_with(PERMANENT_WARNING));
 }

@@ -83,7 +83,7 @@ impl AutomationState {
             None => Arc::new(NoKeys),
         };
         let baselines = match dir {
-            Some(dir) => ProfileBaselineStore::open(dir, keys.clone()),
+            Some(dir) => ProfileBaselineStore::open(dir, keys.clone(), store.clone()),
             None => ProfileBaselineStore::unavailable(),
         };
         Self {
@@ -759,7 +759,8 @@ pub fn confirm_needed(is_new: bool, old: Option<&ProfilePolicy>, new: &ProfilePo
     let permanent_changed = matches!(new.delete_policy, model::DeletePolicy::Permanent)
         && (is_new
             || old.is_none_or(|o| !matches!(o.delete_policy, model::DeletePolicy::Permanent)));
-    let guard_turned_off = !new.guard.enabled && (is_new || old.is_none_or(|o| o.guard.enabled));
+    let guard_turned_off =
+        !new.guard.effective() && (is_new || old.is_none_or(|o| o.guard.effective()));
     permanent_changed || guard_turned_off
 }
 

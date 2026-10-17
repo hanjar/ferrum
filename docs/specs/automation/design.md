@@ -856,9 +856,31 @@ where reason is one of `profileChanged{from,to}`, `policyChanged`, `notApproved`
   without a valid MAC loads as `FirstRun { Untrusted }`, so no deletion is ever propagated from it;
   `verify_profile_baseline(store, pair)` tells the runner (P1.3) `Trusted | Absent | Untrusted |
 RootsUnavailable` before it plans. The manual `sync_baseline_*` commands only hold the unsigned
-  manual store. Known limit: an older AUTHENTIC baseline replayed over a newer one still verifies.
+  manual store. Each pair has a save counter in the store (`baseline_gen`); the file holds the
+  counter it was written under (covered by the MAC) and loads only if it equals the current one, so
+  a replayed older authentic file is `Untrusted`.
+- **Approval key rules (rework 1).** Only an approval creates the key (never baseline signing);
+  a key is replaced only when its blob was read in full and DPAPI refused it (`Unusable`), after
+  the old blob was copied to `approval.key.bak`; an I/O error, sharing violation, reparse point or
+  oversized file (`Unreadable`) never rotates it. Creation and replacement hold the
+  `approval.key.lock` file lock across processes, and a created or replaced key writes a `warn`
+  event on every automation. Secret buffers are zeroed (DPAPI output before `LocalFree`,
+  `Zeroizing` copies, `ApprovalKey` on drop). The key and baseline folder are read through one
+  handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`.
+- **Guard that cannot trip is OFF (rework 1).** The engine stops a run only when the deletes exceed
+  BOTH the count and the percent of the side, and deletes never exceed 100 %, so `maxPercent` 100
+  (or a zero count) is a guard that never fires. Validation refuses percent above 99;
+  `DeleteGuard::effective()` treats such a stored guard as off for `confirm_needed` (SE-1) and for
+  the approval dialog (warning and "Delete guard: off."). Every approval dialog shows the guard line.
+- **`syncJournalSkip` (rework 1 finding).** The global preference (Settings, `save_prefs`, default
+  off) lets a Content compare skip reading a file when the indexer journal proves its folder
+  unchanged AND the signed baseline holds exactly the current size and mtime. It can only make a
+  compare answer "same" for a pair that already matched on size and time, so it can leave a change
+  unsynced; it cannot create a delete or an overwrite that the approved policy would not make
+  (deletes come from presence against the baseline, which stays signed). The webview can switch it
+  without a dialog, which is acceptable: it narrows what a run does and is not part of the hash.
 - **Schema v2** creates every table of §4.3 and §3.5 at once (`automations`, `approvals`,
-  `automation_runtime`, `queue`, `runs`, `run_ops`, `events`, `controls`); P1.2/P1.3 add logic, not a
+  `automation_runtime`, `queue`, `runs`, `run_ops`, `events`, `controls`, `baseline_gen`); P1.2/P1.3 add logic, not a
   schema step. `runs.id` is `AUTOINCREMENT` (never reused).
 - **Not yet built (later packages):** `next` occurrences of a schedule and the existence check of the
   IANA zone (P1.4 owns the time zone data; P1.1 checks syntax), the background runner readiness
@@ -1036,6 +1058,11 @@ ellipsis in the middle; total ≤ 2 000 characters.
 7. For each root: canonicalize, exists, identity equal → else `device` (keep queued).
 8. Delete policy prerequisites: Recycle Bin drive type; versioning root valid, not overlapping either root, reachable.
 9. Acquire lease for {left, right, versioning root}; busy → keep queued.
+
+**The `enabled` flag is NOT an authorization.** Step 4 is mandatory on every run path (scheduled,
+watch, catch-up, pending rerun, retry, recheck, run now): the gate calls `policy::verify` itself and
+never infers "approved" from `automations.enabled`, the queue, the runtime row or an earlier
+verdict. A test (`the_enabled_flag_is_not_an_authorization`) pins that `verify` ignores the flag.
 
 Only after 1–9 may the engine touch files. Every refusal writes one event and updates status; it never deletes the
 queue entry except for Needs review (entry removed, SP-6.4).

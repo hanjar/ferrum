@@ -220,7 +220,7 @@ const FIELD_MESSAGES: Record<string, string> = {
   filter_too_long: 'Each pattern can have at most 260 characters.',
   filter_control: "Patterns can't contain control characters.",
   guard_count_range: 'The item limit must be between 1 and 100000.',
-  guard_percent_range: 'The percent limit must be between 1 and 100.',
+  guard_percent_range: 'The percent limit must be between 1 and 99 (100 would never stop a run).',
   versioning_root_required: 'Choose the versioning folder.',
   versioning_root_invalid: "The versioning folder isn't usable. Use a full local or network path.",
   versioning_root_overlap: 'The versioning folder must not be inside a sync folder or contain one.',

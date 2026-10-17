@@ -1029,3 +1029,92 @@ fn the_dialog_text_is_built_from_stored_data_with_the_permanent_warning_first() 
     assert!(text.contains("\"Danger\" rev 1"));
     assert!(text.chars().count() <= confirm_text::PROMPT_MAX_CHARS);
 }
+
+// ── FER-522 rework 1 ──
+
+/// A key that is made again after loss announces itself on EVERY existing automation, whatever
+/// the user answers to the new approval's dialog.
+#[test]
+fn a_recreated_key_is_logged_on_every_automation() {
+    let fx = Fixture::new();
+    let (profile, _, _) = draft_of(&fx, "A");
+    let old = fx.new_automation("Old one", &profile, Fixture::daily());
+    fx.memory.as_ref().unwrap().set(KeyLoad::Missing);
+    assert_eq!(
+        verdict(&fx, &old),
+        Verdict::NeedsReview(policy::NeedsReview::KeyUnavailable)
+    );
+    let draft = Fixture::auto_draft("New one", &profile, Fixture::watch());
+    let test = fx.test(None, &draft);
+    // The user cancels - the key was still created, and the event still appears.
+    assert_eq!(
+        fx.approve(None, None, &draft, &test.test_id, false),
+        ApproveResultDto::Canceled
+    );
+    assert!(
+        events(&fx, &old)
+            .iter()
+            .any(|e| e.starts_with("The approval key was created again")),
+        "{:?}",
+        events(&fx, &old)
+    );
+    // The old approval does not verify under the new key; the new one is made now.
+    assert_eq!(
+        verdict(&fx, &old),
+        Verdict::NeedsReview(policy::NeedsReview::NotApproved)
+    );
+    // Not announced again for the next approval.
+    let before = events(&fx, &old).len();
+    let again = fx.test(None, &draft);
+    fx.approve(None, None, &draft, &again.test_id, false);
+    assert_eq!(events(&fx, &old).len(), before);
+}
+
+/// An unreadable key file (transient I/O problem) stops the approval before any dialog: no
+/// rotation, nothing stored.
+#[test]
+fn an_unreadable_key_stops_the_approval_before_the_dialog() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Nightly");
+    let test = fx.test(None, &draft);
+    fx.memory.as_ref().unwrap().set(KeyLoad::Unreadable);
+    let err = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        no_dialog,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "store_unavailable");
+    assert_eq!(count(&fx, "automations"), 0);
+    assert_eq!(fx.memory.as_ref().unwrap().load(), KeyLoad::Unreadable);
+}
+
+/// Re-approval shows the STORED name and states a rename; the text says it also enables.
+#[test]
+fn reapprove_prompt_uses_the_stored_name_and_says_enable() {
+    let fx = Fixture::new();
+    let (profile, _, _) = draft_of(&fx, "Shared");
+    let id = fx.new_automation("Stored name", &profile, Fixture::daily());
+    let rev = record(&fx, &id).config_rev;
+    let draft = Fixture::auto_draft("Brand new name", &profile, Fixture::daily());
+    let test = fx.test(Some(&id), &draft);
+    let seen = RefCell::new(String::new());
+    approve_in(
+        &fx.store,
+        approve_req(Some(&id), Some(rev), &draft, &test.test_id),
+        &fx.deps(),
+        |p| {
+            *seen.borrow_mut() = p.text.clone();
+            false
+        },
+    )
+    .unwrap();
+    let text = seen.borrow();
+    assert!(
+        text.contains("Re-approve and enable automation \"Stored name\"?"),
+        "{text}"
+    );
+    assert!(text.contains("It will be renamed to \"Brand new name\"."));
+    assert!(text.contains("Delete guard: stops above 50 items and 20%."));
+}

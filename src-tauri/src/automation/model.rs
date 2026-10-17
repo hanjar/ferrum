@@ -23,7 +23,10 @@ pub const ROOT_MAX_CHARS: usize = 1024;
 pub const MAX_FILTERS: usize = 64;
 pub const MAX_FILTER_CHARS: usize = 260;
 pub const GUARD_MAX_COUNT: u32 = 100_000;
-pub const GUARD_MAX_PERCENT: u8 = 100;
+/// Highest percent threshold that can still trip: the engine stops a run only when the deletes
+/// exceed BOTH the count and the percent of the side's files, and deletes can never exceed 100 %
+/// of them, so `100` would be a guard that never fires. Validation refuses it (FER-522 rework 1).
+pub const GUARD_MAX_PERCENT: u8 = 99;
 
 // ── Stored model (§4.4, serde camelCase, deny_unknown_fields) ──
 
@@ -120,6 +123,16 @@ pub struct DeleteGuard {
     pub enabled: bool,
     pub max_count: u32,
     pub max_percent: u8,
+}
+
+impl DeleteGuard {
+    /// Whether the guard can ever stop a run. `enabled` with a percent of 100 (or more) or a zero
+    /// count never trips, so it is the same as OFF and is treated as off wherever the user must
+    /// confirm turning protection off (SE-1, SP-5.1): a profile stored before validation refused
+    /// such values cannot slip past the native dialog.
+    pub fn effective(&self) -> bool {
+        self.enabled && self.max_count > 0 && self.max_percent < 100
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1345,11 +1358,33 @@ mod tests {
         );
     }
 
-    /// SP-5.1: guard ranges (count 1..=100000, percent 1..=100).
+    /// FER-522 rework 1: an enabled guard that can never fire counts as off.
+    #[test]
+    fn an_ineffective_guard_is_off() {
+        let g = |enabled, max_count, max_percent| DeleteGuard {
+            enabled,
+            max_count,
+            max_percent,
+        };
+        assert!(g(true, 50, 20).effective());
+        assert!(g(true, 1, 99).effective());
+        assert!(!g(false, 50, 20).effective());
+        assert!(!g(true, 50, 100).effective());
+        assert!(!g(true, 50, 255).effective());
+        assert!(!g(true, 0, 20).effective());
+    }
+
+    /// SP-5.1: guard ranges (count 1..=100000, percent 1..=99; 100 % could never trip).
     #[test]
     fn sp_5_1_guard_ranges() {
         let probe = FakeProbe::default();
-        for (count, percent) in [(0u32, 20u8), (GUARD_MAX_COUNT + 1, 20), (50, 0), (50, 101)] {
+        for (count, percent) in [
+            (0u32, 20u8),
+            (GUARD_MAX_COUNT + 1, 20),
+            (50, 0),
+            (50, 100),
+            (50, 101),
+        ] {
             let mut d = draft("n", r"C:\A", r"D:\B");
             d.policy.guard.max_count = count;
             d.policy.guard.max_percent = percent;

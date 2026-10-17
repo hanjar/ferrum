@@ -425,15 +425,25 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
     // The key is made (or found) before the dialog: a machine where DPAPI is refused tells the
     // user now, instead of after they said yes.
     let key = deps.keys.load_or_create().map_err(|_| key_unavailable())?;
+    // A key that was just created or replaced invalidates every earlier approval: say so on each
+    // automation, whatever the user answers next (FER-522 rework 1).
+    if deps.keys.take_rotation_notice() {
+        note_key_rotation(store, deps.clock)?;
+    }
 
     let action = if existing.is_some() {
         ApprovalAction::Reapprove
     } else {
         ApprovalAction::Enable
     };
+    // A re-approval names the automation by its STORED name; a rename is stated separately.
+    let shown_name = existing
+        .as_ref()
+        .map_or(validated.name.as_str(), |r| r.name.as_str());
     let prompt = confirm_text::approval_prompt(
         action,
-        &validated.name,
+        shown_name,
+        existing.as_ref().map(|_| validated.name.as_str()),
         &profile.rec.name,
         profile.rec.revision,
         &profile.policy,
@@ -559,6 +569,29 @@ pub fn approve_in<A: Into<ConfirmAnswer>>(
     }
 }
 
+/// One `warn` event per automation: the approval key was made again, so earlier approvals no
+/// longer verify (Needs review) and must be approved again.
+fn note_key_rotation(store: &Store, clock: Clock<'_>) -> Result<(), CommandError> {
+    store.with_write(|conn| -> Result<(), CommandError> {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| StoreError::Unavailable)?;
+        let now = clock();
+        for row in automations::list(&tx)? {
+            automations::add_event(
+                &tx,
+                &row.id,
+                now,
+                EventKind::Warn,
+                "The approval key was created again \u{2014} review and approve this automation again",
+            )?;
+        }
+        automations::bump_change_seq(&tx)?;
+        tx.commit().map_err(|_| StoreError::Unavailable)?;
+        Ok(())
+    })
+}
+
 // ── Enable / pause / delete ──
 
 /// `automation_set_enabled` core. Enabling is a RESUME: the stored approval must verify before
@@ -610,6 +643,7 @@ pub fn set_enabled_in<A: Into<ConfirmAnswer>>(
     let prompt = confirm_text::approval_prompt(
         ApprovalAction::Resume,
         &shown.rec.name,
+        None,
         &shown.profile.rec.name,
         shown.profile.rec.revision,
         &shown.profile.policy,

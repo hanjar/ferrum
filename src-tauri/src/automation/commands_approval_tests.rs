@@ -328,3 +328,54 @@ fn an_untrusted_store_gets_no_key_and_no_baseline_folder() {
         "nothing was created in the junction target"
     );
 }
+
+/// FER-522 rework 1 (SE-1, SP-5.1): a guard that can never trip is off. Saving a profile with
+/// one needs the same native confirmation as turning the guard off, and so does changing from an
+/// effective guard to an ineffective one; staying ineffective asks nothing new.
+#[test]
+fn an_ineffective_guard_needs_the_same_confirmation_as_off() {
+    let fx = Fixture::new();
+    let (id, _) = fx.profile("P");
+    let effective = fx.profile_policy(&id);
+    assert!(effective.guard.effective());
+    assert!(!confirm_needed(false, Some(&effective), &effective));
+    for tweak in [
+        |g: &mut model::DeleteGuard| g.max_percent = 100,
+        |g: &mut model::DeleteGuard| g.max_percent = 255,
+        |g: &mut model::DeleteGuard| g.max_count = 0,
+        |g: &mut model::DeleteGuard| g.enabled = false,
+    ] {
+        let mut weak = effective.clone();
+        tweak(&mut weak.guard);
+        assert!(!weak.guard.effective());
+        assert!(confirm_needed(true, None, &weak), "new profile");
+        assert!(confirm_needed(false, Some(&effective), &weak), "weakened");
+        assert!(!confirm_needed(false, Some(&weak), &weak), "already weak");
+    }
+}
+
+/// Validation refuses a percent that could never trip, so the editor cannot produce one.
+#[test]
+fn a_guard_percent_of_one_hundred_is_refused_by_validation() {
+    let fx = Fixture::new();
+    let (id, rev) = fx.profile("P");
+    let mut current = get_in(&fx.store, &id, &Fixture::probe()).unwrap();
+    current.policy.guard.max_percent = 100;
+    let err = save_in(
+        &fx.store,
+        SaveRequest {
+            id: Some(id),
+            expected_revision: Some(rev),
+            draft: model::Draft {
+                name: current.name,
+                policy: current.policy,
+            },
+        },
+        &Fixture::probe(),
+        |_| -> bool { panic!("refused before any dialog") },
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "invalid_input");
+    assert!(err.message.contains("guard"));
+}

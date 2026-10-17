@@ -333,7 +333,7 @@
             id="sp-guard-percent"
             type="number"
             min="1"
-            max="100"
+            max="99"
             value={form.guardMaxPercent}
             oninput={(e) => {
               form.guardMaxPercent = num(e, GUARD_PERCENT_WIRE_MAX);
