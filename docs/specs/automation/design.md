@@ -609,12 +609,25 @@ rediscover them:
   mtime are checked AGAIN on the file's own handle, atomically with the delete/rename (`delete_file_if`,
   `rename_file_into_if`), so a file edited in the gap survives. The shell's Recycle Bin call has no such hook; there the
   check made right before is all there is. An in-place overwrite (`recycleBin`/`permanent`, SP-3.4) replaces the target
-  when the copy commits; an edit of the TARGET during a long copy is not detected (existing copy-engine behaviour).
+  when the copy commits, and FER-564 re-checks the TARGET at that moment (`sync_engine/commit_check.rs`,
+  `archive_publish::replace_file_checked`): the target is opened with a share mode that denies other writers, deleters
+  and renamers, its size and time are read from that handle and compared with the plan AND with the exact facts the
+  just-in-time check saw, the old file is renamed aside by that handle, the staged file is published without replacing
+  a name, and only then is the old file deleted. A changed, removed or swapped target is left as it is, the item is
+  `changed` with the reason `target_changed` (another comparison is due) and the staged copy is discarded; a program
+  that has the target open for writing makes the item fail as `sharing_violation` (retried like any transient error).
+  `ReplaceFileW` was not used: it works on paths, so nothing can be compared on the object it replaces.
 - **Versioning.** `<root>\Left|Right\<yyyy-MM-dd HHmmss> #<run>\<rel>` (system time zone), folders created no-follow.
   Same volume: rename by handle (`NtSetInformationFile(FileRenameInformation)` with the destination folder handle as
   `RootDirectory`; the destination is never replaced). Another volume (`STATUS_NOT_SAME_DEVICE`): `copy_engine` into the
   held destination folder, size verified by handle, source deleted by handle only if it is unchanged since the copy
-  started. Overwrites move the old target aside first, then copy without replacing. The versioning root is a folder
+  started. Overwrites move the old target aside first, then copy without replacing. If that copy fails or is cancelled
+  (FER-564), the old file is moved back by handle without replacing anything (`VersionStore::restore`; another volume:
+  copied back, size verified, then the version is dropped); a name taken meanwhile is never replaced (the old version
+  stays in the tree). A restore that fails is `restore_failed`, a systemic stop (the run ends Partial/Failed and the
+  profile needs attention, also after a cancel): the old file is safe in the versions tree, the baseline entry is not
+  advanced, so a two-way run finds target missing + source changed = a held conflict (`ModifyDelete`), never a delete,
+  and a one-way or mirror run copies the file again. The versioning root is a folder
   (a file is refused), is created on first use and is covered by the run's lease.
 - **Delete guard (SP-5, Q4).** Only FILE deletes count (removing an empty folder destroys nothing). A side trips when
   `deletes > max_count` AND `deletes * 100 > max_percent * files(side)`; the denominator is the FILE entries the
@@ -1092,10 +1105,10 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   gets "Your Run now was not done - run it again". A Recheck or Retry control that expires unanswered is announced
   before it is swept. The recovery pass keeps the lease row of a living holder for 5 minutes; an acquirer still
   reclaims any lease stale for 30 s (design 3.4) and the stalled holder stops at its next cover check.
-- **Not done here (open entry criteria of P0.2 review 2).** P3-2 (re-check the target at the commit of an in-place
-  overwrite) and P3-3 (restore the old target when a versioning overwrite fails or is cancelled) touch the copy engine
-  and the versioning tree; they are tracked separately. Until they land, the only trigger that can reach the engine is
-  a user's Run now, a retry or a queued entry written by hand: the scheduler (P1.4) and the watcher (P1.5) do not exist yet.
+- **P3-2 and P3-3 (FER-564).** Both entry criteria of P0.2 review 2 are in: the commit-time re-check of an in-place
+  overwrite and the restore of a versioned file whose replacement did not land (see Just-in-time and Versioning above).
+  Until the scheduler (P1.4) and the watcher (P1.5) exist, the only trigger that can reach the engine is a user's Run now,
+  a retry or a queued entry written by hand.
 - **Known limits.** One run at a time per host. The per-operation list of a run is written when the run ends (the live
   view shows counts). Conditions: battery is read from Windows; a metered connection cannot be told yet, so a policy
   that skips metered connections waits (fail closed) until OP-1.
