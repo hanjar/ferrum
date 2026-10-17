@@ -1147,7 +1147,7 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
   today to today + 13 days in the schedule zone (`date_out_of_range`), a time that has passed (`time_passed`); an unknown
   zone is `tz_invalid` (also refused by the model at test and approve).
 - **Known limit.** A system clock that jumps far forward and back leaves the occurrences after the stored mark suppressed
-  until real time catches up (fail closed: no run, never an extra run). To bound this, a `last_fired` mark more than 26 hours
+  until real time catches up, for up to 26 h (see below; fail closed: no run, never an extra run). To bound this, a `last_fired` mark more than 26 hours
   ahead of the clock (more than any zone offset or DST shift can explain) is clamped to `now` and an event with a Warn kind
   says so. Trade-off: if the clock is moved back by more than 26 hours after an occurrence fired, and left there until the
   false clock passes the same local time again, that occurrence can run twice (once for the false clock, once for the real
