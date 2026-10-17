@@ -499,8 +499,8 @@ export class AutomationStore {
     try {
       const page = await this.#deps.backend.events(d.id, d.eventsNext, 50);
       if (this.detail !== d) return;
-      const seen = new Set([...(d.data?.events.events ?? []), ...d.moreEvents].map((e) => e.id));
-      d.moreEvents = [...d.moreEvents, ...page.events.filter((e) => !seen.has(e.id))];
+      const seen = [...(d.data?.events.events ?? []), ...d.moreEvents].map((e) => e.id);
+      d.moreEvents = [...d.moreEvents, ...page.events.filter((e) => !seen.includes(e.id))];
       d.eventsNext = page.next;
     } catch (e) {
       if (this.detail === d) {
