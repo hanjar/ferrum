@@ -186,7 +186,14 @@ fn needs_review_comes_from_the_approval_not_from_the_enabled_flag() {
     assert_eq!(r.profile_revision, 2);
     assert_eq!(r.approved_revision, Some(1));
     // Enabled or not, the verdict is the same.
-    approval::pause_in(&fx.store, &a, PauseMode::Finish, fx.clock()).unwrap();
+    approval::pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &a,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     assert_eq!(row(&fx, &a, T0).status.kind, StatusKind::Review);
     // Without a usable key nothing verifies.
     let (p2, _) = fx.profile("Second");
@@ -204,8 +211,22 @@ fn paused_and_a_stored_policy_that_cannot_be_read() {
     let (_, a) = one_watch(&fx, "Projects watch");
     let (pb, _) = fx.profile("Photos");
     let b = fx.new_automation("Nightly photos", &pb, Fixture::daily());
-    approval::pause_in(&fx.store, &a, PauseMode::Finish, fx.clock()).unwrap();
-    approval::pause_in(&fx.store, &b, PauseMode::Finish, fx.clock()).unwrap();
+    approval::pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &a,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
+    approval::pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &b,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     let w = row(&fx, &a, T0);
     assert_eq!(
         (w.status.kind, w.status.sub.as_deref()),
@@ -240,6 +261,7 @@ fn paused_and_a_stored_policy_that_cannot_be_read() {
 
 #[test]
 fn running_queued_and_waiting_rows() {
+    crate::automation::host::set_unattended_for_tests(true);
     let fx = Fixture::new();
     let (p, a) = one_watch(&fx, "Projects watch");
     let b = fx.new_automation("Same folders, other trigger", &p, Fixture::daily());
@@ -1098,7 +1120,14 @@ fn the_queued_chip_belongs_to_the_automation_that_owns_the_entry() {
     // B shares the profile but has no entry of its own: it shows its trigger state ...
     assert_eq!(status(&fx, &b, T0).0, StatusKind::Scheduled);
     // ... a paused B stays Paused ...
-    approval::pause_in(&fx.store, &b, PauseMode::Finish, fx.clock()).unwrap();
+    approval::pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &b,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     assert_eq!(status(&fx, &b, T0).0, StatusKind::Paused);
     assert_eq!(status(&fx, &a, T0).0, StatusKind::Queued);
     // ... and a held B says Needs attention.
@@ -1130,7 +1159,14 @@ fn approve_and_resume_keep_the_attention_hold() {
     let held = |fx: &Fixture| row(fx, &a, T0 + 10).attention.map(|h| h.run_id);
     assert_eq!(held(&fx), Some(run));
     // Pause and resume (native confirmation answered yes).
-    approval::pause_in(&fx.store, &a, PauseMode::Finish, fx.clock()).unwrap();
+    approval::pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &a,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     approval::set_enabled_in(&fx.store, &a, true, &fx.deps(), |_| true).unwrap();
     assert_eq!(held(&fx), Some(run), "resume keeps the hold");
     // Re-approval of an edited automation.

@@ -330,6 +330,13 @@ CREATE INDEX events_by_auto ON events(automation_id, at_ms DESC);
 CREATE INDEX runs_by_auto ON runs(automation_id, started_ms DESC);
 ```
 
+**Additive column without a version bump (LC-5 note).** `queue.merged_from` (JSON array of the ids of OTHER
+automations whose trigger was merged into the entry, default `'[]'`) was added by FER-524 after schema v2 shipped. It
+is created on open with `ALTER TABLE queue ADD COLUMN ... DEFAULT '[]'` when `pragma_table_info` does not list it
+(idempotent; the loser of a race for it accepts "duplicate column"), exactly like `baseline_gen`. The schema version
+stays 2 and no migration backup is taken: the change is additive, an older binary that ignores the column reads and
+writes the same table, and a store that never saw the column gets it at the first open of a binary that knows it.
+
 Caps: `run_ops` stores the first 5 000 operations per run (MH-8), `events` the newest 200 per automation (pruned
 on insert), `profile_revisions` the newest 50 per profile. A run row is never deleted while it is referenced by an
 `attention` (OP-2).
@@ -1014,6 +1021,85 @@ pending reruns, retries and catch-ups; for an ordinary trigger it is Completed w
 - **Not changed:** schema v2 (no migration step); `automation_runtime.next_occurrence_ms` stays empty until P1.4.
 - **Additions to the P1.1 code:** `StoreError::Invalid`; `pause` also clears `pending_rerun` (RQ-8.2).
 
+### 9.6 P1.3 implementation notes (as built)
+
+- **Modules.** `automation/host.rs` (loop, election, controls, recovery) with `host/gate.rs` (the gate and its proof),
+  `host/runner.rs` (queue walk, one run, recheck, settle), `host/request.rs` (what the commands and controls ask),
+  `host/engine.rs` (the one door to the engine), `host/requeue.rs` (merged triggers), `host/prod.rs` (production deps).
+  The host is generic over `HostDeps`; `HostClass::App` is wired by `lib.rs`, `HostClass::Background` is only
+  constructed by tests until P3.1. A host executes only automations of its class.
+- **The gate is a type.** `gate()` is the only function that can build a `GateOk` (private fields, no constructor, not
+  `Clone`). `HostDeps::run_engine` and `engine::run_gated` take `&GateOk`, so every run path - triggers, Run now, retry,
+  recheck, catch-up, pending rerun - reaches the engine only after `policy::verify` (design §10.4). Source tests keep the
+  engine's request type out of every other host file and keep `GateOk {` out of every file but `gate.rs`; the same tests
+  forbid `GuardAck` in the host (an unattended tripped guard fails the run). `verify` runs twice per gate: before the
+  folder probes and the lease, and again after them, and the run is refused (`Changed`) if the approval, profile
+  revision, configuration revision or hold moved in between. A recheck is gated too (`GateKind::Recheck`: read only, no
+  lease, may look at a paused automation).
+- **Refusals.** One reason per refusal, one event, never a file operation. Removed from the queue: paused, wrong runtime,
+  needs review, attention hold, a failed delete-policy prerequisite (recorded as a Failed run). Kept: unmet condition,
+  offline or swapped folder (status Waiting for device; identity mismatch waits too, per §10.4 step 7), busy folders,
+  a store error. Kept entries are logged once per reason and tried again after 5 s.
+- **Election** (`store/hosts.rs`). `claim` runs in one immediate transaction: an own row refreshes, a live foreign row
+  (beat <= 15 s and process alive) refuses, anything else is taken over. The host beats every 5 s; a process that does not
+  host asks every second. A host that lost its row stops starting runs but finishes the ones it has; their lease keeps the
+  folders safe.
+- **Recovery** (LC-6). On takeover a `Running` row of the host's class becomes Interrupted unless a LIVE lease still names
+  it (a stalled host keeps its run), and dead leases are deleted at once.
+- **Requests.** Run now and Retry queue directly for app automations (the toast needs the answer); background ones and
+  Stop, Pause & stop and Recheck are `controls` rows answered by the host that owns the run (`mark_handled`). A Stop
+  control stays pending until the run ends so the status line reads "Stopping after the current file". At most 10
+  controls per second per target (T5).
+- **Review items of P1.1** (`NTMS FER-524`): the approval key is replaced only after the user said Yes (Missing may still be
+  created before the dialog); lease coverage is checked per holder kind (`manual` for the webview-driven baseline
+  commands, the run's own kind for a run); the store refuses a nested call from inside one of its closures
+  (`StoreError::Unavailable`, plus `store::inside_closure()` for the engine call) instead of deadlocking, and
+  `KeyedAuth` documents the rule; `DeleteGuard::effective()` decides in the engine too; `baseline_gen` is created when a
+  store is opened; key backups never overwrite an older `.bak` (timestamped); a lock file that cannot be created is
+  logged with the OS error.
+- **Engine.** A run asks `lease.covers()` at least every 2 s (P0.2 review P3-12) in addition to `is_lost()`, between
+  operations and from the watcher that cancels a copy in flight.
+- **Automatic runs are OFF (`host::UNATTENDED_RUNS_ENABLED = false`, decision after the P1.3 review).**
+  The engine runs only when the user asks at that moment (Run now, Retry). Parked, not run: pending reruns, the
+  fresh comparison after a folder came back (`Available`), entries of triggers (schedule, watch, catch-up, startup),
+  entries the gate kept waiting (device, conditions, busy folders) that would start later by themselves, and the
+  move of merged triggers to a sibling (`requeue_siblings`). A parked entry stays in the queue, the status reads
+  "Queued - Waiting - run it with Run now" and one event says so. A kept Run now is asked once; the user's next Run now
+  (it merges into the entry and raises `merged_count`) asks again. A Run now that merges into another kind of entry
+  makes it the user's request. **AUTO-P0.2c (P0.2 review P3-2 and P3-3) is REQUIRED before the switch is turned on.**
+  Tests run both ways (`set_unattended_for_tests`); the shipped constant is pinned off by a test.
+- **Review rework 1.** The gate reads its rows in one real read transaction and also recomputes the policy hash of the
+  policies it puts in the proof (A1). A host that is closing or has lost the role starts nothing; a run registers as
+  stopping when shutdown came in meanwhile (A2). The lease learns its run in the transaction that starts the run, and
+  the run does not start if that fails (A3). Running rows are re-examined every 30 s, never within 30 s of their start,
+  and never while a living holder (beat within 5 min) still claims them (A4). A queue entry belongs to one host class
+  (a trigger of the other class is refused as busy), and an entry records which OTHER automations merged into it
+  (`queue.merged_from`, an additive column created on open, schema version unchanged); only those are moved when the
+  owner goes (A5). Stop and Recheck are routed by `run.host`, the host that ran the run (A6). Rate limits count per
+  action, and "Pause & stop" is not limited at all, so a flood of Rechecks cannot hold a Stop back; a Recheck waits
+  while any run works on overlapping folders (A7). RQ-10.2: "Retry remaining N" is shown only "after a Recheck that
+  found N > 0 and the run was not a conflict", so a Conflict run never offers a retry (A7).
+- **Conditions fail closed (A8).** Battery: unknown power status counts as battery. Metered: no detection exists, so a
+  policy with `skipOnMetered` waits until OP-1 ships.
+- **Guard (B-a).** A count of 0 is percent-only and still protects; `DeleteGuard::effective()` is false only for a
+  disabled guard or a percent of 100 or more, in the engine, the dialog and `confirm_needed` alike.
+- **Rework 2.** With automatic runs off, a user request (Run now / Retry) the gate answers with "keep" (device,
+  conditions, busy folders, changed approval) is REMOVED from the queue with one event ("Waiting - run it with Run now"),
+  so no later host (takeover, restart) can start it unasked; the in-memory "already asked" bookkeeping and its
+  dependence on `merged_count` are gone. A user request older than 10 minutes is dropped with an event. Merged automatic
+  triggers can never turn an entry into a user request (only a Run now / Retry merge does, by changing its kind).
+  When an entry is removed and nobody takes over its merged triggers, each automation whose Run now was merged into it
+  gets "Your Run now was not done - run it again". A Recheck or Retry control that expires unanswered is announced
+  before it is swept. The recovery pass keeps the lease row of a living holder for 5 minutes; an acquirer still
+  reclaims any lease stale for 30 s (design 3.4) and the stalled holder stops at its next cover check.
+- **Not done here (open entry criteria of P0.2 review 2).** P3-2 (re-check the target at the commit of an in-place
+  overwrite) and P3-3 (restore the old target when a versioning overwrite fails or is cancelled) touch the copy engine
+  and the versioning tree; they are tracked separately. Until they land, the only trigger that can reach the engine is
+  a user's Run now, a retry or a queued entry written by hand: the scheduler (P1.4) and the watcher (P1.5) do not exist yet.
+- **Known limits.** One run at a time per host. The per-operation list of a run is written when the run ends (the live
+  view shows counts). Conditions: battery is read from Windows; a metered connection cannot be told yet, so a policy
+  that skips metered connections waits (fail closed) until OP-1.
+
 ## 10. Threat model and security controls
 
 ### 10.1 Assets, actors, trust boundaries
@@ -1098,7 +1184,7 @@ watch, catch-up, pending rerun, retry, recheck, run now): the gate calls `policy
 never infers "approved" from `automations.enabled`, the queue, the runtime row or an earlier
 verdict. A test (`the_enabled_flag_is_not_an_authorization`) pins that `verify` ignores the flag.
 
-Only after 1–9 may the engine touch files. Every refusal writes one event and updates status; it never deletes the
+Only after 1–9 may the engine touch files (and, while `UNATTENDED_RUNS_ENABLED` is off, only for a run the user asked for, §9.6). Every refusal writes one event and updates status; it never deletes the
 queue entry except for Needs review (entry removed, SP-6.4).
 
 ## 11. FerrumIndexer synergy (FER-477)

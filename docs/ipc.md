@@ -369,5 +369,65 @@ scheduled queued pending running paused completed partial cancelled skipped atte
 - **Rules for the read side:** no lease id, MAC or key in any DTO; the approval key is loaded at most once per read
   and never created; the store closure never calls the engine or `KeyedAuth` (the store mutex is not re-entrant).
 - Not yet built (later packages): the scheduler's next occurrence (`next` stays "No upcoming run" until P1.4, then
-  the label gets the zone name), the host loop that writes runtime state, runs and events (P1.3), the
-  `automation://changed` event, and the control commands (`automation_run_now`, `automation_stop_run`, ...).
+  the label gets the zone name). The host loop, the `automation://changed` / `automation://progress` events and the control
+  commands (`automation_run_now`, `automation_stop_run`, ...) are P1.3, below.
+
+## Automations: host loop and controls (automation P1.3)
+
+Source of truth: `src-tauri/src/automation/host.rs` + `host/{gate,runner,request,engine,requeue,prod}.rs` (Tauri-free
+cores) + `automation/commands.rs` (wrappers, events) + `src/lib/ipc/automation.ts`; fixtures
+`contract-fixtures/automation/automation-{run-now*,stop-run,recheck,retry,event-*}.json`, read by both test suites.
+
+The in-app host is started by `lib.rs` `setup` and stopped on `RunEvent::Exit`. Exactly one Ferrum instance per user
+hosts (a `hosts` row, claimed in one immediate transaction; live = beat <= 15 s AND process alive); the others show the
+same data and send controls. **Every command below is a request.** It queues an entry or writes a `controls` row; the
+host passes it through the gate (design §10.4: enabled, runtime, `policy::verify`, attention, conditions, roots and
+identity, delete-policy prerequisites, lease) before a file is touched. No parameter names a profile, a root, a
+policy, a hash or a lease, none says "confirmed", and ids are validated (lowercase UUID v4 / run id >= 1) before any
+lookup. Errors are `{ code, message }` without paths; no command can panic.
+
+| Command               | Payload        | Result                                                                                | Notes                                                                                                                                                               |
+| --------------------- | -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automation_run_now`  | `{ id }`       | `{ status: 'queued' \| 'waiting' \| 'merged' \| 'device' \| 'requested', waitsFor? }` | the toasts of RQ-4. App automations are queued here; a background one writes a control (`requested`, error `runner_down` if no runner is alive)                     |
+| `automation_stop_run` | `{ runId }`    | `{ status: 'requested' }`                                                             | RQ-8.1; error `not_ready` when the run has ended                                                                                                                    |
+| `automation_recheck`  | `{ runId }`    | `{ status: 'requested' }`                                                             | RQ-10.1; only for the run an attention hold names (`not_ready` otherwise); the answer is stored on the run (`recheck`) and announced by `automation://changed`      |
+| `automation_retry`    | `{ runId }`    | `{ status: 'queued' \| 'waiting' \| 'merged' \| 'device' \| 'requested' }`            | RQ-10.2; needs a recheck that found work (`not_ready`), never for a conflict; the run executes a fresh plan with `retryOf`                                          |
+| `automation_pause`    | `{ id, mode }` | `{ status: 'paused' }`                                                                | now also the run part (RQ-8.2): `stop` asks the host to stop the run that is going, `finish` leaves it; queued entries and the pending rerun are dropped either way |
+
+Errors added: `held` (the automation needs attention; Run now is refused with the hold's text), `paused`, `runner_down`,
+`not_ready` (`recheck_first`, `not_running`, `not_held`), `busy` (a retry cannot merge into another automation's
+entry), `rate_limited` (more than 10 controls per second for one target), plus the existing `needs_review`, `not_found`,
+`invalid_input`, `store_*`.
+
+**Events** (both carry ids, a phase and counts only - never a path, MAC, key or lease id):
+
+- `automation://changed` `{ seq }` - `meta.change_seq` moved. Emitted by EVERY instance (host or not) within 2 s of a
+  change made by any process (MH-10). The webview re-reads what it shows.
+- `automation://progress` `{ runId, automationId, phase, opsTotal, counts }` - `phase` is the run's phase column
+  (`gate | compare | plan | sync | settle | done`); at most 5 per second per run; the run row itself is updated at most
+  once a second. The per-operation rows of a run are written when it ends (the live view reads counts).
+
+Behaviour the contract relies on:
+
+- **One run at a time per host.** Queue entries of the host's class start in FIFO order; an entry the gate keeps waiting
+  (folders busy, a folder offline, an unmet condition) does not hold up a later one and is asked again every 5 s.
+- **Outcomes** (RQ-9): Completed, Partial, Conflict held, Failed, Cancelled, Interrupted, Skipped. Partial, Conflict
+  held and Failed set the attention hold in the transaction that ends the run; new triggers are then removed with one
+  event ("Trigger held") until a recheck that finds nothing left, or a successful retry ("Resolved by run #n"), releases
+  the hold. A failed delete-policy prerequisite (no Recycle Bin, versioning folder unusable, protected folder) is a
+  Failed run that never started. A guard that trips in an unattended run fails the run (SP-5.1); only the manual run can
+  carry the native "yes".
+- **Interrupted** never sets attention. A folder that disappears sends the automation to Waiting for device with a
+  fresh-comparison entry queued; a run left `Running` by a dead host becomes Interrupted when the next host takes over,
+  and its lease expires.
+- **Pending rerun** (a file changed during the run) queues one run 10 s later, at most 5 in a row per automation - only when automatic runs are on (see below).
+- **Merged triggers** (design §9.5): when the owner of a merged queue entry is paused, edited, deleted, held or in review,
+  the merged triggers move to the first other healthy automation of the profile.
+
+**Automatic runs are off.** While `UNATTENDED_RUNS_ENABLED` is false (the shipped state) the host starts the engine
+only for a Run now or Retry the user asked for. A queue entry of any other kind (schedule, watch, catch-up, pending
+rerun, "folder is back") is not started: it stays in the queue, `automation_list` shows `Queued` with the sub-line
+"Waiting - run it with Run now", and one event says so. An entry the gate kept waiting (device, conditions, busy
+folders) is not retried by itself; pressing Run now again asks again. A file that changed during a run, or a folder that
+disappeared, is reported in the event log instead of queueing a rerun. Open conditions fail closed: unknown power status
+counts as battery, and `skipOnMetered` waits until metered detection exists.

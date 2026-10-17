@@ -389,6 +389,34 @@ pub fn acquire(
     Ok(AcquireOutcome::Acquired { id })
 }
 
+/// Delete every lease whose holder process is gone or whose heartbeat is stale (LC-6). The
+/// host calls this when it takes over, so a crashed host's lease is visibly gone at once instead
+/// of at the next acquire. Returns how many rows went.
+///
+/// A holder whose process still exists keeps its row until it has been silent for `living_grace_ms`
+/// (a stalled host is not a dead one; the row is the evidence that it still claims its run). An
+/// ACQUIRER reclaims any lease stale for more than 30 s regardless (design 3.4), and the stalled
+/// holder stops writing at its next cover check - that fail-safe does not depend on this pass.
+pub fn reclaim_dead(
+    conn: &Connection,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+    living_grace_ms: i64,
+) -> Result<usize, StoreError> {
+    let mut removed = 0;
+    for row in read_rows(conn)? {
+        let alive = probe.is_alive(row.holder);
+        let silent_too_long = now_ms.saturating_sub(row.beat_ms) > living_grace_ms
+            || row.beat_ms.saturating_sub(now_ms) > FUTURE_SKEW_MS;
+        if !alive || (stale(now_ms, row.beat_ms) && silent_too_long) {
+            removed += conn
+                .execute("DELETE FROM leases WHERE id = ?1", [&row.id])
+                .map_err(unavailable)?;
+        }
+    }
+    Ok(removed)
+}
+
 /// Refresh the heartbeat. `false` = no such lease for this holder (reclaimed, released, wrong
 /// token or someone else's lease): the caller has lost it.
 pub fn heartbeat(
@@ -425,12 +453,17 @@ pub fn release(conn: &Connection, id: &str, holder: Holder) -> Result<bool, Stor
     Ok(changed == 1)
 }
 
-/// Whether `holder` owns a fresh lease that covers every one of `wanted` (each wanted root
-/// equals or lies inside a root of that one lease). Used by `sync_baseline_save` (design §3.4,
-/// §5.7): no covering lease, no baseline write.
+/// Whether `holder` owns a fresh lease OF KIND `kind` that covers every one of `wanted` (each
+/// wanted root equals or lies inside a root of that one lease). Used by `sync_baseline_save`
+/// (design §3.4, §5.7): no covering lease, no baseline write.
+///
+/// The kind matters (FER-524, review P1.1 #4): the webview-driven manual baseline commands pass
+/// [`HolderKind::Manual`], so a lease that the app host holds for an automation run (`App`) can
+/// never satisfy a save the webview asks for, and a manual lease can never stand in for a run.
 pub fn covers(
     conn: &Connection,
     holder: Holder,
+    kind: HolderKind,
     wanted: &[String],
     now_ms: i64,
 ) -> Result<bool, StoreError> {
@@ -439,6 +472,7 @@ pub fn covers(
     }
     Ok(read_rows(conn)?.iter().any(|row| {
         row.holder == holder
+            && row.holder_kind == kind
             && !stale(now_ms, row.beat_ms)
             && row.roots.as_ref().is_some_and(|have| {
                 wanted
@@ -448,13 +482,14 @@ pub fn covers(
     }))
 }
 
-/// Like [`covers`], but for ONE lease row (by id): the row must belong to `holder`, be fresh and
-/// cover every one of `wanted`. Used by a run that holds a lease guard and must not be satisfied
-/// by some other lease of the same process.
+/// Like [`covers`], but for ONE lease row (by id): the row must belong to `holder`, be of kind
+/// `kind`, be fresh and cover every one of `wanted`. Used by a run that holds a lease guard and
+/// must not be satisfied by some other lease of the same process.
 pub fn covers_lease(
     conn: &Connection,
     id: &str,
     holder: Holder,
+    kind: HolderKind,
     wanted: &[String],
     now_ms: i64,
 ) -> Result<bool, StoreError> {
@@ -463,12 +498,63 @@ pub fn covers_lease(
     }
     Ok(get(conn, id)?.is_some_and(|row| {
         row.holder == holder
+            && row.holder_kind == kind
             && !stale(now_ms, row.beat_ms)
             && row.roots.as_ref().is_some_and(|have| {
                 wanted
                     .iter()
                     .all(|want| have.iter().any(|root| roots::contains(root, want)))
             })
+    }))
+}
+
+/// Record the run a lease belongs to once the run row exists (the host takes the lease in the gate,
+/// before the run is created). Only the holder can; returns whether the row changed.
+pub fn set_run_id(
+    conn: &Connection,
+    id: &str,
+    holder: Holder,
+    run_id: i64,
+) -> Result<bool, StoreError> {
+    if !is_lease_id(id) {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE leases SET run_id = ?2 WHERE id = ?1 AND holder_pid = ?3 AND holder_created = ?4",
+        params![id, run_id, holder.pid, holder.created],
+    )
+    .map(|n| n == 1)
+    .map_err(unavailable)
+}
+
+/// Whether a lease names `run_id` and its holder process still exists and beat within `grace_ms`
+/// (a stalled holder keeps its run for a while). The host uses this for the periodic recovery of
+/// `Running` rows (LC-6): a row is an orphan only when nobody alive claims it.
+pub fn held_by_living(
+    conn: &Connection,
+    run_id: i64,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+    grace_ms: i64,
+) -> Result<bool, StoreError> {
+    Ok(read_rows(conn)?.iter().any(|row| {
+        row.run_id == Some(run_id)
+            && probe.is_alive(row.holder)
+            && now_ms.saturating_sub(row.beat_ms) <= grace_ms
+    }))
+}
+
+/// Whether a LIVE lease (fresh beat, holder process alive) names `run_id`. The host asks this
+/// before it declares a `Running` row an orphan: a host that merely stalled still holds its
+/// lease, so its run must not be taken away from it (FER-524, LC-6).
+pub fn live_for_run(
+    conn: &Connection,
+    run_id: i64,
+    now_ms: i64,
+    probe: &dyn ProcessProbe,
+) -> Result<bool, StoreError> {
+    Ok(read_rows(conn)?.iter().any(|row| {
+        row.run_id == Some(run_id) && !stale(now_ms, row.beat_ms) && probe.is_alive(row.holder)
     }))
 }
 
@@ -892,12 +978,34 @@ mod tests {
         let both = roots(&[r"C:\a", r"D:\B\sub"]);
         store
             .with_read(|c| -> Result<(), StoreError> {
-                assert!(covers(c, ME, &both, 1_000)?);
-                assert!(!covers(c, OTHER, &both, 1_000)?, "someone else's lease");
-                assert!(!covers(c, ME, &roots(&[r"C:\a", r"D:\other"]), 1_000)?);
-                assert!(!covers(c, ME, &roots(&[r"C:\a", r"E:\x"]), 1_000)?);
-                assert!(!covers(c, ME, &both, STALE_MS + 1)?, "stale beat");
-                assert!(!covers(c, ME, &[], 1_000)?);
+                assert!(covers(c, ME, HolderKind::Manual, &both, 1_000)?);
+                assert!(
+                    !covers(c, ME, HolderKind::App, &both, 1_000)?,
+                    "a manual lease is not an automation run lease"
+                );
+                assert!(
+                    !covers(c, OTHER, HolderKind::Manual, &both, 1_000)?,
+                    "someone else's lease"
+                );
+                assert!(!covers(
+                    c,
+                    ME,
+                    HolderKind::Manual,
+                    &roots(&[r"C:\a", r"D:\other"]),
+                    1_000
+                )?);
+                assert!(!covers(
+                    c,
+                    ME,
+                    HolderKind::Manual,
+                    &roots(&[r"C:\a", r"E:\x"]),
+                    1_000
+                )?);
+                assert!(
+                    !covers(c, ME, HolderKind::Manual, &both, STALE_MS + 1)?,
+                    "stale beat"
+                );
+                assert!(!covers(c, ME, HolderKind::Manual, &[], 1_000)?);
                 Ok(())
             })
             .unwrap();
@@ -1002,5 +1110,48 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// FER-524 rework 2: the recovery pass keeps the row of a living holder for the grace period
+    /// and removes dead holders at once; staleness alone is not enough.
+    #[test]
+    fn reclaim_dead_keeps_living_holders_within_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), "0.2.0");
+        let probe = FakeProbe::default();
+        let wanted = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (alive, dead) = (Holder { pid: 1, created: 1 }, Holder { pid: 2, created: 2 });
+        for (holder, root) in [(alive, r"C:live"), (dead, r"C:\dead")] {
+            let roots = wanted(&[root]);
+            store
+                .with_write(|c| {
+                    acquire(
+                        c,
+                        &AcquireRequest {
+                            kind: HolderKind::App,
+                            holder,
+                            run_id: Some(1),
+                            roots: &roots,
+                        },
+                        1_000,
+                        &probe,
+                    )
+                })
+                .unwrap();
+        }
+        probe.kill(dead);
+        // 2 minutes later: both beats are stale (> 30 s), only the dead holder's row goes.
+        let removed = store
+            .with_write(|c| reclaim_dead(c, 121_000, &probe, 5 * 60 * 1000))
+            .unwrap();
+        assert_eq!(removed, 1);
+        let left = store.with_read(all).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].holder, alive);
+        // Silent for longer than the grace: gone too.
+        let removed = store
+            .with_write(|c| reclaim_dead(c, 1_000 + 6 * 60 * 1000, &probe, 5 * 60 * 1000))
+            .unwrap();
+        assert_eq!(removed, 1);
     }
 }

@@ -202,7 +202,10 @@ pub fn evaluate_guard(guard: &DeleteGuard, report: &CompareDirsReport, ops: &[Op
             return GuardVerdict::EmptySource { empty: other };
         }
     }
-    if !guard.enabled {
+    // FER-524 (review P1.1): a stored guard that can never trip (percent 100 or more) is OFF
+    // here too (a zero count still trips on the percent: it is percent-only), so data saved before validation refused such values reads the same
+    // way in the engine, in the approval dialog and in `confirm_needed`.
+    if !guard.effective() {
         return GuardVerdict::Off;
     }
     for side in [Side::Left, Side::Right] {
@@ -352,6 +355,43 @@ mod tests {
         };
         let r = mk(49, 51);
         assert_eq!(evaluate_guard(&off, &r, &delete_ops(&r)), GuardVerdict::Off);
+    }
+
+    // FER-524 (review P1.1 #5): a stored guard that can never trip is OFF in the engine too.
+    #[test]
+    fn a_guard_that_cannot_trip_reads_as_off_like_everywhere_else() {
+        let mut e = Vec::new();
+        for i in 0..10 {
+            e.push(entry(&format!("s{i}"), DirDiffState::Same));
+        }
+        for i in 0..60 {
+            e.push(entry(&format!("x{i}"), DirDiffState::RightOnly));
+        }
+        let r = report(e);
+        {
+            let guard = DeleteGuard {
+                enabled: true,
+                max_count: 50,
+                max_percent: 100,
+            };
+            assert!(!guard.effective());
+            assert_eq!(
+                evaluate_guard(&guard, &r, &delete_ops(&r)),
+                GuardVerdict::Off,
+                "{guard:?}"
+            );
+        }
+        // A count of 0 is percent-only: 60 of 70 entries is far over 20 %, so it trips.
+        let zero = DeleteGuard {
+            enabled: true,
+            max_count: 0,
+            max_percent: 20,
+        };
+        assert!(zero.effective());
+        assert!(matches!(
+            evaluate_guard(&zero, &r, &delete_ops(&r)),
+            GuardVerdict::Tripped { .. }
+        ));
     }
 
     // SP-5.2: an empty source with a populated target holds the run, even with the guard off.

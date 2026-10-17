@@ -121,6 +121,10 @@ pub struct QueueEntry {
     pub merged_count: i64,
     /// Distinct reasons of the merged triggers, oldest first.
     pub merged_reasons: Vec<String>,
+    /// Ids of OTHER automations whose trigger was merged into this entry (distinct, oldest
+    /// first). Only these have something to lose when the entry's owner is removed
+    /// (design 9.5); a trigger of the owner itself never moves anywhere.
+    pub merged_from: Vec<String>,
     pub enqueued_ms: i64,
 }
 
@@ -145,7 +149,7 @@ fn bound(text: &str) -> String {
 }
 
 const COLUMNS: &str = "id, automation_id, profile_id, host_class, trigger_kind, trigger_text, \
-     retry_of, merged_count, merged_reasons, enqueued_ms";
+     retry_of, merged_count, merged_reasons, enqueued_ms, merged_from";
 
 fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<QueueEntry> {
     let host: String = row.get(3)?;
@@ -164,6 +168,7 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<QueueEntry> {
         merged_count: row.get(7)?,
         merged_reasons: serde_json::from_str(&reasons).unwrap_or_default(),
         enqueued_ms: row.get(9)?,
+        merged_from: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
     })
 }
 
@@ -206,7 +211,24 @@ pub fn enqueue(
             id: conn.last_insert_rowid(),
         });
     };
+    // An entry belongs to ONE host class: a trigger of the other class never merges into it (it
+    // would run in the wrong host). The caller reports it as busy.
+    if existing.host_class != entry.host_class {
+        return Ok(Enqueued::Refused);
+    }
+    let mut from = existing.merged_from.clone();
+    if entry.automation_id != existing.automation_id
+        && !from.iter().any(|a| a == entry.automation_id)
+        && from.len() < MERGED_REASONS_KEPT
+    {
+        from.push(entry.automation_id.to_string());
+    }
+    let from_json = serde_json::to_string(&from).map_err(|_| StoreError::Invalid)?;
     let incoming_retry = entry.kind == TriggerKind::Retry;
+    // A Run now that merges into an entry of any other kind makes it the user's own request
+    // (the host runs a user's request even when automatic runs are off).
+    let upgrade_run_now = entry.kind == TriggerKind::RunNow
+        && !matches!(existing.kind, TriggerKind::RunNow | TriggerKind::Retry);
     let upgrade = incoming_retry && existing.kind != TriggerKind::Retry;
     if incoming_retry && existing.automation_id != entry.automation_id {
         return Ok(Enqueued::Refused);
@@ -220,13 +242,26 @@ pub fn enqueue(
     if upgrade {
         conn.execute(
             "UPDATE queue SET merged_count = ?2, merged_reasons = ?3, trigger_kind = 'retry',
-               trigger_text = ?4, retry_of = ?5 WHERE id = ?1",
-            params![existing.id, merged, reasons_json, text, entry.retry_of],
+               trigger_text = ?4, retry_of = ?5, merged_from = ?6 WHERE id = ?1",
+            params![
+                existing.id,
+                merged,
+                reasons_json,
+                text,
+                entry.retry_of,
+                from_json
+            ],
+        )
+    } else if upgrade_run_now {
+        conn.execute(
+            "UPDATE queue SET merged_count = ?2, merged_reasons = ?3, trigger_kind = 'runNow',
+               trigger_text = ?4, merged_from = ?5 WHERE id = ?1",
+            params![existing.id, merged, reasons_json, text, from_json],
         )
     } else {
         conn.execute(
-            "UPDATE queue SET merged_count = ?2, merged_reasons = ?3 WHERE id = ?1",
-            params![existing.id, merged, reasons_json],
+            "UPDATE queue SET merged_count = ?2, merged_reasons = ?3, merged_from = ?4 WHERE id = ?1",
+            params![existing.id, merged, reasons_json, from_json],
         )
     }
     .map_err(unavailable)?;

@@ -342,7 +342,6 @@ fn an_ineffective_guard_needs_the_same_confirmation_as_off() {
     for tweak in [
         |g: &mut model::DeleteGuard| g.max_percent = 100,
         |g: &mut model::DeleteGuard| g.max_percent = 255,
-        |g: &mut model::DeleteGuard| g.max_count = 0,
         |g: &mut model::DeleteGuard| g.enabled = false,
     ] {
         let mut weak = effective.clone();

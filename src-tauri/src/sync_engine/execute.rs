@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,10 @@ const BATCH_MAX_ITEMS: usize = 256;
 const BATCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// How often counts are pushed to the sink (design §5.1: at most 10 per second).
 const COUNTS_EVERY: Duration = Duration::from_millis(100);
+/// How often a run asks the store whether its lease still covers its folders (FER-524, P0.2
+/// review P3-12). `is_lost` only changes when the holder's own heartbeat notices; this also
+/// catches a lease that went stale (a stalled heartbeat, a long pause) or was reclaimed.
+const COVER_RECHECK: Duration = Duration::from_secs(2);
 
 // ── Public surface ──
 
@@ -1054,6 +1059,10 @@ struct Runner<'a> {
     child: CancelToken,
     /// FER-562: final path of each pinned root folder, looked up once per run.
     bases: [Option<PathBuf>; 2],
+    /// P3-12: the last time `covers` was asked, and whether the answer was no (the watcher
+    /// thread sets the flag too).
+    last_cover: Instant,
+    cover_lost: Arc<AtomicBool>,
 }
 
 impl<'a> Runner<'a> {
@@ -1091,6 +1100,8 @@ impl<'a> Runner<'a> {
             copy_failed: false,
             first_failure: None,
             last_counts: Instant::now() - COUNTS_EVERY,
+            last_cover: Instant::now(),
+            cover_lost: Arc::new(AtomicBool::new(false)),
             child: CancelToken::default(),
             bases: [None, None],
         }
@@ -1164,7 +1175,7 @@ impl<'a> Runner<'a> {
             self.req.sink.phase(Phase::Stopping);
             return false;
         }
-        if self.req.lease.is_none_or(|l| l.is_lost()) {
+        if self.lease_gone() {
             self.stop = Some(Stop::Interrupted(InterruptReason::LeaseLost));
             return false;
         }
@@ -1173,6 +1184,32 @@ impl<'a> Runner<'a> {
             return false;
         }
         true
+    }
+
+    /// The lease is lost, or does not cover this run's folders any more. Asked before every
+    /// operation (cheap flags) and, at most every [`COVER_RECHECK`], against the store (P3-12:
+    /// a stalled heartbeat or a long pause must not let operations continue on folders another
+    /// holder may have taken).
+    fn lease_gone(&mut self) -> bool {
+        let Some(lease) = self.req.lease else {
+            return true;
+        };
+        if lease.is_lost() || self.cover_lost.load(Ordering::SeqCst) {
+            return true;
+        }
+        if self.last_cover.elapsed() >= COVER_RECHECK {
+            self.last_cover = Instant::now();
+            if !lease.covers(&self.roots.lease_roots()) {
+                self.cover_lost.store(true, Ordering::SeqCst);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Cheap, flag-only form of [`Runner::lease_gone`] (no store access).
+    fn lease_flagged(&self) -> bool {
+        self.req.lease.is_none_or(|l| l.is_lost()) || self.cover_lost.load(Ordering::SeqCst)
     }
 
     fn roots_alive(&self) -> bool {
@@ -1207,7 +1244,7 @@ impl<'a> Runner<'a> {
             OpResult::Cancelled => {
                 self.set(idx, OpStatus::NotStarted, None);
                 // A copy stopped because the lease was lost is an interruption, not a user stop.
-                let lost = self.req.lease.is_none_or(|l| l.is_lost());
+                let lost = self.lease_gone();
                 self.stop.get_or_insert(if lost {
                     Stop::Interrupted(InterruptReason::LeaseLost)
                 } else {
@@ -1278,11 +1315,24 @@ impl<'a> Runner<'a> {
     fn execute(&mut self) {
         let done = AtomicBool::new(false);
         let (user, lease, child) = (self.req.cancel.clone(), self.req.lease, self.child.clone());
+        let (cover_lost, lease_roots) = (self.cover_lost.clone(), self.roots.lease_roots());
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                let mut last_cover = Instant::now();
                 while !done.load(Ordering::SeqCst) {
                     if user.is_cancelled() || lease.is_none_or(|l| l.is_lost()) {
                         child.cancel();
+                    }
+                    // P3-12: a copy that is already in flight is cancelled too when the lease
+                    // stopped covering the folders (a stale heartbeat, a reclaimed row).
+                    if last_cover.elapsed() >= COVER_RECHECK {
+                        last_cover = Instant::now();
+                        if let Some(l) = lease
+                            && !l.covers(&lease_roots)
+                        {
+                            cover_lost.store(true, Ordering::SeqCst);
+                            child.cancel();
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
@@ -1594,7 +1644,7 @@ impl<'a> Runner<'a> {
 
     /// A cancelled cross-volume copy comes back as a failure; the token says what it was.
     fn after_move_error(&self, c: Classified) -> OpResult {
-        let stopped = self.req.cancel.is_cancelled() || self.req.lease.is_none_or(|l| l.is_lost());
+        let stopped = self.req.cancel.is_cancelled() || self.lease_flagged();
         if stopped && c.reason == Reason::VerifyFailed {
             return OpResult::Cancelled;
         }
@@ -1825,10 +1875,7 @@ impl<'a> Runner<'a> {
                 OpResult::Failed(*c)
             } else if let Some(c) = whole {
                 OpResult::Failed(c)
-            } else if report.cancelled
-                || self.req.cancel.is_cancelled()
-                || self.req.lease.is_none_or(|l| l.is_lost())
-            {
+            } else if report.cancelled || self.req.cancel.is_cancelled() || self.lease_flagged() {
                 OpResult::Cancelled
             } else {
                 // Skipped by the copy engine: the destination appeared after the plan.

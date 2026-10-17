@@ -1,0 +1,13 @@
+{
+  "runId": 1042,
+  "automationId": "7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "phase": "sync",
+  "opsTotal": 6,
+  "counts": {
+    "ok": 3,
+    "failed": 0,
+    "notStarted": 3,
+    "held": 0,
+    "skippedChanged": 0
+  }
+}

@@ -22,6 +22,7 @@ pub mod runtime;
 #[cfg(test)]
 mod p12_tests;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -100,6 +101,21 @@ impl Store {
         }
     }
 
+    /// Mark the calling thread as inside a closure of this store; `None` when it already is
+    /// (a nested call that would deadlock on the connection mutex).
+    fn enter(&self) -> Option<ClosureGuard> {
+        let id = self as *const Store as usize;
+        IN_CLOSURE.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.contains(&id) {
+                log::error!("automation store re-entered from inside one of its own closures");
+                return None;
+            }
+            stack.push(id);
+            Some(ClosureGuard(id))
+        })
+    }
+
     /// Whether writes are possible right now. Commands ask this BEFORE showing a native dialog,
     /// so the user is never prompted for a change that would be refused anyway (LC-3).
     pub fn check_writable(&self) -> Result<(), StoreError> {
@@ -113,10 +129,21 @@ impl Store {
 
     /// Read access (also available on a read-only, newer-schema store, LC-3). The closure may
     /// use its own error type; store failures convert into it.
+    ///
+    /// **Rule (FER-524, review P1.1): never run the sync engine, a baseline load or save
+    /// (`KeyedAuth`, which opens the store itself) or anything else that may open this store
+    /// again from inside the closure.** The store is one connection behind a `Mutex` that is not
+    /// re-entrant, so a nested call would wait for itself for ever. A nested call on the same
+    /// thread is therefore refused with [`StoreError::Unavailable`] instead of deadlocking (fail
+    /// closed: a baseline that cannot be read is a first run, a save is refused), and
+    /// [`inside_closure`] lets code that must not run there (the engine call of the host) check.
     pub fn with_read<T, E>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E>
     where
         StoreError: Into<E>,
     {
+        let Some(_entered) = self.enter() else {
+            return Err(StoreError::Unavailable.into());
+        };
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match (&guard.conn, guard.mode) {
             (Some(conn), _) => f(conn),
@@ -125,11 +152,15 @@ impl Store {
         }
     }
 
-    /// Write access. Refused with [`StoreError::ReadOnly`] on a newer-schema store (LC-3).
+    /// Write access. Refused with [`StoreError::ReadOnly`] on a newer-schema store (LC-3). The
+    /// re-entrancy rule of [`Store::with_read`] applies.
     pub fn with_write<T, E>(&self, f: impl FnOnce(&mut Connection) -> Result<T, E>) -> Result<T, E>
     where
         StoreError: Into<E>,
     {
+        let Some(_entered) = self.enter() else {
+            return Err(StoreError::Unavailable.into());
+        };
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let OpenMode::Failed(e) = guard.mode {
             return Err(e.into());
@@ -142,6 +173,32 @@ impl Store {
             None => Err(StoreError::Unavailable.into()),
         }
     }
+}
+
+thread_local! {
+    /// Stores whose `with_read` / `with_write` closure the current thread is inside.
+    static IN_CLOSURE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Pops the thread's closure marker when the closure ends (also on a panic).
+struct ClosureGuard(usize);
+
+impl Drop for ClosureGuard {
+    fn drop(&mut self) {
+        IN_CLOSURE.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(at) = stack.iter().rposition(|id| *id == self.0) {
+                stack.remove(at);
+            }
+        });
+    }
+}
+
+/// True while the calling thread is inside a `with_read` / `with_write` closure of ANY store.
+/// The host checks this before it calls the engine (which loads and saves baselines through
+/// `KeyedAuth`, i.e. through the store): see the rule on [`Store::with_read`].
+pub fn inside_closure() -> bool {
+    IN_CLOSURE.with(|stack| !stack.borrow().is_empty())
 }
 
 fn open_connection(dir: &Path, app_version: &str) -> Result<(Connection, OpenMode), StoreError> {
@@ -177,6 +234,32 @@ fn open_connection(dir: &Path, app_version: &str) -> Result<(Connection, OpenMod
         if from < SCHEMA_VERSION {
             // `from` is only a hint: the migration re-reads the version under its lock.
             migrate::run(&conn, dir, from, app_version)?;
+        }
+        // FER-524 (review P1.1 #6): a development store created by an early v2 build has no
+        // `baseline_gen`; without it every baseline save would fail. Idempotent for the rest.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_gen(pair_key TEXT PRIMARY KEY, gen INTEGER NOT NULL)",
+            [],
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        // FER-524: which other automations merged a trigger into a queue entry (design 9.5).
+        // An additive column, added on open when missing, so the schema version stays 2 and an
+        // older binary reading the same file is unaffected.
+        let has_column = |conn: &Connection| {
+            conn.prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = 'merged_from'")
+                .and_then(|mut s| s.exists([]))
+                .unwrap_or(false)
+        };
+        if !has_column(&conn) {
+            let added = conn.execute(
+                "ALTER TABLE queue ADD COLUMN merged_from TEXT NOT NULL DEFAULT '[]'",
+                [],
+            );
+            // Two openers may race: the loser's ALTER fails with "duplicate column"; what counts
+            // is that the column is there afterwards.
+            if added.is_err() && !has_column(&conn) {
+                return Err(StoreError::Unavailable);
+            }
         }
         OpenMode::Write
     };
@@ -814,5 +897,62 @@ mod tests {
             0,
             "the insert was refused by the connection"
         );
+    }
+
+    /// FER-524 (review P1.1 #2): the store mutex is not re-entrant, so a nested call from inside
+    /// a closure is refused (fail closed) instead of waiting for itself for ever; the flag that
+    /// tells the host "do not run the engine here" follows the closure and is cleared after it.
+    #[test]
+    fn a_nested_store_call_is_refused_instead_of_deadlocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), "0.2.0");
+        assert!(!inside_closure());
+        let outer = store.with_read(|_| -> Result<bool, StoreError> {
+            assert!(inside_closure());
+            let nested_read = store.with_read(|_| -> Result<(), StoreError> { Ok(()) });
+            let nested_write = store.with_write(|_| -> Result<(), StoreError> { Ok(()) });
+            assert_eq!(nested_read, Err(StoreError::Unavailable));
+            assert_eq!(nested_write, Err(StoreError::Unavailable));
+            Ok(true)
+        });
+        assert_eq!(outer, Ok(true));
+        assert!(!inside_closure(), "cleared when the closure ended");
+        // The store still works afterwards.
+        assert!(
+            store
+                .with_write(|_| -> Result<(), StoreError> { Ok(()) })
+                .is_ok()
+        );
+        // A panic inside a closure also clears the marker.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.with_read(|_| -> Result<(), StoreError> { panic!("boom") });
+        }));
+        assert!(caught.is_err());
+        assert!(!inside_closure());
+        assert!(
+            store
+                .with_read(|_| -> Result<(), StoreError> { Ok(()) })
+                .is_ok()
+        );
+    }
+
+    /// FER-524 (review P1.1 #6): a development store from an early v2 build lacks `baseline_gen`;
+    /// opening it creates the table.
+    #[test]
+    fn opening_a_v2_store_without_baseline_gen_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        Store::open(dir.path(), "0.2.0");
+        {
+            let conn = Connection::open(dir.path().join("automation.db")).unwrap();
+            conn.execute("DROP TABLE baseline_gen", []).unwrap();
+        }
+        let store = Store::open(dir.path(), "0.2.0");
+        let n = store
+            .with_write(|conn| -> Result<Option<u64>, StoreError> {
+                baseline_gen::advance(conn, "pair")?;
+                baseline_gen::current(conn, "pair")
+            })
+            .unwrap();
+        assert_eq!(n, Some(1));
     }
 }

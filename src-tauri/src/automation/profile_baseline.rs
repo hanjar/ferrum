@@ -39,14 +39,45 @@ const SUBKEY_PURPOSE: &str = "ferrum.automation.baseline.key.v1";
 
 /// MACs baseline files with a subkey of the approval key and keeps the save counters in the
 /// automation store.
+///
+/// **Deadlock rule (FER-524, review P1.1 #2).** `generation` and `advance_generation` open the
+/// automation store themselves, and the store is one connection behind a `Mutex` that is not
+/// re-entrant. So a baseline load or save - and therefore the sync engine, which does both -
+/// must NEVER run inside a `Store::with_read` / `with_write` closure of the same store. The
+/// store refuses a nested call on the same thread (`StoreError::Unavailable`), which this type
+/// turns into "unknown counter / refused save" (fail closed: a first run, no deletion
+/// propagated), and the host checks `store::inside_closure()` before it calls the engine.
 pub struct KeyedAuth {
     keys: Arc<dyn ApprovalKeys>,
     store: Arc<Store>,
+    /// A key was made while signing and the "created again" events are not written yet (the store
+    /// refused or was busy). Retried at the next sign / verify, never dropped (FER-524 B-d).
+    notice_pending: std::sync::atomic::AtomicBool,
 }
 
 impl KeyedAuth {
     pub fn new(keys: Arc<dyn ApprovalKeys>, store: Arc<Store>) -> Self {
-        Self { keys, store }
+        Self {
+            keys,
+            store,
+            notice_pending: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Write the pending "key created again" events, if any. Keeps the notice when the store
+    /// refuses (for example a nested call), so the next call tries again.
+    fn flush_rotation_notice(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.notice_pending.load(Ordering::SeqCst) {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if crate::automation::approval::note_key_rotation(&self.store, &|| now).is_ok() {
+            self.notice_pending.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -60,12 +91,10 @@ impl BaselineAuth for KeyedAuth {
             KeyLoad::Missing => {
                 let key = self.keys.create_if_missing().ok()?;
                 if self.keys.take_rotation_notice() {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0);
-                    let _ = crate::automation::approval::note_key_rotation(&self.store, &|| now);
+                    self.notice_pending
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
+                self.flush_rotation_notice();
                 key
             }
             KeyLoad::Unusable | KeyLoad::Unreadable => return None,
@@ -75,6 +104,7 @@ impl BaselineAuth for KeyedAuth {
     }
 
     fn verify(&self, payload: &[u8], mac: &str) -> bool {
+        self.flush_rotation_notice();
         let KeyLoad::Key(key) = self.keys.load() else {
             return false;
         };

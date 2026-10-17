@@ -23,7 +23,7 @@ use crate::sync_engine::roots::{FsProbe, RootProbe};
 /// Everything a test needs, around one temp directory.
 pub(crate) struct Fixture {
     pub tmp: tempfile::TempDir,
-    pub store: Store,
+    pub store: Arc<Store>,
     /// The keys the flows use (in-memory by default, DPAPI with [`Fixture::with_dpapi`]).
     pub keys: Arc<dyn ApprovalKeys>,
     /// The same keys as a `MemoryKeys` when they are in-memory ones (to flip their state).
@@ -54,7 +54,7 @@ impl Fixture {
     ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("store");
-        let store = Store::open(&store_dir, "0.2.0");
+        let store = Arc::new(Store::open(&store_dir, "0.2.0"));
         let keys: Arc<dyn ApprovalKeys> = if dpapi.is_some() {
             Arc::new(crate::automation::dpapi::DpapiKeyFile::new(&store_dir))
         } else {

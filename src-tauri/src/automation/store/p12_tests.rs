@@ -129,10 +129,10 @@ fn a_second_trigger_for_the_same_profile_merges_count_and_reasons() {
     assert_eq!(all.len(), 1, "no duplicate job");
     assert_eq!(all[0].merged_count, 3);
     assert_eq!(all[0].merged_reasons, vec!["Changes detected", "Run now"]);
-    // The earlier entry keeps its place and its own trigger.
+    // The earlier entry keeps its place; a Run now merging into it makes it the user request (FER-524).
     assert_eq!(all[0].enqueued_ms, T0);
-    assert_eq!(all[0].kind, TriggerKind::Schedule);
-    assert_eq!(all[0].text, "Scheduled \u{b7} 02:00 WIB");
+    assert_eq!(all[0].kind, TriggerKind::RunNow);
+    assert_eq!(all[0].text, "Run now");
 }
 
 #[test]
@@ -347,6 +347,7 @@ fn pause_and_delete_drop_the_queue_and_the_pending_rerun() {
     write(&fx, |c| runtime::set_pending_rerun(c, &b, true, T0));
     crate::automation::approval::pause_in(
         &fx.store,
+        fx.keys.as_ref(),
         &b,
         crate::automation::dto::PauseMode::Finish,
         fx.clock(),
@@ -363,7 +364,7 @@ fn pause_and_delete_drop_the_queue_and_the_pending_rerun() {
     let rt = read(&fx, |c| runtime::get(c, &b)).unwrap();
     assert!(!rt.pending_rerun, "RQ-8.2: pending rerun removed");
     // Deleting an automation removes its entries by cascade.
-    crate::automation::approval::delete_in(&fx.store, &a).unwrap();
+    crate::automation::approval::delete_in(&fx.store, fx.keys.as_ref(), &a, fx.clock()).unwrap();
     assert!(read(&fx, queue::all).is_empty());
 }
 

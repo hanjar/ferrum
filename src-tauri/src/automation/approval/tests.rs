@@ -557,7 +557,14 @@ fn se_1_requests_refuse_unknown_fields() {
 fn paused(fx: &Fixture) -> (String, String, i64) {
     let (profile, revision, _) = draft_of(fx, "Nightly");
     let id = fx.new_automation("Nightly", &profile, Fixture::daily());
-    pause_in(&fx.store, &id, PauseMode::Finish, fx.clock()).unwrap();
+    pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &id,
+        PauseMode::Finish,
+        fx.clock(),
+    )
+    .unwrap();
     (id, profile, revision)
 }
 
@@ -680,7 +687,7 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
     );
     assert_eq!(count(&fx, "queue"), 1);
     for mode in [PauseMode::Finish, PauseMode::Stop] {
-        let out = pause_in(&fx.store, &id, mode, fx.clock()).unwrap();
+        let out = pause_in(&fx.store, fx.keys.as_ref(), &id, mode, fx.clock()).unwrap();
         assert_eq!(out, PauseResultDto::Paused);
     }
     assert!(!record(&fx, &id).enabled);
@@ -696,6 +703,7 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
     assert_eq!(
         pause_in(
             &fx.store,
+            fx.keys.as_ref(),
             "99999999-9999-4999-8999-999999999999",
             PauseMode::Stop,
             fx.clock()
@@ -705,9 +713,15 @@ fn pause_needs_no_dialog_clears_the_queue_and_is_idempotent() {
         "not_found"
     );
     assert_eq!(
-        pause_in(&fx.store, "nope", PauseMode::Stop, fx.clock())
-            .unwrap_err()
-            .code,
+        pause_in(
+            &fx.store,
+            fx.keys.as_ref(),
+            "nope",
+            PauseMode::Stop,
+            fx.clock()
+        )
+        .unwrap_err()
+        .code,
         "invalid_input"
     );
 }
@@ -731,7 +745,14 @@ fn disabling_with_a_running_run_needs_a_choice() {
     assert_eq!(out, SetEnabledResultDto::NeedsChoice);
     assert!(record(&fx, &id).enabled);
     // After the choice, pause goes through even with the run in progress.
-    pause_in(&fx.store, &id, PauseMode::Stop, fx.clock()).unwrap();
+    pause_in(
+        &fx.store,
+        fx.keys.as_ref(),
+        &id,
+        PauseMode::Stop,
+        fx.clock(),
+    )
+    .unwrap();
     assert!(!record(&fx, &id).enabled);
     // And a plain disable without a run is a pause.
     let (profile2, _, _) = draft_of(&fx, "Other");
@@ -760,7 +781,7 @@ fn delete_removes_everything_and_releases_the_profile() {
     let err = commands::delete_in(&fx.store, &profile, revision).unwrap_err();
     assert_eq!(err.code, "in_use");
     assert_eq!(
-        delete_in(&fx.store, &id).unwrap(),
+        delete_in(&fx.store, fx.keys.as_ref(), &id, fx.clock()).unwrap(),
         DeleteAutomationDto::Deleted
     );
     for table in [
@@ -772,7 +793,12 @@ fn delete_removes_everything_and_releases_the_profile() {
     ] {
         assert_eq!(count(&fx, table), 0, "{table}");
     }
-    assert_eq!(delete_in(&fx.store, &id).unwrap_err().code, "not_found");
+    assert_eq!(
+        delete_in(&fx.store, fx.keys.as_ref(), &id, fx.clock())
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
     commands::delete_in(&fx.store, &profile, revision).unwrap();
 }
 
@@ -1117,4 +1143,113 @@ fn reapprove_prompt_uses_the_stored_name_and_says_enable() {
     );
     assert!(text.contains("It will be renamed to \"Brand new name\"."));
     assert!(text.contains("Delete guard: stops above 50 items and 20%."));
+}
+
+// ── FER-524 (review P1.1 #3): an unusable key is replaced only after the user said Yes ──
+
+/// A key that DPAPI refuses (another user, machine or entropy) stays exactly as it is while the
+/// dialog is open and when the user cancels; only a Yes replaces it.
+#[test]
+fn an_unusable_key_is_left_alone_until_the_user_says_yes() {
+    let fx = Fixture::new();
+    let (profile, _, _) = draft_of(&fx, "A");
+    let old = fx.new_automation("Old one", &profile, Fixture::daily());
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Unusable);
+    let draft = Fixture::auto_draft("New one", &profile, Fixture::watch());
+    let test = fx.test(None, &draft);
+
+    // Cancel: while the dialog is open the blob is untouched, and it still is afterwards.
+    let during = RefCell::new(None);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(out, ApproveResultDto::Canceled);
+    assert_eq!(during.borrow().clone(), Some(KeyLoad::Unusable));
+    assert_eq!(memory.load(), KeyLoad::Unusable, "Cancel replaces nothing");
+    assert!(
+        !events(&fx, &old)
+            .iter()
+            .any(|e| e.starts_with("The approval key was created again")),
+        "no rotation notice for a key that was not replaced"
+    );
+
+    // Yes: the dialog still saw the old blob; the replacement happens after the answer.
+    let test = fx.test(None, &draft);
+    let during = RefCell::new(None);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            true
+        },
+    )
+    .unwrap();
+    assert!(matches!(out, ApproveResultDto::Approved { .. }));
+    assert_eq!(during.borrow().clone(), Some(KeyLoad::Unusable));
+    assert!(
+        matches!(memory.load(), KeyLoad::Key(_)),
+        "replaced after Yes"
+    );
+    assert!(
+        events(&fx, &old)
+            .iter()
+            .any(|e| e.starts_with("The approval key was created again")),
+        "the replacement is announced on every automation"
+    );
+}
+
+/// A MISSING key may be created before the dialog (nothing is lost by it).
+#[test]
+fn a_missing_key_may_be_created_before_the_dialog() {
+    let fx = Fixture::new();
+    let (_, _, draft) = draft_of(&fx, "Nightly");
+    let test = fx.test(None, &draft);
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Missing);
+    let during = RefCell::new(None);
+    approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            *during.borrow_mut() = Some(memory.load());
+            false
+        },
+    )
+    .unwrap();
+    assert!(matches!(during.borrow().clone(), Some(KeyLoad::Key(_))));
+}
+
+/// FER-524 rework B-c: a stale answer must not cost the user their other approvals. The key is
+/// replaced only after a cheap check that the approval would still go through.
+#[test]
+fn a_stale_yes_does_not_replace_an_unusable_key() {
+    let fx = Fixture::new();
+    let (profile, revision, draft) = draft_of(&fx, "A");
+    let memory = fx.memory.as_ref().unwrap().clone();
+    memory.set(KeyLoad::Unusable);
+    let test = fx.test(None, &draft);
+    let out = approve_in(
+        &fx.store,
+        approve_req(None, None, &draft, &test.test_id),
+        &fx.deps(),
+        |_| {
+            // The profile is saved while the dialog is open ...
+            fx.bump_profile(&profile, revision, "*.tmp");
+            true // ... and the user says yes to what they saw.
+        },
+    )
+    .unwrap();
+    assert_eq!(out, ApproveResultDto::Stale);
+    assert_eq!(memory.load(), KeyLoad::Unusable, "the key was not touched");
 }

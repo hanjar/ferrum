@@ -1,0 +1,4 @@
+{
+  "status": "waiting",
+  "waitsFor": "Nightly photos to NAS"
+}

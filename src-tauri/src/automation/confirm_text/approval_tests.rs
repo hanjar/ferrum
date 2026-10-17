@@ -319,11 +319,11 @@ fn the_guard_line_is_always_present() {
     assert!(t.contains("Delete guard: off.") && t.contains(GUARD_OFF_WARNING));
 }
 
-/// A guard that can never trip (100 %, zero count) is OFF: warning and "off" line, exactly like a
+/// A guard that can never trip (100 % or more) is OFF: warning and "off" line, exactly like a
 /// disabled guard (SE-1).
 #[test]
 fn an_ineffective_guard_reads_as_off() {
-    for (count, percent) in [(50u32, 100u8), (50, 200), (0, 20)] {
+    for (count, percent) in [(50u32, 100u8), (50, 200)] {
         let mut p = profile(DeletePolicy::RecycleBin, true, one_way());
         p.guard.max_count = count;
         p.guard.max_percent = percent;
@@ -332,6 +332,20 @@ fn an_ineffective_guard_reads_as_off() {
         assert!(t.contains("Delete guard: off."));
         assert!(!t.contains("stops above"));
     }
+}
+
+/// A count of 0 still trips on the percent, so it is NOT off: the dialog states the thresholds.
+#[test]
+fn a_zero_count_guard_is_percent_only_and_not_off() {
+    let mut p = profile(DeletePolicy::RecycleBin, true, one_way());
+    p.guard.max_count = 0;
+    p.guard.max_percent = 20;
+    let t = text_of(ApprovalAction::Enable, &p);
+    assert!(!t.starts_with(GUARD_OFF_WARNING), "{t}");
+    assert!(
+        t.contains("Delete guard: stops above 0 items and 20%."),
+        "{t}"
+    );
 }
 
 /// The folders follow the direction of the mode; two-way labels both sides.

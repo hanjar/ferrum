@@ -215,3 +215,27 @@ pub fn bump_change_seq(conn: &Connection) -> Result<(), StoreError> {
     .map(|_| ())
     .map_err(unavailable)
 }
+
+/// The change counter other processes poll (design §3.5, MH-10). `0` before the first change.
+pub fn change_seq(conn: &Connection) -> Result<i64, StoreError> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'change_seq'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(unavailable)
+    .map(|v| v.and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+/// Remove every queued entry of an automation and hand them back, so a caller that drops a
+/// trigger can give the triggers of OTHER automations that were merged into the entry a new
+/// home (design §9.5, `host::requeue`).
+pub fn take_queue(
+    conn: &Connection,
+    automation_id: &str,
+) -> Result<Vec<super::queue::QueueEntry>, StoreError> {
+    let taken = super::queue::for_automation(conn, automation_id)?;
+    clear_queue(conn, automation_id)?;
+    Ok(taken)
+}

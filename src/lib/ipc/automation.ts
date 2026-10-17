@@ -9,6 +9,7 @@
  * outcome comes back as the `status` of the result (`canceled`, `stale`, ...).
  */
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isInTauri } from './tauri';
 import type { FieldError } from './syncProfiles';
 
@@ -178,6 +179,18 @@ export interface AutomationBackend {
   runOps(runId: number, offset: number, limit: number): Promise<RunOpsPage>;
   /** The event log of one automation, newest first; page with `next` (read-only). */
   events(id: string, before: number | undefined, limit: number): Promise<EventsPage>;
+  /**
+   * Run now (RQ-4). A REQUEST: the backend queues it (or asks the runner) and the host decides at
+   * the gate; the answer is the toast. Refusals come as errors: `held`, `needs_review`, `paused`,
+   * `runner_down`, `rate_limited`.
+   */
+  runNow(id: string): Promise<QueueResult>;
+  /** Stop the run in progress (RQ-8.1); the host stops it after the current file. */
+  stopRun(runId: number): Promise<RequestedResult>;
+  /** Fresh read-only comparison of the run an attention hold names (RQ-10.1). */
+  recheck(runId: number): Promise<RequestedResult>;
+  /** Retry what a recheck found remaining (RQ-10.2); a fresh plan, nothing is repeated. */
+  retry(runId: number): Promise<QueueResult>;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -241,6 +254,18 @@ const tauriBackend: AutomationBackend = {
   async events(id, before, limit) {
     return call<EventsPage>('automation_events', { id, before: before ?? null, limit });
   },
+  async runNow(id) {
+    return call<QueueResult>('automation_run_now', { id });
+  },
+  async stopRun(runId) {
+    return call<RequestedResult>('automation_stop_run', { runId });
+  },
+  async recheck(runId) {
+    return call<RequestedResult>('automation_recheck', { runId });
+  },
+  async retry(runId) {
+    return call<QueueResult>('automation_retry', { runId });
+  },
 };
 
 /** Browser-dev / test fallback: nothing can be approved or enabled outside the desktop app. */
@@ -278,6 +303,18 @@ const inertBackend: AutomationBackend = {
   async events() {
     throw new AutomationError('unsupported');
   },
+  async runNow() {
+    throw new AutomationError('unsupported');
+  },
+  async stopRun() {
+    throw new AutomationError('unsupported');
+  },
+  async recheck() {
+    throw new AutomationError('unsupported');
+  },
+  async retry() {
+    throw new AutomationError('unsupported');
+  },
 };
 
 function pick(): AutomationBackend {
@@ -298,6 +335,10 @@ export function defaultBackend(): AutomationBackend {
     history: (q) => pick().history(q),
     runOps: (r, o, l) => pick().runOps(r, o, l),
     events: (id, b, l) => pick().events(id, b, l),
+    runNow: (id) => pick().runNow(id),
+    stopRun: (r) => pick().stopRun(r),
+    recheck: (r) => pick().recheck(r),
+    retry: (r) => pick().retry(r),
   };
 }
 
@@ -526,4 +567,76 @@ export interface AutomationDetail {
 /** MH-9: automations that need a review or hold new runs - the sidebar badge. */
 export function attentionBadge(rows: readonly AutomationRow[]): number {
   return rows.filter((r) => r.showReview || r.attention !== undefined).length;
+}
+
+// ── Controls and events of the host (P1.3, design §7.2) ──
+
+/**
+ * What Run now / Retry turned into (the toasts of RQ-4): a new entry (`queued`), a wait for another
+ * run on the same folders (`waiting`, with its name), a merge into the entry that already waits
+ * (`merged`), a wait for an offline folder (`device`), or a request to the background runner
+ * (`requested`).
+ */
+export type QueueStatus = 'queued' | 'waiting' | 'merged' | 'device' | 'requested';
+
+export interface QueueResult {
+  status: QueueStatus;
+  /** The automation whose run uses the same folders, for `waiting`. */
+  waitsFor?: string;
+}
+
+/** The request was recorded; the host that owns the run acts on it and the views update. */
+export interface RequestedResult {
+  status: 'requested';
+}
+
+/** Payload of `automation://changed`: the store changed (any process); re-read what is shown. */
+export interface AutomationChanged {
+  seq: number;
+}
+
+/** Payload of `automation://progress`: ids, the phase and counts only (≤ 5 per second per run). */
+export interface AutomationProgress {
+  runId: number;
+  automationId: string;
+  phase: RunPhase;
+  opsTotal: number;
+  counts: RunCounts;
+}
+
+export const AUTOMATION_CHANGED_EVENT = 'automation://changed';
+export const AUTOMATION_PROGRESS_EVENT = 'automation://progress';
+
+/** Listen for store changes; outside the desktop app nothing ever fires. */
+export async function listenAutomationChanged(
+  handler: (change: AutomationChanged) => void,
+): Promise<UnlistenFn> {
+  if (!isInTauri()) return () => {};
+  return listen<AutomationChanged>(AUTOMATION_CHANGED_EVENT, (ev) => handler(ev.payload));
+}
+
+/** Listen for run progress; outside the desktop app nothing ever fires. */
+export async function listenAutomationProgress(
+  handler: (progress: AutomationProgress) => void,
+): Promise<UnlistenFn> {
+  if (!isInTauri()) return () => {};
+  return listen<AutomationProgress>(AUTOMATION_PROGRESS_EVENT, (ev) => handler(ev.payload));
+}
+
+/** The toast text of a Run now / Retry answer (prototype strings, RQ-4). */
+export function queueToast(result: QueueResult): string {
+  switch (result.status) {
+    case 'queued':
+      return 'Queued \u2014 starts shortly';
+    case 'waiting':
+      return result.waitsFor
+        ? `Waiting for \u201c${result.waitsFor}\u201d \u2014 same folders`
+        : 'Waiting for another run on the same folders';
+    case 'merged':
+      return 'Merged into the pending run for these folders \u2014 no duplicate job';
+    case 'device':
+      return 'Waiting for the device \u2014 a folder is not available';
+    case 'requested':
+      return 'Asked the background runner to start it';
+  }
 }

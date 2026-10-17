@@ -17,6 +17,7 @@ use crate::automation::approval;
 use crate::automation::confirm_text::{self, Prompt};
 use crate::automation::dpapi::{ApprovalKeys, DpapiKeyFile, NoKeys};
 use crate::automation::dto;
+use crate::automation::host::request::{self, QueueAnswer, RequestError};
 use crate::automation::lease::{LeaseEnv, LeaseRegistry, ManualAcquire};
 use crate::automation::manual_run;
 use crate::automation::model::{
@@ -48,6 +49,8 @@ pub struct AutomationState {
     /// Baselines of profile and automation runs: a separate, MAC'd store the manual
     /// `sync_baseline_*` commands cannot reach (FER-522).
     pub baselines: ProfileBaselineStore,
+    /// The in-app host (P1.3): started once by `start_host` after the state is managed.
+    pub host: std::sync::OnceLock<crate::automation::host::prod::AppHost>,
 }
 
 impl AutomationState {
@@ -93,6 +96,15 @@ impl AutomationState {
             keys,
             tests: Arc::new(TestLedger::new()),
             baselines,
+            host: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Tell the host loop that a command wrote to the store, so it looks again at once instead of
+    /// at its next tick. A no-op while no host runs (tests, a second instance).
+    pub fn wake_host(&self) {
+        if let Some(host) = self.host.get() {
+            host.wake();
         }
     }
 }
@@ -1226,7 +1238,7 @@ pub async fn automation_approve<R: tauri::Runtime>(
     let keys = state.keys.clone();
     let ledger = state.tests.clone();
     let owner = owner_hwnd(&window);
-    tauri::async_runtime::spawn_blocking(move || {
+    let out = tauri::async_runtime::spawn_blocking(move || {
         let deps = approval::Deps {
             keys: keys.as_ref(),
             ledger: &ledger,
@@ -1245,7 +1257,9 @@ pub async fn automation_approve<R: tauri::Runtime>(
         )
     })
     .await
-    .map_err(|_| internal())?
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
 }
 
 /// Enable (resume: native confirmation, approval re-verified) or disable (safe direction, no
@@ -1261,7 +1275,7 @@ pub async fn automation_set_enabled<R: tauri::Runtime>(
     let keys = state.keys.clone();
     let ledger = state.tests.clone();
     let owner = owner_hwnd(&window);
-    tauri::async_runtime::spawn_blocking(move || {
+    let out = tauri::async_runtime::spawn_blocking(move || {
         let deps = approval::Deps {
             keys: keys.as_ref(),
             ledger: &ledger,
@@ -1272,7 +1286,9 @@ pub async fn automation_set_enabled<R: tauri::Runtime>(
         })
     })
     .await
-    .map_err(|_| internal())?
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
 }
 
 /// Pause an automation (the configuration part; stopping a running run joins in with the host).
@@ -1284,9 +1300,19 @@ pub async fn automation_pause(
     mode: dto::PauseMode,
 ) -> Result<dto::PauseResultDto, CommandError> {
     let store = state.store.clone();
-    tauri::async_runtime::spawn_blocking(move || approval::pause_in(&store, &id, mode, &now_ms))
-        .await
-        .map_err(|_| internal())?
+    let keys = state.keys.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let paused = approval::pause_in(&store, keys.as_ref(), &id, mode, &now_ms)?;
+        // The run part (RQ-8.2): "Pause & stop" asks the host to stop the run that is going;
+        // "Pause & let it finish" only tells it to leave that run alone.
+        request::pause_run_part(&store, &id, mode == dto::PauseMode::Stop, now_ms())
+            .map_err(request_error)?;
+        Ok::<_, CommandError>(paused)
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
 }
 
 /// Delete an automation. The webview confirms in its own dialog (safe direction).
@@ -1296,9 +1322,227 @@ pub async fn automation_delete(
     id: String,
 ) -> Result<dto::DeleteAutomationDto, CommandError> {
     let store = state.store.clone();
-    tauri::async_runtime::spawn_blocking(move || approval::delete_in(&store, &id))
-        .await
-        .map_err(|_| internal())?
+    let keys = state.keys.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        approval::delete_in(&store, keys.as_ref(), &id, &now_ms)
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
+}
+
+/// A refused request as the closed-set error the webview sees (design §7, SE-7): no path, no
+/// hash, no key.
+fn request_error(e: RequestError) -> CommandError {
+    match e {
+        RequestError::NotFound => {
+            CommandError::new("not_found", "The automation or run does not exist")
+        }
+        RequestError::Invalid => CommandError::new("invalid_input", "The id is not valid"),
+        RequestError::NeedsReview => CommandError::new(
+            "needs_review",
+            "The automation needs a review before it can run",
+        ),
+        RequestError::Held(text) => CommandError::new(
+            "held",
+            format!("{text} \u{b7} new runs are held until this is resolved"),
+        ),
+        RequestError::Paused => {
+            CommandError::new("paused", "The automation is paused - resume it first")
+        }
+        RequestError::RunnerDown => {
+            CommandError::new("runner_down", "The background runner is not running")
+        }
+        RequestError::NotReady(code) => CommandError::new(
+            "not_ready",
+            match code {
+                "recheck_first" => "Recheck first - there is nothing to retry yet",
+                "not_running" => "That run is not running",
+                _ => "That run is not the one that needs attention",
+            },
+        ),
+        RequestError::Busy => CommandError::new(
+            "busy",
+            "Another automation is waiting for these folders - try again in a moment",
+        ),
+        RequestError::TooMany => {
+            CommandError::new("rate_limited", "Too many requests - wait a moment")
+        }
+        RequestError::Store(e) => e.into(),
+    }
+}
+
+fn queue_result(
+    answer: Result<QueueAnswer, RequestError>,
+) -> Result<dto::QueueResultDto, CommandError> {
+    let (status, waits_for) = match answer.map_err(request_error)? {
+        QueueAnswer::Queued => (dto::QueueStatus::Queued, None),
+        QueueAnswer::Waiting { name } => (dto::QueueStatus::Waiting, Some(name)),
+        QueueAnswer::Merged => (dto::QueueStatus::Merged, None),
+        QueueAnswer::Device => (dto::QueueStatus::Device, None),
+        QueueAnswer::Requested => (dto::QueueStatus::Requested, None),
+    };
+    Ok(dto::QueueResultDto { status, waits_for })
+}
+
+fn require_run_id(run_id: i64) -> Result<(), CommandError> {
+    if run_id >= 1 {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "invalid_input",
+            "The run id is not valid",
+        ))
+    }
+}
+
+fn require_auto_id(id: &str) -> Result<(), CommandError> {
+    if model::is_profile_id(id) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "invalid_input",
+            "The automation id is not a valid identifier",
+        ))
+    }
+}
+
+/// RQ-4 Run now. A REQUEST: it queues an entry (or, for a background automation, a control for the
+/// runner); the host passes it through the gate (approval, attention, folders, lease) before a file
+/// is touched. There is no argument that skips that, names a profile or a folder, or says
+/// "confirmed".
+#[tauri::command]
+pub async fn automation_run_now(
+    state: State<'_, AutomationState>,
+    id: String,
+) -> Result<dto::QueueResultDto, CommandError> {
+    require_auto_id(&id)?;
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        queue_result(request::run_now_command(
+            &store,
+            keys.as_ref(),
+            &id,
+            now_ms(),
+        ))
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
+}
+
+/// RQ-8.1 Stop the run in progress (a control for the host that runs it).
+#[tauri::command]
+pub async fn automation_stop_run(
+    state: State<'_, AutomationState>,
+    run_id: i64,
+) -> Result<dto::RequestedDto, CommandError> {
+    require_run_id(run_id)?;
+    let store = state.store.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        request::stop_command(&store, run_id, now_ms())
+            .map(|_| dto::RequestedDto::Requested)
+            .map_err(request_error)
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
+}
+
+/// RQ-10.1 Recheck: a fresh, read-only comparison of the run an attention hold names.
+#[tauri::command]
+pub async fn automation_recheck(
+    state: State<'_, AutomationState>,
+    run_id: i64,
+) -> Result<dto::RequestedDto, CommandError> {
+    require_run_id(run_id)?;
+    let store = state.store.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        request::recheck_command(&store, run_id, now_ms())
+            .map(|_| dto::RequestedDto::Requested)
+            .map_err(request_error)
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
+}
+
+/// RQ-10.2 Retry the remaining operations of a rechecked run (a fresh plan with `retryOf`).
+#[tauri::command]
+pub async fn automation_retry(
+    state: State<'_, AutomationState>,
+    run_id: i64,
+) -> Result<dto::QueueResultDto, CommandError> {
+    require_run_id(run_id)?;
+    let store = state.store.clone();
+    let keys = state.keys.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        queue_result(request::retry_command(
+            &store,
+            keys.as_ref(),
+            run_id,
+            now_ms(),
+        ))
+    })
+    .await
+    .map_err(|_| internal())?;
+    state.wake_host();
+    out
+}
+
+// ── The in-app host (P1.3) ──
+
+const EVENT_CHANGED: &str = "automation://changed";
+const EVENT_PROGRESS: &str = "automation://progress";
+
+/// Start the in-app host loop. Call once, after `AutomationState` is managed. The loop thread
+/// elects one instance per user (`hosts` row); instances that lose the election only read and
+/// announce changes. Events carry ids, a phase and counts - never a path, MAC, key or lease id.
+pub fn start_host<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use crate::automation::host::HostEvent;
+    use crate::automation::host::prod::{Emit, Flag, app_host};
+    use tauri::{Emitter, Manager};
+    let Some(state) = app.try_state::<AutomationState>() else {
+        return;
+    };
+    let handle = app.clone();
+    let emit: Emit = Arc::new(move |event: &HostEvent| match event {
+        HostEvent::Changed { seq } => {
+            let _ = handle.emit(EVENT_CHANGED, dto::ChangedEventDto { seq: *seq });
+        }
+        HostEvent::Progress(progress) => {
+            let _ = handle.emit(EVENT_PROGRESS, progress);
+        }
+    });
+    let flag_handle = app.clone();
+    let incremental: Flag = Arc::new(move || journal_skip_enabled(&flag_handle));
+    let host = app_host(
+        state.store.clone(),
+        state.keys.clone(),
+        state.baselines.clone(),
+        emit,
+        incremental,
+    );
+    if state.host.set(host.clone()).is_ok() {
+        // Detached on purpose: the loop ends with `stop_host` or with the process.
+        let _ = host.start();
+    }
+}
+
+/// Stop hosting when the app exits (LC-2): a run in progress stops after the current file and is
+/// recorded as Interrupted; the host row is released so another instance takes over at once.
+pub fn stop_host<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<AutomationState>()
+        && let Some(host) = state.host.get()
+    {
+        host.shutdown(Duration::from_secs(3));
+    }
 }
 
 // ── Read side (P1.2): list, detail, history, operations, events ──
@@ -2758,3 +3002,7 @@ mod approval_tests;
 #[cfg(test)]
 #[path = "commands_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+#[path = "commands_host_tests.rs"]
+mod host_tests;
