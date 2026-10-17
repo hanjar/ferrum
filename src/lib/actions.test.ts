@@ -643,6 +643,7 @@ describe('full-page shortcut guard (FER-561)', () => {
 
   beforeEach(() => {
     ui.activityOpen = false;
+    ui.syncProfilesOpen = false;
   });
 
   it('blocks nothing while no full page is open', () => {
@@ -673,7 +674,17 @@ describe('full-page shortcut guard (FER-561)', () => {
       'activity.open',
       'app.settings',
       'palette.open',
+      'sync.profiles.open',
     ]);
+  });
+
+  it('blocks file shortcuts while the Sync profiles page is open, allows its opener', () => {
+    ui.syncProfilesOpen = true;
+    for (const e of [key('F2'), key('F5'), key('F6'), key('F7'), key('F8'), key('Enter')]) {
+      expect(blocked(e), e.key).toBe(true);
+    }
+    expect(blocked(key('k', { ctrlKey: true }))).toBe(false);
+    expect(shortcutBlockedByFullPage(getAction('sync.profiles.open')!)).toBe(false);
   });
 
   it('every allowed id exists in the registry', () => {

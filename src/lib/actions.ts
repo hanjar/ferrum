@@ -1449,6 +1449,7 @@ export const FULL_PAGE_SHORTCUT_IDS: ReadonlySet<string> = new Set([
   'palette.open',
   'app.settings',
   'activity.open',
+  'sync.profiles.open',
 ]);
 
 /** True when a full page is open and this action's shortcut must not run. */

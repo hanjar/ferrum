@@ -255,5 +255,5 @@ export const ui = new UiState();
  * Add future full pages (for example Sync profiles) here, in this one place.
  */
 export function fullPageOpen(): boolean {
-  return ui.activityOpen;
+  return ui.activityOpen || ui.syncProfilesOpen;
 }
