@@ -286,15 +286,12 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("ferrum-nofollow-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    // FER-568: removed when the test ends (the `nul` entries of these trees need the `\\?\` form).
+    fn temp(tag: &str) -> ReservedTempDir {
+        ReservedTempDir::new(&format!("ferrum-nofollow-{tag}-"))
     }
 
-    use crate::sync_engine::test_support::make_junction;
+    use crate::sync_engine::test_support::{ReservedTempDir, make_junction};
 
     #[test]
     fn rel_names_are_validated_per_component() {
@@ -319,7 +316,6 @@ mod tests {
             open_chain(&root, &["a", "zzz"], false),
             Err(ChainError::NotFound)
         ));
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -338,8 +334,6 @@ mod tests {
         }
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
         let _ = fs::remove_dir(base.join("link"));
-        let _ = fs::remove_dir_all(&base);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -355,7 +349,6 @@ mod tests {
             );
         }
         assert_eq!(fs::read(base.join("a")).unwrap(), b"keep");
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -389,8 +382,6 @@ mod tests {
         } else {
             eprintln!("SKIPPED: junction creation is not permitted here");
         }
-        let _ = fs::remove_dir_all(&base);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -407,7 +398,6 @@ mod tests {
         // A directory is not a file: refused, left alone.
         assert!(publish::delete_file(&root, std::ffi::OsStr::new("dir")).is_err());
         assert!(base.join("dir").is_dir());
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -441,7 +431,6 @@ mod tests {
         assert!(matches!(r, Err(publish::MoveError::Exists)));
         assert_eq!(fs::read(base.join("to").join("taken.txt")).unwrap(), b"two");
         assert!(base.join("from").join("c.txt").exists());
-        let _ = fs::remove_dir_all(&base);
     }
 
     /// Plain (no `\\?\` prefix) real path of an existing folder.
@@ -476,7 +465,6 @@ mod tests {
         ));
         assert!(!real.join("new").exists());
         let _ = fs::remove_dir(&link);
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -493,6 +481,5 @@ mod tests {
         // A file is not a folder.
         fs::write(base.join("f.txt"), b"x").unwrap();
         assert!(open_root_folder(&format!("{base_str}\\f.txt"), false).is_err());
-        let _ = fs::remove_dir_all(&base);
     }
 }

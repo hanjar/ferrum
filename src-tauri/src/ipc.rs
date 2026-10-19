@@ -3751,8 +3751,9 @@ mod fer512_ipc_gate_tests {
         let _guard = crate::protected_dirs::TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let root = std::env::temp_dir().join(format!("ferrum-ipc-n5-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
+        // FER-568: removed when the test ends, `nul` entries included.
+        let tmp = crate::sync_engine::test_support::ReservedTempDir::new("ferrum-ipc-n5-");
+        let root = tmp.to_path_buf();
         let src_dir = root.join("src");
         let dst_dir = root.join("dst");
         std::fs::create_dir_all(&src_dir).unwrap();
@@ -3829,7 +3830,6 @@ mod fer512_ipc_gate_tests {
             b"real file named nul"
         );
         assert!(!std::path::Path::new(&format!(r"{vsrc}\nul")).exists());
-        let _ = std::fs::remove_dir_all(format!(r"\?\{}", root.display()));
     }
 
     /// FER-559 N4: the Recycle Bin cannot take an entry with a reserved name via `\?\`

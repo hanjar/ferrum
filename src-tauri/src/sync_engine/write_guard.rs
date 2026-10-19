@@ -163,12 +163,11 @@ pub fn check_planned(
 mod tests {
     use super::*;
     use crate::protected_dirs;
+    use crate::sync_engine::test_support::ReservedTempDir;
 
-    fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ferrum-wg-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    // FER-568: removed when the test ends, so no `ferrum-wg-*` folder stays in %TEMP%.
+    fn temp(tag: &str) -> ReservedTempDir {
+        ReservedTempDir::new(&format!("ferrum-wg-{tag}-"))
     }
 
     #[test]
@@ -203,7 +202,6 @@ mod tests {
             Some(RootViolation::ContainsProtected)
         );
         protected_dirs::register(Vec::<PathBuf>::new());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A share that points at this computer has its own verdict, read-only or not; the per-entry
@@ -303,7 +301,6 @@ mod tests {
             assert!(check_entry(&g, &h, Some("x")).is_err(), "{short}");
         }
         protected_dirs::register(Vec::<PathBuf>::new());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The real Startup folder, opened by handle (read-only: nothing is written), is refused as

@@ -509,11 +509,60 @@ impl crate::sync_engine::write_guard::WriteGuard for DenyList {
     }
 }
 
+/// FER-568: a temp folder for one test, removed when the test ends, with or without a failure.
+/// Plain `remove_dir_all` cannot delete an entry named like a Windows device (`nul`, `aux.c`):
+/// the plain spelling reaches the device. So the cleanup goes through the `\\?\` form first, and
+/// `TempDir` (declared as the only field) finds nothing left to remove.
+pub struct ReservedTempDir(tempfile::TempDir);
+
+impl ReservedTempDir {
+    pub fn new(prefix: &str) -> ReservedTempDir {
+        ReservedTempDir(tempfile::Builder::new().prefix(prefix).tempdir().unwrap())
+    }
+}
+
+impl std::ops::Deref for ReservedTempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for ReservedTempDir {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for ReservedTempDir {
+    fn drop(&mut self) {
+        let plain = self.0.path().to_string_lossy().into_owned();
+        let _ = fs::remove_dir_all(PathBuf::from(crate::path_guard::verbatim_path(&plain)));
+    }
+}
+
 /// FER-566: the rig must leave nothing behind (a temp folder still held open by a store's SQLite
 /// files is not removed, silently), so its field order is pinned by a look at the disk.
 #[cfg(test)]
 mod leak_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reserved_temp_dir_leaves_nothing_behind_even_with_a_nul_entry() {
+        let tmp = ReservedTempDir::new("ferrum-guard-");
+        let base = tmp.to_path_buf();
+        let verbatim = crate::path_guard::verbatim_path(&base.to_string_lossy());
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::write(format!(r"{verbatim}\nul"), b"x").unwrap();
+        fs::write(format!(r"{verbatim}\sub\aux.c"), b"x").unwrap();
+        drop(tmp);
+        assert!(
+            !base.exists(),
+            "temp folder left behind: {}",
+            base.display()
+        );
+    }
 
     #[test]
     fn a_dropped_rig_leaves_no_temp_folder() {
