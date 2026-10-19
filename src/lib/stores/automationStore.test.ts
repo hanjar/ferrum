@@ -50,6 +50,14 @@ describe('AutomationStore', () => {
     expect(store.listError).toBeNull();
   });
 
+  it('an unanswered list (null from a mocked shell) becomes an empty list, so render-time getters never throw', async () => {
+    const { store } = make({ list: vi.fn(async () => null as never) });
+    await store.load();
+    expect(store.rows).toEqual([]);
+    expect(store.attentionCount).toBe(0);
+    expect(store.queue).toEqual([]);
+  });
+
   it('shows a fixed message when the list cannot be read', async () => {
     const { store } = make({
       list: vi.fn(async () => {
