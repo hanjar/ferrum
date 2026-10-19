@@ -52,7 +52,7 @@
     "name": "Photos to NAS",
     "revision": 3,
     "left": "D:\\Photos",
-    "right": "\\nas\\photos"
+    "right": "\\\\nas\\photos"
   },
   "pipeline": {
     "steps": [

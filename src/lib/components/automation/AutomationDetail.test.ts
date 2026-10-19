@@ -102,7 +102,7 @@ describe('AutomationDetail (MH-5)', () => {
     d.quiet = { ...d.quiet!, untilMs: Date.now() + 7000 };
     const { store } = setup({}, d);
     const view = within(await openDetail(store));
-    expect(view.getAllByText('Waiting for quiet · 7 s').length).toBeGreaterThan(0);
+    expect(view.getByTestId('quiet-label').textContent).toMatch(/^Waiting for quiet · [67] s$/);
     const steps = [...view.getByTestId('pipeline').querySelectorAll('li')];
     expect(steps.map((li) => li.getAttribute('aria-current'))).toEqual([
       null,
@@ -125,6 +125,21 @@ describe('AutomationDetail (MH-5)', () => {
       'Changes detected — waiting for 10 s without changes',
     );
     expect(view.queryByTestId('current-run')).toBeNull();
+  });
+
+  it('while quiet, the status chip and the quiet bar show the same countdown (one number on screen)', async () => {
+    const d = fixture<AutomationDetail>('automation-get-quiet.json');
+    // The backend snapshot still says 7 s, but the deadline is 3 s away: the chip must follow the bar.
+    d.quiet = { ...d.quiet!, untilMs: Date.now() + 3000 };
+    const { store } = setup({}, d);
+    const view = within(await openDetail(store));
+    const chip = document.querySelector('.chip[data-kind="quiet"] .label')!;
+    const bar = view.getByTestId('quiet-label').textContent!;
+    expect(chip.textContent).toBe(bar);
+    expect(bar).toMatch(/^Waiting for quiet · [23] s$/);
+    expect(view.queryByText('Waiting for quiet · 7 s')).toBeNull();
+    // The explanation appears once (in the bar), not twice.
+    expect(view.getAllByText('Changes detected — new changes reset the countdown')).toHaveLength(1);
   });
 
   it('Edit is available for a watch automation and opens its editor', async () => {

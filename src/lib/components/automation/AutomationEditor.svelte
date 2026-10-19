@@ -473,6 +473,10 @@
     {/if}
   </section>
 
+  {#if editor.note}
+    <p class="hint" role="status" data-testid="editor-note">{editor.note}</p>
+  {/if}
+
   {#if editor.errors.length > 0}
     <div class="errors" role="alert" data-testid="editor-errors">
       <div class="lbl">Fix these to continue</div>

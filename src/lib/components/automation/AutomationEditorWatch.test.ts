@@ -222,6 +222,22 @@ describe('Simulate a change (WA-8)', () => {
   });
 });
 
+describe('Simulate a change: unmount', () => {
+  it('switching the trigger to a schedule unmounts the preview and clears its timer', async () => {
+    setup();
+    await openWatchEditor();
+    vi.useFakeTimers();
+    await fireEvent.click(screen.getByRole('button', { name: 'Simulate a change' }));
+    expect(screen.getByTestId('watch-preview-count')).toBeTruthy();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByRole('radio', { name: 'On a schedule' }));
+    await tick();
+    expect(screen.queryByTestId('watch-preview-count')).toBeNull();
+    expect(screen.queryByTestId('watch-fields')).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('Review of a watch automation (AP-3)', () => {
   it('shows the watch trigger and its burst and self-generated-change policies', async () => {
     setup();

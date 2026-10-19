@@ -46,6 +46,9 @@ export const MAX_WAIT_DEFAULT_SECS = 900;
 
 /** WA-2.3, exact text of a root that cannot be watched. */
 export const UNSUPPORTED_ROOT_NOTE = "No change notifications on this provider — can't be watched";
+/** Shown when opening a saved watch automation whose profile now points at an unwatchable root. */
+export const UNTICKED_ON_OPEN_NOTE =
+  "A folder of this profile can't be watched any more (no change notifications), so it was unticked. Review the watched folders before you continue.";
 /** WA-2.4, shown in the editor. */
 export const WATCH_NOTIFICATION_NOTE =
   'File notifications only trigger a fresh comparison by the sync engine; they are never the list of what gets copied.';
