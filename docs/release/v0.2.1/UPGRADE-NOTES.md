@@ -17,10 +17,10 @@ Your settings, session, Directory Hotlist, Activity history, per-folder comments
 
 ### Automation store (sync profiles): schema 1 to 2
 
-- Sync profiles, their revisions and sync baselines live in a separate SQLite store named `automation.db`, in the `automation` folder of Ferrum's local application data. Ferrum 0.2.0 already created it (schema version 1).
-- The first start of 0.2.1 migrates it to **schema version 2** (new tables for automations, approvals, queue, runs and events). Your existing sync profiles are kept. Before changing anything, Ferrum writes a consistent backup next to it, `automation.db.bak-v1`.
+- Sync profiles, their revisions and sync baselines live in a separate SQLite store named `automation.db`, in the `automation` folder of Ferrum's local application data. Ferrum 0.2.0 may already have created it (schema version 1); if it does not exist yet, 0.2.1 creates it at schema version 2.
+- The first start of 0.2.1 migrates it to **schema version 2** (new tables for automations, approvals, queue, runs and events). Your existing sync profiles are kept. During the migration Ferrum keeps a consistent snapshot next to it, `automation.db.bak-v1`; it is removed once the migration succeeds. If the migration fails, nothing is changed and the snapshot stays.
 - The new tables are empty and unused in this release, because the Automation screen is not available (see below). A small additive change (the `baseline_gen` table and a `merged_from` column on the queue) is applied on open when missing.
-- **Going back to 0.2.0 after this migration:** the older build opens the newer store read-only and never writes to it, so sync profile saves and runs would not work there. Do not downgrade; if you must, restore `automation.db.bak-v1` over `automation.db` (and delete `automation.db-wal` and `automation.db-shm`) with Ferrum closed. Changes made to sync profiles after the upgrade are lost by doing that.
+- **Going back to 0.2.0 after this migration is not supported:** the older build opens the newer store read-only, so sync profiles can still be read there but saving them and writing sync baselines would not work. Install 0.2.1 again to get write access back.
 
 ## Behaviour that differs from 0.2.0
 
