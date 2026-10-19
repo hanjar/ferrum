@@ -425,7 +425,15 @@ mod imp {
 
     /// Test seam: called after every successful wake-up of the worker; `true` makes the worker
     /// behave as if the wait had failed (it may also panic to test the unwind path).
+    #[cfg(test)]
     pub(crate) type Fault = Arc<dyn Fn() -> bool + Send + Sync>;
+
+    /// What the worker is handed in place of the seam: the hook in tests, nothing in production
+    /// (the production worker has no fault code at all).
+    #[cfg(test)]
+    type FaultArg = Option<Fault>;
+    #[cfg(not(test))]
+    type FaultArg = ();
 
     /// A running recursive watch of one root. Dropping it stops the worker, cancels the read,
     /// waits for the completion and frees every handle.
@@ -448,14 +456,29 @@ mod imp {
         /// port, and is cancelled when that thread ends), and the result is awaited here.
         /// `buf_bytes` is the kernel buffer (tests make it small to provoke an overflow).
         pub(crate) fn start(root: &str, sink: Sink, buf_bytes: usize) -> Result<Self, WatchError> {
-            Self::start_with(root, sink, buf_bytes, None)
+            #[cfg(test)]
+            let fault: FaultArg = None;
+            #[cfg(not(test))]
+            let fault: FaultArg = ();
+            Self::start_inner(root, sink, buf_bytes, fault)
         }
 
+        /// `start` with a fault hook (tests only).
+        #[cfg(test)]
         pub(crate) fn start_with(
             root: &str,
             sink: Sink,
             buf_bytes: usize,
             fault: Option<Fault>,
+        ) -> Result<Self, WatchError> {
+            Self::start_inner(root, sink, buf_bytes, fault)
+        }
+
+        fn start_inner(
+            root: &str,
+            sink: Sink,
+            buf_bytes: usize,
+            fault: FaultArg,
         ) -> Result<Self, WatchError> {
             let watch = Watch::open(root, buf_bytes).ok_or(WatchError::Failed)?;
             let stop = Arc::new(Event::new().ok_or(WatchError::Failed)?);
@@ -528,7 +551,7 @@ mod imp {
         stop: &Event,
         dead: &AtomicBool,
         armed: &std::sync::mpsc::Sender<bool>,
-        fault: Option<Fault>,
+        fault: FaultArg,
     ) {
         let first = watch.arm();
         let _ = armed.send(first);
@@ -552,7 +575,13 @@ mod imp {
                 return;
             }
             let failed_wait = signalled != WAIT_OBJECT_0 + 1;
+            #[cfg(test)]
             let injected = fault.as_ref().is_some_and(|f| f());
+            #[cfg(not(test))]
+            let injected = {
+                let () = fault;
+                false
+            };
             if failed_wait || injected {
                 return; // `exit` reports the loss.
             }
@@ -944,12 +973,10 @@ mod real_tests {
         let (sink, rx) = channel_sink();
         let handle = RdcwHandle::start(&root.to_string_lossy(), sink, 64 * 1024).expect("starts");
         let moved = base.join("moved");
-        if std::fs::rename(&root, &moved).is_err() {
-            // Windows refuses a rename while the folder is open in some configurations: then the
-            // folder cannot move away either, and there is nothing to detect.
-            drop(handle);
-            return;
-        }
+        // The watch opens the folder with FILE_SHARE_DELETE, so the OS must allow the rename. If
+        // it does not, the test has nothing to test: fail loudly instead of passing silently.
+        std::fs::rename(&root, &moved)
+            .expect("renaming a watched folder must be allowed (the watch shares delete access)");
         std::fs::write(moved.join("x.txt"), "1").expect("write in the moved folder");
         let deadline = Instant::now() + WAIT;
         let mut failed = false;

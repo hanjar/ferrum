@@ -891,6 +891,9 @@ struct Out {
     rebuild_handles: bool,
     /// The next comparison waits (a watch that keeps dying).
     backoff: bool,
+    /// The count of quick deaths after this pass. Applied by `step` only once the transaction
+    /// committed: a rolled-back pass must not count the same death again on its retry.
+    quick_deaths: Option<u32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1077,6 +1080,17 @@ fn step<D: HostDeps>(
         t.shared.inbox.restore(drained);
         return;
     };
+    if let Some(n) = out.quick_deaths {
+        t.quick_deaths = n;
+    } else if !handles_short
+        && !out.drop_handles
+        && !out.rebuild_handles
+        && !t.handles.is_empty()
+        && now.saturating_sub(t.made_ms) >= QUICK_DEATH_MS
+    {
+        // The watch has lived longer than a quick death: the next one starts the count again.
+        t.quick_deaths = 0;
+    }
     if out.drop_handles {
         t.handles.clear();
     }
@@ -1248,8 +1262,9 @@ fn apply(
         // whose watch keeps dying at once is Unsupported. The events it may have missed are
         // compared below (section 2), or by the comparison that is running.
         if now.saturating_sub(t.made_ms) < QUICK_DEATH_MS {
-            t.quick_deaths += 1;
-            if t.quick_deaths >= MAX_QUICK_DEATHS {
+            let deaths = t.quick_deaths + 1;
+            out.quick_deaths = Some(deaths);
+            if deaths >= MAX_QUICK_DEATHS {
                 out.drop_handles = true;
                 runtime::set_trigger_state(
                     conn,
@@ -1268,7 +1283,7 @@ fn apply(
                     "Change notifications keep stopping for this folder \u{2014} can't be watched",
                 )?;
                 return Ok(out);
-            } else if t.quick_deaths >= 2 {
+            } else if deaths >= 2 {
                 // The second quick death in a row: wait (the 30 s look makes the next watch).
                 out.drop_handles = true;
                 out.backoff = true;
@@ -1276,7 +1291,7 @@ fn apply(
                 out.rebuild_handles = true;
             }
         } else {
-            t.quick_deaths = 0;
+            out.quick_deaths = Some(0);
             out.rebuild_handles = true;
         }
     }
