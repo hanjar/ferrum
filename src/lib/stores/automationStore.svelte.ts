@@ -57,6 +57,7 @@ import {
   OPS_PAGE,
   toDraft,
   type ScheduleForm,
+  UNTICKED_ON_OPEN_NOTE,
 } from '../components/automation/automationModel';
 
 export type AutomationView = 'list' | 'editor' | 'review' | 'detail';
@@ -85,6 +86,8 @@ export interface EditorState {
   /** The backend could not be reached (for example outside the desktop app). */
   unavailable?: string;
   dirty: boolean;
+  /** A heads-up shown in the editor (for example a root that was unticked on opening). */
+  note?: string;
   /** Roots of the chosen profile that the backend refused to watch (WA-2.3); reset with the profile. */
   refused: { left: boolean; right: boolean };
 }
@@ -264,13 +267,18 @@ export class AutomationStore {
     this.loading = false;
     this.loaded = true;
     if (rows.status === 'fulfilled') {
-      this.rows = rows.value;
+      // The list feeds getters that run inside render effects (the sidebar badge): anything that
+      // is not an array (an unanswered IPC command in a mocked shell answers null) must not
+      // throw there, because an error in a render flush can abort the rest of that flush.
+      this.rows = Array.isArray(rows.value) ? rows.value : [];
       this.listError = null;
     } else {
       this.listError = automationErrorMessage(codeOf(rows.reason));
     }
     // A profile list failure is not fatal for the list; the editor shows the empty state.
-    if (profiles.status === 'fulfilled') this.profiles = profiles.value;
+    if (profiles.status === 'fulfilled') {
+      this.profiles = Array.isArray(profiles.value) ? profiles.value : [];
+    }
   }
 
   async toggleEnabled(row: { id: string; name: string; enabled: boolean }): Promise<void> {
@@ -692,7 +700,12 @@ export class AutomationStore {
       dirty: false,
       refused: { left: false, right: false },
     };
-    this.#dropUnwatchable(this.editor);
+    // A stored automation whose profile moved to an unwatchable root loses that tick: say so and
+    // mark the editor changed, so saving is a visible decision and not a silent rewrite.
+    if (this.#dropUnwatchable(this.editor) && init.id) {
+      this.editor.dirty = true;
+      this.editor.note = UNTICKED_ON_OPEN_NOTE;
+    }
     this.editor.errors = localErrors(
       this.editor.form,
       this.#deps.now(),

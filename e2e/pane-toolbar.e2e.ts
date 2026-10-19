@@ -60,7 +60,7 @@ function injectTauriMock(page: Page) {
               entry('Summary.docx', false),
               entry('budget.xlsx', false),
             ]);
-          if (cmd === 'list_drives') return Promise.resolve([]);
+          if (cmd === 'list_drives' || cmd === 'disk_usage_cache_list') return Promise.resolve([]);
           if (cmd === 'load_prefs') {
             const raw = window.localStorage.getItem(key);
             return Promise.resolve(raw === null ? DEFAULT_PREFS : JSON.parse(raw));
@@ -80,10 +80,15 @@ function injectTauriMock(page: Page) {
 
 test.describe('pane toolbar + breadcrumb (FER-491)', () => {
   let page: Page;
+  let pageErrors: string[];
 
   test.beforeEach(async ({ browser }) => {
     // 590px panes: 2 * 590 + sidebar/divider chrome.
     page = await browser.newPage({ viewport: { width: 1392, height: 600 } });
+    // An uncaught error in a render effect can abort the rest of that render flush (this once
+    // left the pane without rows now and then), so any page error fails the test.
+    pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e.stack)));
     injectTauriMock(page);
     await page.goto('/');
     await page.waitForSelector('[data-path]', { state: 'attached', timeout: 10_000 });
@@ -91,6 +96,7 @@ test.describe('pane toolbar + breadcrumb (FER-491)', () => {
 
   test.afterEach(async () => {
     await page.close();
+    expect(pageErrors).toEqual([]);
   });
 
   const pane = () => page.locator('section.pane').first();

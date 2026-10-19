@@ -52,6 +52,14 @@
       : 0,
   );
 
+  // While quiet, the chip follows the same local countdown as the bar (one number on screen); the
+  // bar carries the explanatory sub-line, so the chip drops the backend's snapshot sub-line.
+  const chipStatus = $derived(
+    row && row.status.kind === 'quiet' && data?.quiet
+      ? { ...row.status, label: quietLabel(quietLeft), sub: undefined }
+      : row?.status,
+  );
+
   const showOps = $derived(run ? !!store.opsOpen[run.id] : false);
 
   function resolveHeld() {
@@ -87,7 +95,7 @@
     <section class="head">
       <div class="title">
         <h3>{row.name}</h3>
-        <StatusChip status={row.status} showSub />
+        <StatusChip status={chipStatus ?? row.status} showSub />
       </div>
       <div class="controls">
         <label class="switch" title={row.enabled ? 'Enabled' : 'Disabled'}>

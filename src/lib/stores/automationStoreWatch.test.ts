@@ -6,7 +6,8 @@ import {
   fixture,
   profileSummary,
 } from '../components/automation/automationTestKit';
-import type { AutomationValidateResult } from '../ipc/automation';
+import { UNTICKED_ON_OPEN_NOTE } from '../components/automation/automationModel';
+import type { AutomationDetail, AutomationValidateResult } from '../ipc/automation';
 
 const NOW = Date.parse('2026-10-17T10:00:00Z');
 const WATCH_ID = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
@@ -125,6 +126,31 @@ describe('AutomationStore watch editor (P2.2)', () => {
       watchLeft: true,
       watchRight: true,
     });
+    store.dispose();
+  });
+
+  it('opening a saved watch whose profile is now a network share unticks the root, marks it changed and says why', async () => {
+    const detail = fixture<AutomationDetail>('automation-get.json');
+    const unc = profileSummary({
+      id: detail.automation.profileId,
+      left: String.raw`\\nas\photos`,
+      right: String.raw`D:\Backup`,
+    });
+    const { store } = make({ get: vi.fn(async () => detail as never) }, [unc]);
+    await store.load();
+    await store.openEdit(WATCH_ID);
+    expect(store.editor?.form.watchLeft).toBe(false);
+    expect(store.editor?.dirty).toBe(true);
+    expect(store.editor?.note).toBe(UNTICKED_ON_OPEN_NOTE);
+    store.dispose();
+  });
+
+  it('opening a saved watch with watchable roots stays clean and shows no note', async () => {
+    const { store } = make({ get: vi.fn(async () => fixture('automation-get.json') as never) });
+    await store.load();
+    await store.openEdit(WATCH_ID);
+    expect(store.editor?.dirty).toBe(false);
+    expect(store.editor?.note).toBeUndefined();
     store.dispose();
   });
 
