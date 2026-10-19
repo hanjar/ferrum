@@ -27,12 +27,21 @@ const MIN: i64 = 60 * SEC;
 
 /// One watch automation on a host, with an engine whose dry runs report `remaining` operations.
 struct W {
-    rig: Rig,
     host: Host<FakeDeps>,
     id: String,
     profile: String,
     left: String,
     remaining: Arc<AtomicUsize>,
+    /// Last: dropped after the host (which holds the store) so the temp folder can be removed.
+    rig: Rig,
+}
+
+impl Drop for W {
+    fn drop(&mut self) {
+        // A test may end right after a `tick()` that started a worker; let it finish before the
+        // fields (host, then the rig's temp folder) are dropped.
+        drain(&self.host);
+    }
 }
 
 fn watch(on_changes: bool, on_available: bool) -> AutomationPolicy {
@@ -75,12 +84,12 @@ fn setup_full(policy: AutomationPolicy, exclude: Option<&str>, include: Option<&
     let left = rig.fx.profile_policy(&profile).left.path;
     let host = rig.host(1, HostClass::App);
     W {
-        rig,
         host,
         id,
         profile,
         left,
         remaining,
+        rig,
     }
 }
 
@@ -1782,4 +1791,17 @@ fn a_health_look_that_finds_nothing_writes_nothing_for_the_automation() {
     assert!(w.rig.world.probes().len() > probes, "the health look ran");
     assert_eq!(w.row(), row, "the row was not touched");
     assert_eq!(w.events().len(), events);
+}
+
+/// FER-566: dropping the harness right after a `tick()` must not leave the temp folder behind (a
+/// worker still in flight holds the store open).
+#[test]
+fn a_dropped_watch_harness_leaves_no_temp_folder() {
+    let w = setup();
+    w.started();
+    let dir = w.rig.fx.tmp.path().to_path_buf();
+    w.emit(1);
+    w.host.tick();
+    drop(w);
+    assert!(!dir.exists(), "temp folder left behind: {}", dir.display());
 }

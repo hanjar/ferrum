@@ -430,11 +430,12 @@ mod tests {
     };
 
     struct Rig {
-        _dir: tempfile::TempDir,
         store: Arc<Store>,
         clock: Arc<AtomicI64>,
         probe: Arc<FakeProbe>,
         env: LeaseEnv,
+        /// Last: dropped after the store has closed its SQLite files.
+        _dir: tempfile::TempDir,
     }
 
     fn rig() -> Rig {
@@ -456,11 +457,11 @@ mod tests {
             max_manual_hold_ms: MAX_MANUAL_HOLD_MS,
         };
         Rig {
-            _dir: dir,
             store,
             clock,
             probe,
             env,
+            _dir: dir,
         }
     }
 
@@ -544,7 +545,9 @@ mod tests {
             *flag.lock().unwrap() = true;
             cv.notify_all();
         }
-        std::mem::forget(guard); // leak: no release, as for a hung process
+        // The guard stays alive (no release yet), as for a hung process; it is dropped at the end
+        // of the test, after the rival took over. (`mem::forget` would leak the store handle and
+        // keep the temp folder from being removed.)
         rig.clock.store(1_000 + 31_000, Ordering::SeqCst);
         let rival = LeaseGuard::acquire(
             &rig.store,
@@ -560,6 +563,8 @@ mod tests {
         .unwrap();
         assert!(matches!(rival, GuardOutcome::Acquired(_)));
         assert_eq!(row_beat(&rig, &id), None, "the stale row was removed");
+        drop(rival);
+        drop(guard);
     }
 
     /// A lease that was reclaimed behind the holder's back is reported lost by its heartbeat.
@@ -914,6 +919,9 @@ mod tests {
             registry.acquire_manual(&rig.store, &list).unwrap(),
             ManualAcquire::Acquired { .. }
         ));
+        // The clock closure holds `slot`, which holds the registry, which holds the clock: break
+        // the cycle so the registry's guards drop and the temp folder can be removed.
+        *slot.lock().unwrap() = None;
     }
 
     /// P2-1: a guard that already lost its lease (hold limit) is pruned and does not count
@@ -1045,5 +1053,12 @@ mod tests {
         }));
         assert_eq!(outcome.is_err(), cfg!(debug_assertions));
         assert!(!crate::automation::store::inside_closure());
+        // The skipped join leaves the heartbeat thread to end by itself (its stop flag is set).
+        // It holds a clone of the store, so wait for it to let go before the temp folder goes.
+        drop(store);
+        assert!(
+            wait_for(|| Arc::strong_count(&rig.store) == 1),
+            "the heartbeat thread ended"
+        );
     }
 }

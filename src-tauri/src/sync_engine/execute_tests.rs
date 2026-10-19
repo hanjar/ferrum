@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::automation::model::{DeletePolicy, Side, SyncMode};
+use crate::sync_engine::env::{Copier, CopyReport, EngineCopier};
 use crate::sync_engine::errors::{ErrorClass, Reason};
 use crate::sync_engine::test_support::*;
 use std::fs;
@@ -941,44 +942,59 @@ fn three_unknown_failures_in_a_row_stop_the_run() {
 
 // RQ-8.1: cancelling in the middle of a big copy leaves the file complete or absent, no staging
 // leftover, outcome Cancelled; the files after it are not started.
+/// The production copier, cancelled (user token and the copy's own token) by its first chunk.
+struct CancelInFirstChunk {
+    user: CancelToken,
+    seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Copier for CancelInFirstChunk {
+    fn copy(
+        &self,
+        sources: &[String],
+        dest_dir: &str,
+        overwrite: bool,
+        durable: bool,
+        cancel: &CancelToken,
+        guard: Option<&dyn crate::copy_engine::ReplaceGuard>,
+    ) -> CopyReport {
+        let (user, own, seen) = (self.user.clone(), cancel.clone(), self.seen.clone());
+        let dir = Path::new(dest_dir);
+        crate::copy_engine::hook_chunks(dir, move |_| {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            user.cancel();
+            own.cancel();
+        });
+        let report = EngineCopier.copy(sources, dest_dir, overwrite, durable, cancel, guard);
+        crate::copy_engine::unhook_chunks(dir);
+        report
+    }
+}
+
 #[test]
 fn cancel_mid_file_leaves_no_partial_file_and_no_staging_leftover() {
     let rig = Rig::new();
-    let big = rig.left.join("a-big.bin");
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&big).unwrap();
-        let chunk = vec![7u8; 1024 * 1024];
-        for _ in 0..192 {
-            f.write_all(&chunk).unwrap();
-        }
-    }
+    // Sixteen chunks are plenty to be "in the middle of a file" when the cancel comes from the
+    // copy's own first chunk (FER-566: this used to be 192 MB and a polling thread).
+    const BIG: usize = 16 * crate::copy_engine::CHUNK;
+    write(&rig.left.join("a-big.bin"), &vec![7u8; BIG]);
     write(&rig.left.join("z-after.txt"), b"after");
     let profile = rig.profile(one_way(), DeletePolicy::Permanent);
     let token = CancelToken::default();
-    // A watcher cancels as soon as the staging file of the big copy exists.
-    let right = rig.right.clone();
-    let t = token.clone();
-    let watcher = std::thread::spawn(move || {
-        for _ in 0..20_000 {
-            if let Ok(rd) = fs::read_dir(&right)
-                && rd
-                    .flatten()
-                    .any(|e| e.file_name().to_string_lossy().contains(".ferrum-stage-"))
-            {
-                t.cancel();
-                return true;
-            }
-            std::thread::sleep(Duration::from_micros(200));
-        }
-        false
+    // The real copy engine cancels itself from inside its first chunk (user token and the copy's
+    // own token together), so the cancel always hits a file in progress: deterministic, no polling
+    // thread racing a fast disk.
+    let saw_chunk = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut env = test_env();
+    env.copier = Arc::new(CancelInFirstChunk {
+        user: token.clone(),
+        seen: saw_chunk.clone(),
     });
     let tk = token.clone();
-    let r = go_with(&rig, &profile, &test_env(), move |req| req.cancel = tk);
-    let saw_stage = watcher.join().unwrap();
+    let r = go_with(&rig, &profile, &env, move |req| req.cancel = tk);
     assert!(
-        saw_stage,
-        "the staging file was seen, so the cancel hit a file in progress"
+        saw_chunk.load(std::sync::atomic::Ordering::SeqCst),
+        "a chunk was written, so the cancel hit a file in progress"
     );
     assert!(
         matches!(r.report.outcome, EngineOutcome::Cancelled { .. }),
@@ -993,7 +1009,7 @@ fn cancel_mid_file_leaves_no_partial_file_and_no_staging_leftover() {
     if rig.right.join("a-big.bin").exists() {
         assert_eq!(
             fs::metadata(rig.right.join("a-big.bin")).unwrap().len(),
-            192 * 1024 * 1024
+            BIG as u64
         );
     }
     assert!(!rig.right.join("z-after.txt").exists());

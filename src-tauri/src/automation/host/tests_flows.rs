@@ -1567,6 +1567,9 @@ fn a_shutdown_or_lost_role_between_gate_and_start_starts_nothing() {
             rig.fx.store.with_read(leases::all).unwrap().is_empty(),
             "the lease was released"
         );
+        // The hook holds a clone of the host (and the host the world): break that cycle so the
+        // store is dropped and its temp folder can be removed.
+        *rig.world.between.lock().unwrap() = None;
     }
 }
 

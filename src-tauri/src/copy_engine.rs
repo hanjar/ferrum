@@ -620,6 +620,21 @@ pub(crate) fn events_under(dir: &Path) -> Vec<(PathBuf, &'static str)> {
         .collect()
 }
 
+/// Calls `hook(chunk_len)` for every chunk written under `dir` (test-only seam: lets a test act
+/// in the middle of a file deterministically, without a big file and a racing watcher thread).
+#[cfg(test)]
+pub(crate) fn hook_chunks(dir: &Path, hook: impl Fn(u64) + Send + Sync + 'static) {
+    CHUNK_HOOKS
+        .lock()
+        .unwrap()
+        .push((dir.to_path_buf(), Arc::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn unhook_chunks(dir: &Path) {
+    CHUNK_HOOKS.lock().unwrap().retain(|(d, _)| d != dir);
+}
+
 /// Test-only: runs for every chunk of BOTH copy paths (CopyFile2 callback and stream loop).
 #[cfg(test)]
 fn call_chunk_hooks(staged: &Path, n: u64) {
@@ -1830,19 +1845,6 @@ mod tests {
             .unwrap()
         );
         let _ = fs::remove_dir_all(&root);
-    }
-
-    /// Calls `hook(chunk_len)` for every stream-copy chunk written under `dir`
-    /// (test-only seam: lets a test act in the middle of a file deterministically).
-    fn hook_chunks(dir: &Path, hook: impl Fn(u64) + Send + Sync + 'static) {
-        CHUNK_HOOKS
-            .lock()
-            .unwrap()
-            .push((dir.to_path_buf(), Arc::new(hook)));
-    }
-
-    fn unhook_chunks(dir: &Path) {
-        CHUNK_HOOKS.lock().unwrap().retain(|(d, _)| d != dir);
     }
 
     fn staging_leftovers(dir: &Path) -> Vec<String> {

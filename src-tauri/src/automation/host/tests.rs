@@ -695,3 +695,23 @@ fn the_host_never_acknowledges_a_tripped_guard() {
         assert!(!text.contains("from_native_yes"), "{name}");
     }
 }
+
+/// FER-566: a script that captured the store (as several tests do) must not keep the temp folder
+/// of the rig alive: the rig drops its world before its fixture.
+#[test]
+fn a_dropped_rig_with_a_script_holding_the_store_leaves_no_temp_folder() {
+    let rig = Rig::new();
+    let dir = rig.fx.tmp.path().to_path_buf();
+    let (a, p) = rig.automation("Leak check");
+    let host = rig.host(1, HostClass::App);
+    let store = rig.fx.store.clone();
+    rig.world.set_script(script(move |_, _| {
+        let _ = store.with_read(leases::all);
+        completed(1)
+    }));
+    rig.enqueue(&a, &p, TriggerKind::RunNow, HostClass::App);
+    tick(&host);
+    drop(host);
+    drop(rig);
+    assert!(!dir.exists(), "temp folder left behind: {}", dir.display());
+}

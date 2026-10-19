@@ -22,7 +22,6 @@ use crate::sync_engine::roots::{FsProbe, RootProbe};
 
 /// Everything a test needs, around one temp directory.
 pub(crate) struct Fixture {
-    pub tmp: tempfile::TempDir,
     pub store: Arc<Store>,
     /// The keys the flows use (in-memory by default, DPAPI with [`Fixture::with_dpapi`]).
     pub keys: Arc<dyn ApprovalKeys>,
@@ -31,6 +30,9 @@ pub(crate) struct Fixture {
     pub ledger: TestLedger,
     pub now: Arc<AtomicI64>,
     clock: Box<dyn Fn() -> i64 + Send + Sync>,
+    /// Declared LAST: fields drop in declaration order, and the temp folder can only be removed
+    /// once the store's SQLite files are closed (an open file keeps the delete from happening).
+    pub tmp: tempfile::TempDir,
 }
 
 /// An instant in epoch milliseconds, far from any boundary.
@@ -319,5 +321,23 @@ impl Fixture {
             ApproveResultDto::Approved { automation } => automation.id,
             other => panic!("expected approved, got {other:?}"),
         }
+    }
+}
+
+/// FER-566: the fixtures must leave nothing behind. A temp folder that is still held open (a store's
+/// SQLite files) when it is dropped is NOT removed - the failure is silent - so each fixture's
+/// field order is pinned by a test that looks at the disk afterwards.
+#[cfg(test)]
+mod leak_tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_fixture_leaves_no_temp_folder() {
+        let fx = Fixture::new();
+        let dir = fx.tmp.path().to_path_buf();
+        let _ = fx.profile("Leak check");
+        assert!(dir.join("store").exists(), "the store is really in use");
+        drop(fx);
+        assert!(!dir.exists(), "temp folder left behind: {}", dir.display());
     }
 }
