@@ -696,8 +696,13 @@ function injectTauriMock(page: Page) {
 test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (mock IPC)', () => {
   let page: Page;
 
+  let pageErrors: string[] = [];
   test.beforeEach(async ({ browser }) => {
     page = await browser.newPage();
+    // An uncaught error in a render effect can abort the rest of that render flush (the pane
+    // then never renders its rows), so any page error fails the test.
+    pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e.stack)));
     injectTauriMock(page);
     await page.goto('/');
     await page.waitForSelector('[data-path]', { state: 'attached', timeout: 10_000 });
@@ -705,6 +710,7 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
 
   test.afterEach(async () => {
     await page.close();
+    expect(pageErrors).toEqual([]);
   });
 
   // DSK-11: ONE session split across the grid — the tree fills the LEFT
