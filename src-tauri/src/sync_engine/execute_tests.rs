@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::automation::model::{DeletePolicy, Side, SyncMode};
+use crate::sync_engine::env::{Copier, CopyReport, EngineCopier};
 use crate::sync_engine::errors::{ErrorClass, Reason};
 use crate::sync_engine::test_support::*;
 use std::fs;
@@ -939,46 +940,96 @@ fn three_unknown_failures_in_a_row_stop_the_run() {
 
 // ── Cancel (RQ-8.1) ──
 
+/// What the first chunk of the copy saw (shared with the test).
+#[derive(Default)]
+struct ChunkProbe {
+    /// Size of the first chunk reported (0 = none yet).
+    first: std::sync::atomic::AtomicU64,
+    /// The run's own watcher thread cancelled the copy's token after the user cancelled.
+    propagated: std::sync::atomic::AtomicBool,
+}
+
+/// Removes the chunk hook on every exit path, panics included.
+struct Unhook<'a>(&'a Path);
+
+impl Drop for Unhook<'_> {
+    fn drop(&mut self) {
+        crate::copy_engine::unhook_chunks(self.0);
+    }
+}
+
+/// The production copier. The FIRST chunk cancels the USER token only and then waits (bounded)
+/// until the run's own watcher thread (execute.rs) has forwarded it to the copy's token, so the
+/// production forwarding is exercised while the copy is held inside a file.
+struct CancelInFirstChunk {
+    user: CancelToken,
+    probe: Arc<ChunkProbe>,
+}
+
+impl Copier for CancelInFirstChunk {
+    fn copy(
+        &self,
+        sources: &[String],
+        dest_dir: &str,
+        overwrite: bool,
+        durable: bool,
+        cancel: &CancelToken,
+        guard: Option<&dyn crate::copy_engine::ReplaceGuard>,
+    ) -> CopyReport {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (user, own, probe) = (self.user.clone(), cancel.clone(), self.probe.clone());
+        let dir = Path::new(dest_dir);
+        crate::copy_engine::hook_chunks(dir, move |n| {
+            if probe.first.compare_exchange(0, n, SeqCst, SeqCst).is_err() {
+                return;
+            }
+            user.cancel();
+            let t0 = Instant::now();
+            while !own.is_cancelled() && t0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            probe.propagated.store(own.is_cancelled(), SeqCst);
+        });
+        let _unhook = Unhook(dir);
+        EngineCopier.copy(sources, dest_dir, overwrite, durable, cancel, guard)
+    }
+}
+
 // RQ-8.1: cancelling in the middle of a big copy leaves the file complete or absent, no staging
 // leftover, outcome Cancelled; the files after it are not started.
 #[test]
 fn cancel_mid_file_leaves_no_partial_file_and_no_staging_leftover() {
     let rig = Rig::new();
-    let big = rig.left.join("a-big.bin");
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&big).unwrap();
-        let chunk = vec![7u8; 1024 * 1024];
-        for _ in 0..192 {
-            f.write_all(&chunk).unwrap();
-        }
-    }
+    // Sixteen chunks are plenty to be "in the middle of a file" when the cancel comes from the
+    // copy's own first chunk (FER-566: this used to be 192 MB and a polling thread).
+    const BIG: usize = 16 * crate::copy_engine::CHUNK;
+    write(&rig.left.join("a-big.bin"), &vec![7u8; BIG]);
     write(&rig.left.join("z-after.txt"), b"after");
     let profile = rig.profile(one_way(), DeletePolicy::Permanent);
     let token = CancelToken::default();
-    // A watcher cancels as soon as the staging file of the big copy exists.
-    let right = rig.right.clone();
-    let t = token.clone();
-    let watcher = std::thread::spawn(move || {
-        for _ in 0..20_000 {
-            if let Ok(rd) = fs::read_dir(&right)
-                && rd
-                    .flatten()
-                    .any(|e| e.file_name().to_string_lossy().contains(".ferrum-stage-"))
-            {
-                t.cancel();
-                return true;
-            }
-            std::thread::sleep(Duration::from_micros(200));
-        }
-        false
+    // The first chunk of the real copy engine cancels the user token and waits for the run's
+    // watcher to forward it: the cancel always hits a file in progress, with no polling thread
+    // racing a fast disk.
+    let probe = Arc::new(ChunkProbe::default());
+    let mut env = test_env();
+    env.copier = Arc::new(CancelInFirstChunk {
+        user: token.clone(),
+        probe: probe.clone(),
     });
     let tk = token.clone();
-    let r = go_with(&rig, &profile, &test_env(), move |req| req.cancel = tk);
-    let saw_stage = watcher.join().unwrap();
+    let r = go_with(&rig, &profile, &env, move |req| req.cancel = tk);
+    let first = probe.first.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        saw_stage,
-        "the staging file was seen, so the cancel hit a file in progress"
+        first > 0,
+        "a chunk was written, so the copy was in progress"
+    );
+    assert!(
+        first < BIG as u64,
+        "the cancel came before the end of the file (first chunk {first} of {BIG})"
+    );
+    assert!(
+        probe.propagated.load(std::sync::atomic::Ordering::SeqCst),
+        "the run's watcher forwarded the user cancel to the copy in flight"
     );
     assert!(
         matches!(r.report.outcome, EngineOutcome::Cancelled { .. }),
@@ -993,7 +1044,7 @@ fn cancel_mid_file_leaves_no_partial_file_and_no_staging_leftover() {
     if rig.right.join("a-big.bin").exists() {
         assert_eq!(
             fs::metadata(rig.right.join("a-big.bin")).unwrap().len(),
-            192 * 1024 * 1024
+            BIG as u64
         );
     }
     assert!(!rig.right.join("z-after.txt").exists());

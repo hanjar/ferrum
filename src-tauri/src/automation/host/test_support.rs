@@ -534,8 +534,10 @@ pub fn default_script() -> Script {
 // ── The rig ──
 
 pub struct Rig {
-    pub fx: Fixture,
     pub world: Arc<World>,
+    /// Last: the world's scripts may hold a clone of the store, and the fixture's temp folder can
+    /// only be removed once every handle on the store's files is closed.
+    pub fx: Fixture,
 }
 
 impl Rig {
@@ -561,7 +563,7 @@ impl Rig {
             swapped: Mutex::new(Vec::new()),
             probe_delay_ms: std::sync::atomic::AtomicU64::new(0),
         });
-        Rig { fx, world }
+        Rig { world, fx }
     }
 
     /// Lease identity and clock of a process named `pid` (its own heartbeat on the fake clock).
@@ -871,6 +873,16 @@ impl Rig {
 
     pub fn host_rows(&self) -> Vec<HostRow> {
         self.fx.store.with_read(hosts::all).unwrap()
+    }
+}
+
+/// Wait (without asserting, so it is safe in a `Drop` during a panic) until the host has no worker
+/// in flight. A worker still running when a test ends would hold the store open while the temp
+/// folder is removed.
+pub fn drain(host: &Host<FakeDeps>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !host.is_idle() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 

@@ -87,13 +87,15 @@ pub fn tree(root: &Path) -> Vec<String> {
 /// A temp area with two roots, a baseline store, an automation store (for leases) and a
 /// versioning folder location.
 pub struct Rig {
-    pub dir: tempfile::TempDir,
     pub left: PathBuf,
     pub right: PathBuf,
     pub versions: PathBuf,
     pub baselines: SyncBaselineStore,
     pub auto: Arc<Store>,
     pub lease_env: LeaseEnv,
+    /// Declared LAST: fields drop in declaration order, and the folder can only be removed once the
+    /// baseline and automation stores have closed their SQLite files.
+    pub dir: tempfile::TempDir,
 }
 
 impl Rig {
@@ -504,5 +506,29 @@ impl crate::sync_engine::write_guard::WriteGuard for DenyList {
         _writable: bool,
     ) -> Option<crate::sync_engine::write_guard::RootViolation> {
         None
+    }
+}
+
+/// FER-566: the rig must leave nothing behind (a temp folder still held open by a store's SQLite
+/// files is not removed, silently), so its field order is pinned by a look at the disk.
+#[cfg(test)]
+mod leak_tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_rig_leaves_no_temp_folder() {
+        let rig = Rig::new();
+        let base = rig.base();
+        write(&rig.left.join("a.txt"), b"a");
+        assert!(
+            base.join("automation").exists(),
+            "the stores are really open"
+        );
+        drop(rig);
+        assert!(
+            !base.exists(),
+            "temp folder left behind: {}",
+            base.display()
+        );
     }
 }
