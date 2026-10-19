@@ -1,20 +1,32 @@
 <script lang="ts">
   /**
-   * Editor of a scheduled automation (AP-2, SC-1, SC-2.3, RT-1): name, sync profile, schedule,
-   * runtime, missed-run policy, advanced policies and the readiness block. Validation texts come
+   * Editor of an automation (AP-2, SC-1, SC-2.3, WA-1, WA-2, WA-8, RT-1): name, sync profile,
+   * trigger (a schedule, or watched folders with an idle delay and a countdown preview), runtime,
+   * missed-run policy, advanced policies and the readiness block. Validation texts come
    * from the model (the spec's exact strings) merged with the backend's answer; "Continue to
    * review" stays disabled while any error exists. Nothing here saves anything: saving is the
    * backend's approval flow on the review screen.
    */
   import ProfilePicker from '../sync/ProfilePicker.svelte';
+  import WatchPreview from './WatchPreview.svelte';
   import type { AutomationStore, EditorState } from '../../stores/automationStore.svelte';
   import {
+    IDLE_MAX,
+    IDLE_MIN,
     MAX_RETRIES,
+    MAX_WAIT_MIN_MAX,
+    MAX_WAIT_MIN_MIN,
     RUNTIME_APP_DESC,
+    RUNTIME_APP_DESC_WATCH,
     RUNTIME_BACKGROUND_DESC,
+    RUNTIME_BACKGROUND_DESC_WATCH,
     RUNTIME_BACKGROUND_UNAVAILABLE,
+    UNSUPPORTED_ROOT_NOTE,
+    WATCH_NOTIFICATION_NOTE,
     WEEKDAYS,
     addDays,
+    clampIdle,
+    clampMaxWaitMin,
     dstNote,
     errorMessage,
     nextRunLines,
@@ -50,6 +62,30 @@
     }
   });
   const nameErrors = $derived(editor.errors.filter((e) => e.field === 'name'));
+  const watch = $derived(form.kind === 'watch');
+  const chosen = $derived(store.profile(form.profileId));
+  const unsupported = $derived(store.unsupportedRoots(editor));
+  const maxWaitMin = $derived(Math.round(form.maxWaitSecs / 60));
+  const idleErrors = $derived(editor.errors.filter((e) => e.field === 'trigger.idleSecs'));
+  const waitErrors = $derived(editor.errors.filter((e) => e.field === 'trigger.maxWaitSecs'));
+
+  /** Stepper and text input of the idle delay: always an integer of 2 to 3600 (WA-1.3). */
+  function setIdle(value: number) {
+    store.changeForm({ idleSecs: clampIdle(value) });
+  }
+  function setMaxWait(minutes: number) {
+    store.changeForm({ maxWaitSecs: clampMaxWaitMin(minutes) * 60 });
+  }
+  /** A text box shows the clamped number, also when it equals the stored one. */
+  function commitNumber(
+    el: HTMLInputElement,
+    apply: (n: number) => void,
+    clamp: (n: number) => number,
+  ) {
+    const n = el.value.trim() === '' ? NaN : Number(el.value);
+    apply(n);
+    el.value = String(clamp(n));
+  }
 
   function toggleDay(day: number) {
     const days = form.days.includes(day) ? form.days.filter((d) => d !== day) : [...form.days, day];
@@ -98,97 +134,233 @@
   </section>
 
   <section>
-    <div class="lbl">Schedule</div>
-    <div class="seg" role="radiogroup" aria-label="Frequency">
-      {#each [['once', 'Once'], ['daily', 'Daily'], ['weekly', 'Weekly']] as [value, text] (value)}
+    <div class="lbl">Trigger</div>
+    <div class="seg" role="radiogroup" aria-label="Trigger">
+      {#each [['schedule', 'On a schedule'], ['watch', 'When files change']] as [value, text] (value)}
         <button
           type="button"
           role="radio"
-          aria-checked={form.freq === value}
-          class:on={form.freq === value}
-          onclick={() => store.changeForm({ freq: value as 'once' | 'daily' | 'weekly' })}
+          aria-checked={form.kind === value}
+          class:on={form.kind === value}
+          disabled={!!editor.id && form.kind !== value}
+          onclick={() => store.changeForm({ kind: value as 'schedule' | 'watch' })}
         >
           {text}
         </button>
       {/each}
     </div>
+  </section>
 
-    <div class="grid">
-      {#if form.freq === 'once'}
-        <label class="field">
-          <span class="lbl">Date</span>
+  {#if watch}
+    <section data-testid="watch-fields">
+      <div class="lbl">Watched folders</div>
+      <div class="checks-col">
+        {#each [{ side: 'left' as const, text: 'Watch the left folder', path: chosen?.left, on: form.watchLeft }, { side: 'right' as const, text: 'Watch the right folder', path: chosen?.right, on: form.watchRight }] as r (r.side)}
+          {@const off = unsupported[r.side]}
+          <label class="chk" class:off data-root={r.side}>
+            <input
+              type="checkbox"
+              checked={r.on}
+              disabled={off}
+              aria-label={r.text}
+              onchange={(e) =>
+                store.changeForm(
+                  r.side === 'left'
+                    ? { watchLeft: e.currentTarget.checked }
+                    : { watchRight: e.currentTarget.checked },
+                )}
+            />
+            <span class="chk-main">
+              <span>{r.text}</span>
+              {#if r.path}<span class="path" title={r.path}>{r.path}</span>{/if}
+              {#if off}<span class="reason" data-testid="unsupported-{r.side}"
+                  >{UNSUPPORTED_ROOT_NOTE}</span
+                >{/if}
+            </span>
+          </label>
+        {/each}
+      </div>
+
+      <div class="lbl">Run when</div>
+      <div class="checks-col" role="group" aria-label="Run when">
+        <label class="chk">
           <input
-            type="date"
-            value={form.date}
-            min={today}
-            max={maxDate}
-            aria-label="Date"
-            oninput={(e) => store.changeForm({ date: e.currentTarget.value })}
+            type="checkbox"
+            checked={form.onChanges}
+            aria-label="File & folder changes"
+            onchange={(e) => store.changeForm({ onChanges: e.currentTarget.checked })}
           />
+          <span class="chk-main">File &amp; folder changes</span>
         </label>
-      {/if}
-      <label class="field">
-        <span class="lbl">Time (24 hours)</span>
-        <input
-          type="time"
-          value={form.time}
-          aria-label="Time"
-          oninput={(e) => store.changeForm({ time: e.currentTarget.value })}
-        />
-      </label>
-      <label class="field">
-        <span class="lbl">Time zone</span>
-        <input
-          type="text"
-          value={form.tz}
-          list="automation-zones"
-          aria-label="Time zone"
-          autocomplete="off"
-          spellcheck="false"
-          oninput={(e) => store.changeForm({ tz: e.currentTarget.value.trim() })}
-        />
-        <datalist id="automation-zones">
-          {#each zones as z (z)}<option value={z}></option>{/each}
-        </datalist>
-      </label>
-    </div>
+        <label class="chk">
+          <input
+            type="checkbox"
+            checked={form.onAvailable}
+            aria-label="Location becomes available"
+            onchange={(e) => store.changeForm({ onAvailable: e.currentTarget.checked })}
+          />
+          <span class="chk-main">Location becomes available</span>
+        </label>
+      </div>
 
-    {#if form.freq === 'weekly'}
-      <div class="days" role="group" aria-label="Weekdays">
-        {#each WEEKDAYS as d (d.value)}
+      <div class="grid">
+        <div class="field" role="group" aria-label="Idle delay">
+          <span class="lbl">Idle delay (seconds)</span>
+          <span class="stepper">
+            <button
+              type="button"
+              aria-label="Shorter idle delay"
+              disabled={form.idleSecs <= IDLE_MIN}
+              onclick={() => setIdle(form.idleSecs - 1)}>−</button
+            >
+            <input
+              type="text"
+              inputmode="numeric"
+              class="num"
+              value={String(form.idleSecs)}
+              aria-label="Idle delay"
+              aria-invalid={idleErrors.length > 0}
+              autocomplete="off"
+              onchange={(e) => commitNumber(e.currentTarget, setIdle, clampIdle)}
+            />
+            <button
+              type="button"
+              aria-label="Longer idle delay"
+              disabled={form.idleSecs >= IDLE_MAX}
+              onclick={() => setIdle(form.idleSecs + 1)}>+</button
+            >
+          </span>
+          <span class="hint">{IDLE_MIN} to {IDLE_MAX} s of quiet before a run starts</span>
+        </div>
+        <div class="field" role="group" aria-label="Longest wait">
+          <span class="lbl">Longest wait (minutes)</span>
+          <span class="stepper">
+            <button
+              type="button"
+              aria-label="Shorter longest wait"
+              disabled={maxWaitMin <= MAX_WAIT_MIN_MIN}
+              onclick={() => setMaxWait(maxWaitMin - 1)}>−</button
+            >
+            <input
+              type="text"
+              inputmode="numeric"
+              class="num"
+              value={String(maxWaitMin)}
+              aria-label="Longest wait"
+              aria-invalid={waitErrors.length > 0}
+              autocomplete="off"
+              onchange={(e) => commitNumber(e.currentTarget, setMaxWait, clampMaxWaitMin)}
+            />
+            <button
+              type="button"
+              aria-label="Longer longest wait"
+              disabled={maxWaitMin >= MAX_WAIT_MIN_MAX}
+              onclick={() => setMaxWait(maxWaitMin + 1)}>+</button
+            >
+          </span>
+          <span class="hint">One run is queued after this even if changes keep arriving</span>
+        </div>
+      </div>
+
+      <p class="hint" data-testid="watch-note">{WATCH_NOTIFICATION_NOTE}</p>
+      <WatchPreview idleSecs={form.idleSecs} />
+    </section>
+  {/if}
+
+  {#if !watch}
+    <section>
+      <div class="lbl">Schedule</div>
+      <div class="seg" role="radiogroup" aria-label="Frequency">
+        {#each [['once', 'Once'], ['daily', 'Daily'], ['weekly', 'Weekly']] as [value, text] (value)}
           <button
             type="button"
-            class:on={form.days.includes(d.value)}
-            aria-pressed={form.days.includes(d.value)}
-            aria-label={d.long}
-            onclick={() => toggleDay(d.value)}
+            role="radio"
+            aria-checked={form.freq === value}
+            class:on={form.freq === value}
+            onclick={() => store.changeForm({ freq: value as 'once' | 'daily' | 'weekly' })}
           >
-            {d.short}
+            {text}
           </button>
         {/each}
       </div>
-    {/if}
 
-    <div class="next" aria-label="Next runs" data-testid="next-runs">
-      <div class="lbl">Next runs</div>
-      {#if lines.length > 0}
-        <ol>
-          {#each lines as l, i (i)}
-            <li>
-              <span>{l.label}</span>
-              <span class="rel">{l.relative}</span>
-              {#if l.equivalent}<span class="eq">{l.equivalent}</span>{/if}
-            </li>
+      <div class="grid">
+        {#if form.freq === 'once'}
+          <label class="field">
+            <span class="lbl">Date</span>
+            <input
+              type="date"
+              value={form.date}
+              min={today}
+              max={maxDate}
+              aria-label="Date"
+              oninput={(e) => store.changeForm({ date: e.currentTarget.value })}
+            />
+          </label>
+        {/if}
+        <label class="field">
+          <span class="lbl">Time (24 hours)</span>
+          <input
+            type="time"
+            value={form.time}
+            aria-label="Time"
+            oninput={(e) => store.changeForm({ time: e.currentTarget.value })}
+          />
+        </label>
+        <label class="field">
+          <span class="lbl">Time zone</span>
+          <input
+            type="text"
+            value={form.tz}
+            list="automation-zones"
+            aria-label="Time zone"
+            autocomplete="off"
+            spellcheck="false"
+            oninput={(e) => store.changeForm({ tz: e.currentTarget.value.trim() })}
+          />
+          <datalist id="automation-zones">
+            {#each zones as z (z)}<option value={z}></option>{/each}
+          </datalist>
+        </label>
+      </div>
+
+      {#if form.freq === 'weekly'}
+        <div class="days" role="group" aria-label="Weekdays">
+          {#each WEEKDAYS as d (d.value)}
+            <button
+              type="button"
+              class:on={form.days.includes(d.value)}
+              aria-pressed={form.days.includes(d.value)}
+              aria-label={d.long}
+              onclick={() => toggleDay(d.value)}
+            >
+              {d.short}
+            </button>
           {/each}
-        </ol>
-      {:else}
-        <p class="hint">Upcoming runs are listed here once the schedule is valid and checked.</p>
+        </div>
       {/if}
-    </div>
-    {#if dstNote(form.tz)}
-      <p class="hint" data-testid="dst-note">{dstNote(form.tz)}</p>
-    {/if}
-  </section>
+
+      <div class="next" aria-label="Next runs" data-testid="next-runs">
+        <div class="lbl">Next runs</div>
+        {#if lines.length > 0}
+          <ol>
+            {#each lines as l, i (i)}
+              <li>
+                <span>{l.label}</span>
+                <span class="rel">{l.relative}</span>
+                {#if l.equivalent}<span class="eq">{l.equivalent}</span>{/if}
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <p class="hint">Upcoming runs are listed here once the schedule is valid and checked.</p>
+        {/if}
+      </div>
+      {#if dstNote(form.tz)}
+        <p class="hint" data-testid="dst-note">{dstNote(form.tz)}</p>
+      {/if}
+    </section>
+  {/if}
 
   <section>
     <div class="lbl">Runtime</div>
@@ -205,7 +377,7 @@
           ><span class="name">While Ferrum is running</span><span class="chip ok">Available</span
           ></span
         >
-        <span class="desc">{RUNTIME_APP_DESC}</span>
+        <span class="desc">{watch ? RUNTIME_APP_DESC_WATCH : RUNTIME_APP_DESC}</span>
       </button>
       <button
         type="button"
@@ -221,39 +393,47 @@
           ><span class="name">In the background</span><span class="chip warn">Unavailable</span
           ></span
         >
-        <span class="desc">{RUNTIME_BACKGROUND_DESC}</span>
+        <span class="desc">{watch ? RUNTIME_BACKGROUND_DESC_WATCH : RUNTIME_BACKGROUND_DESC}</span>
         <span class="reason">{RUNTIME_BACKGROUND_UNAVAILABLE}</span>
       </button>
     </div>
   </section>
 
-  <section>
-    <div class="lbl">If a run is missed</div>
-    <div class="radios" role="radiogroup" aria-label="If a run is missed">
-      <label>
-        <input
-          type="radio"
-          name="missed"
-          checked={form.missed === 'skip'}
-          onchange={() => store.changeForm({ missed: 'skip' })}
-        />
-        Skip it (default)
-      </label>
-      <label>
-        <input
-          type="radio"
-          name="missed"
-          checked={form.missed === 'runOnce'}
-          onchange={() => store.changeForm({ missed: 'runOnce' })}
-        />
-        Run once when available again
-      </label>
-    </div>
-  </section>
+  {#if !watch}
+    <section>
+      <div class="lbl">If a run is missed</div>
+      <div class="radios" role="radiogroup" aria-label="If a run is missed">
+        <label>
+          <input
+            type="radio"
+            name="missed"
+            checked={form.missed === 'skip'}
+            onchange={() => store.changeForm({ missed: 'skip' })}
+          />
+          Skip it (default)
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="missed"
+            checked={form.missed === 'runOnce'}
+            onchange={() => store.changeForm({ missed: 'runOnce' })}
+          />
+          Run once when available again
+        </label>
+      </div>
+    </section>
+  {/if}
 
   <details class="adv">
     <summary>Advanced policies</summary>
     <ul class="policies">
+      {#if watch}
+        <li>
+          Bursts: every new change restarts the idle delay, so one run covers the whole burst.
+        </li>
+        <li>Changes written by the automation's own runs are ignored.</li>
+      {/if}
       <li>Overlapping runs: a run waits while another uses the same folders.</li>
       <li>Conflicts: held for review, never overwritten.</li>
       <li>Offline location: the run waits until the folder is available.</li>
@@ -470,6 +650,59 @@
   .chip.warn {
     background: var(--amberSoft);
     color: var(--amberInk);
+  }
+  .checks-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .chk {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    font-size: 12.5px;
+  }
+  .chk.off {
+    opacity: 0.75;
+  }
+  .chk-main {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .chk .path {
+    font-size: 11.5px;
+    color: var(--text3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 420px;
+  }
+  .chk .reason {
+    font-size: 11.5px;
+    color: var(--amberInk);
+  }
+  .stepper {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .stepper button {
+    width: 24px;
+    height: 26px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--hover2);
+    color: var(--text2);
+    font-size: 13px;
+    cursor: default;
+  }
+  .stepper button:disabled {
+    opacity: 0.45;
+  }
+  input.num {
+    width: 64px;
+    text-align: right;
   }
   .radios {
     display: flex;

@@ -1,0 +1,128 @@
+{
+  "automation": {
+    "id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+    "name": "Photo watch",
+    "kind": "watch",
+    "profileId": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    "profileName": "Photos to NAS",
+    "profileRevision": 3,
+    "approvedRevision": 3,
+    "enabled": true,
+    "configRev": 2,
+    "status": {
+      "kind": "quiet",
+      "label": "Waiting for quiet · 7 s",
+      "sub": "Runs after 10 s without changes"
+    },
+    "trigger": "Watches the left folder · runs after 10 s without changes · runs when a folder comes back",
+    "runtime": "app",
+    "runtimeNote": "Only while open",
+    "canRunNow": true,
+    "showReview": false,
+    "lastRun": {
+      "runId": 1041,
+      "startedMs": 1759990000000,
+      "endedMs": 1759990020000,
+      "result": {
+        "kind": "completed",
+        "label": "Completed",
+        "sub": "6 of 6"
+      }
+    }
+  },
+  "policy": {
+    "trigger": {
+      "kind": "watch",
+      "watchLeft": true,
+      "watchRight": false,
+      "onChanges": true,
+      "onAvailable": true,
+      "idleSecs": 10,
+      "maxWaitSecs": 900
+    },
+    "runtime": "app",
+    "retries": 2,
+    "conditions": {
+      "skipOnBattery": false,
+      "skipOnMetered": false
+    }
+  },
+  "profile": {
+    "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    "name": "Photos to NAS",
+    "revision": 3,
+    "left": "D:\\Photos",
+    "right": "\\nas\\photos"
+  },
+  "pipeline": {
+    "steps": [
+      "Watching",
+      "Changes detected",
+      "Waiting for quiet",
+      "Queued",
+      "Running"
+    ],
+    "current": 2
+  },
+  "pendingRerun": false,
+  "waiting": [],
+  "recentRuns": [
+    {
+      "id": 1041,
+      "automationId": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+      "automationName": "Photo watch",
+      "profileId": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      "profileRevision": 3,
+      "host": "app",
+      "triggerKind": "watch",
+      "triggerText": "Changes detected",
+      "mergedCount": 2,
+      "startedMs": 1759990000000,
+      "endedMs": 1759990020000,
+      "phase": "done",
+      "outcome": "completed",
+      "opsTotal": 6,
+      "counts": {
+        "ok": 6,
+        "failed": 0,
+        "notStarted": 0,
+        "held": 0,
+        "skippedChanged": 0
+      },
+      "result": {
+        "kind": "completed",
+        "label": "Completed",
+        "sub": "6 of 6"
+      },
+      "needsAttention": false
+    }
+  ],
+  "events": {
+    "events": [
+      {
+        "id": 31,
+        "atMs": 1760000200000,
+        "kind": "info",
+        "text": "Changes detected — waiting for 10 s without changes"
+      },
+      {
+        "id": 30,
+        "atMs": 1760000190000,
+        "kind": "mute",
+        "text": "Ignored a change made by Ferrum itself"
+      },
+      {
+        "id": 29,
+        "atMs": 1760000100000,
+        "kind": "ok",
+        "text": "Run #1041 completed · 6 of 6",
+        "runId": 1041
+      }
+    ]
+  },
+  "quiet": {
+    "untilMs": 1760000207000,
+    "remainingSecs": 7,
+    "idleSecs": 10
+  }
+}

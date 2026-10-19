@@ -14,11 +14,13 @@
     DETAIL_EVENTS,
     DETAIL_RECENT_RUNS,
     EVENT_GLYPH,
+    QUIET_SUBLINE,
     formatWhen,
     isStopping,
     phaseText,
     progressCounts,
     progressFraction,
+    quietLabel,
   } from './automationModel';
 
   let { store, detail }: { store: AutomationStore; detail: DetailState } = $props();
@@ -124,16 +126,7 @@
             Stop current run
           </button>
         {/if}
-        <button
-          type="button"
-          disabled={row.kind !== 'schedule'}
-          title={row.kind !== 'schedule'
-            ? 'Editing watch-folder automations is not available yet'
-            : undefined}
-          onclick={() => void store.openEdit(row.id)}
-        >
-          Edit
-        </button>
+        <button type="button" onclick={() => void store.openEdit(row.id)}>Edit</button>
         {#if row.showReview}
           <button type="button" class="primary" onclick={() => void store.openReview(row)}>
             Review changes
@@ -176,7 +169,10 @@
           >
             <span style="width:{quietFraction * 100}%"></span>
           </div>
-          <span class="muted">Runs in {quietLeft} s if nothing changes</span>
+          <span class="quiet-text">
+            <span data-testid="quiet-label">{quietLabel(quietLeft)}</span>
+            <span class="muted" data-testid="quiet-sub">{QUIET_SUBLINE}</span>
+          </span>
         </div>
       {/if}
       {#if data.pendingRerun}

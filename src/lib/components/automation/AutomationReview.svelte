@@ -13,6 +13,8 @@
     missedText,
     nextRunLines,
     scheduleSummary,
+    watchPolicyLines,
+    watchSummary,
   } from './automationModel';
 
   let {
@@ -105,7 +107,7 @@
         ? review.row.trigger
         : trigger.kind === 'schedule'
           ? scheduleSummary(trigger)
-          : ''}
+          : watchSummary(trigger)}
     </div>
     {#if nextLines.length > 0}
       <ol class="next">
@@ -139,6 +141,10 @@
       {#if trigger.kind === 'schedule'}
         <li>{missedText(trigger.missed)}</li>
         {#if dstNote(trigger.tz)}<li>{dstNote(trigger.tz)}</li>{/if}
+      {:else}
+        {#each watchPolicyLines(trigger) as line, i (i)}
+          <li data-testid="watch-policy">{line}</li>
+        {/each}
       {/if}
       <li>Overlapping runs: a run waits while another uses the same folders.</li>
       <li>Conflicts: held for review, never overwritten.</li>

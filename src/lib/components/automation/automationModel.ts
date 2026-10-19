@@ -16,6 +16,7 @@ import type {
   AutomationPolicy,
   NextRun,
   ScheduleTrigger,
+  WatchTrigger,
 } from '../../ipc/automation';
 import type { FieldError } from '../../ipc/syncProfiles';
 
@@ -34,7 +35,27 @@ export const WEEKDAYS: { value: number; short: string; long: string }[] = [
   { value: 0, short: 'Sun', long: 'Sunday' },
 ];
 
+/** WA-1.3: idle delay bounds in seconds. */
+export const IDLE_MIN = 2;
+export const IDLE_MAX = 3600;
+export const IDLE_DEFAULT = 10;
+/** WA-1.4: longest wait for a folder that never goes quiet, in minutes (the contract carries seconds). */
+export const MAX_WAIT_MIN_MIN = 1;
+export const MAX_WAIT_MIN_MAX = 1440;
+export const MAX_WAIT_DEFAULT_SECS = 900;
+
+/** WA-2.3, exact text of a root that cannot be watched. */
+export const UNSUPPORTED_ROOT_NOTE = "No change notifications on this provider — can't be watched";
+/** WA-2.4, shown in the editor. */
+export const WATCH_NOTIFICATION_NOTE =
+  'File notifications only trigger a fresh comparison by the sync engine; they are never the list of what gets copied.';
+
+/** Which kind of trigger the form edits. */
+export type TriggerKind = 'schedule' | 'watch';
+
+/** The editor's form: the schedule fields and the watch fields live side by side; `kind` picks one. */
 export interface ScheduleForm {
+  kind: TriggerKind;
   name: string;
   profileId: string;
   freq: 'once' | 'daily' | 'weekly';
@@ -50,6 +71,42 @@ export interface ScheduleForm {
   runtime: 'app' | 'background';
   /** Carried through unchanged: the editor has no controls for them (optional OP-1). */
   conditions: AutomationConditions;
+  watchLeft: boolean;
+  watchRight: boolean;
+  onChanges: boolean;
+  onAvailable: boolean;
+  /** Seconds, 2..3600 (WA-1.3). */
+  idleSecs: number;
+  /** Seconds, 60..86400; the editor edits it in minutes. */
+  maxWaitSecs: number;
+}
+
+/** The same form under its broader name. */
+export type AutomationForm = ScheduleForm;
+
+/** Clamp to an integer in `[min, max]`; anything that is not a number becomes `fallback`. */
+export function clampInt(value: number, min: number, max: number, fallback = min): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/** WA-1.3: the idle delay, an integer of 2 to 3600 seconds. */
+export const clampIdle = (value: number): number =>
+  clampInt(value, IDLE_MIN, IDLE_MAX, IDLE_DEFAULT);
+
+/** WA-1.4: whole minutes of the longest wait, 1 to 1440. */
+export const clampMaxWaitMin = (value: number): number =>
+  clampInt(value, MAX_WAIT_MIN_MIN, MAX_WAIT_MIN_MAX, MAX_WAIT_DEFAULT_SECS / 60);
+
+/**
+ * True for a path on a network share (UNC), which has no change notifications (WA-2.3). A mapped
+ * drive letter cannot be told apart here; the backend refuses it with `watch_unsupported_root`.
+ */
+export function isNetworkPath(path: string): boolean {
+  const p = path.replace(/\//g, '\\');
+  if (/^\\\\[?.]\\UNC\\/i.test(p)) return true;
+  if (/^\\\\[?.]\\/.test(p)) return false;
+  return p.startsWith('\\\\');
 }
 
 export function systemZone(): string {
@@ -127,6 +184,7 @@ export function dstNote(tz: string): string {
 export function newScheduleForm(profileId = '', now: Date | number = new Date()): ScheduleForm {
   const tz = systemZone();
   return {
+    kind: 'schedule',
     name: '',
     profileId,
     freq: 'daily',
@@ -138,33 +196,79 @@ export function newScheduleForm(profileId = '', now: Date | number = new Date())
     retries: 2,
     runtime: 'app',
     conditions: { skipOnBattery: false, skipOnMetered: false },
+    watchLeft: true,
+    watchRight: false,
+    onChanges: true,
+    onAvailable: true,
+    idleSecs: IDLE_DEFAULT,
+    maxWaitSecs: MAX_WAIT_DEFAULT_SECS,
   };
 }
 
-/** The form of a stored scheduled automation; `null` for a watch automation (P2.2 edits those). */
+/** The form of a stored automation (schedule or watch). */
 export function formFromDraft(
   draft: AutomationDraft,
   now: Date | number = new Date(),
 ): ScheduleForm | null {
   const t = draft.policy.trigger;
-  if (t.kind !== 'schedule') return null;
-  return {
+  const base = newScheduleForm(draft.profileId, now);
+  const common = {
     name: draft.name,
     profileId: draft.profileId,
+    retries: draft.policy.retries,
+    runtime: draft.policy.runtime,
+    conditions: { ...draft.policy.conditions },
+  };
+  if (t.kind === 'watch') {
+    return {
+      ...base,
+      ...common,
+      kind: 'watch',
+      watchLeft: t.watchLeft,
+      watchRight: t.watchRight,
+      onChanges: t.onChanges,
+      onAvailable: t.onAvailable,
+      idleSecs: t.idleSecs,
+      maxWaitSecs: t.maxWaitSecs,
+    };
+  }
+  if (t.kind !== 'schedule') return null;
+  return {
+    ...base,
+    ...common,
+    kind: 'schedule',
     freq: t.freq.kind,
     date: t.freq.kind === 'once' ? t.freq.date : zoneClock(t.tz, new Date(now)).date,
     days: t.freq.kind === 'weekly' ? [...t.freq.days] : [],
     time: t.time,
     tz: t.tz,
     missed: t.missed,
-    retries: draft.policy.retries,
-    runtime: draft.policy.runtime,
-    conditions: { ...draft.policy.conditions },
   };
 }
 
 /** The draft the backend validates, tests and (after a passed test) approves. */
 export function toDraft(form: ScheduleForm): AutomationDraft {
+  if (form.kind === 'watch') {
+    const trigger: WatchTrigger = {
+      kind: 'watch',
+      watchLeft: form.watchLeft,
+      watchRight: form.watchRight,
+      onChanges: form.onChanges,
+      onAvailable: form.onAvailable,
+      idleSecs: form.idleSecs,
+      maxWaitSecs: form.maxWaitSecs,
+    };
+    return {
+      name: form.name.trim(),
+      profileId: form.profileId,
+      policy: {
+        trigger,
+        runtime: form.runtime,
+        retries: form.retries,
+        conditions: { ...form.conditions },
+      },
+    };
+  }
   let freq: AutomationFreq;
   if (form.freq === 'once') freq = { kind: 'once', date: form.date };
   else if (form.freq === 'weekly')
@@ -192,27 +296,52 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * Checks the editor can do without the backend. The backend validates again (and owns what needs
  * the time-zone database); the two lists are merged by `mergeErrors`.
  */
-export function localErrors(form: ScheduleForm, now: Date | number = new Date()): FieldError[] {
+export function localErrors(
+  form: ScheduleForm,
+  now: Date | number = new Date(),
+  /** Roots known not to be watchable (UNC, or refused by the backend). */
+  unsupported: { left: boolean; right: boolean } = { left: false, right: false },
+): FieldError[] {
   const errors: FieldError[] = [];
   const name = form.name.trim();
   if (!name) errors.push({ field: 'name', code: 'name_required' });
   else if ([...name].length > NAME_MAX) errors.push({ field: 'name', code: 'name_too_long' });
   if (!form.profileId) errors.push({ field: 'profileId', code: 'profile_required' });
-  const timeOk = TIME_RE.test(form.time);
-  if (!timeOk) errors.push({ field: 'trigger.time', code: 'time_invalid' });
-  const zoneOk = isValidZone(form.tz);
-  if (!zoneOk) errors.push({ field: 'trigger.tz', code: 'tz_invalid' });
-  if (form.freq === 'weekly' && form.days.length === 0)
-    errors.push({ field: 'trigger.days', code: 'days_required' });
-  if (form.freq === 'once') {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.date)) {
-      errors.push({ field: 'trigger.date', code: 'date_invalid' });
-    } else if (zoneOk) {
-      const clock = zoneClock(form.tz, new Date(now));
-      if (form.date < clock.date || form.date > addDays(clock.date, ONCE_MAX_DAYS_AHEAD)) {
-        errors.push({ field: 'trigger.date', code: 'date_out_of_range' });
-      } else if (timeOk && form.date === clock.date && form.time <= clock.time) {
-        errors.push({ field: 'trigger.time', code: 'time_passed' });
+  if (form.kind === 'watch') {
+    const left = form.watchLeft && !unsupported.left;
+    const right = form.watchRight && !unsupported.right;
+    if (form.watchLeft && unsupported.left)
+      errors.push({ field: 'trigger.watchLeft', code: 'watch_unsupported_root' });
+    if (form.watchRight && unsupported.right)
+      errors.push({ field: 'trigger.watchRight', code: 'watch_unsupported_root' });
+    if (!left && !right) errors.push({ field: 'trigger.watch', code: 'watch_root_required' });
+    if (!form.onChanges && !form.onAvailable)
+      errors.push({ field: 'trigger.on', code: 'watch_event_required' });
+    if (!Number.isInteger(form.idleSecs) || form.idleSecs < IDLE_MIN || form.idleSecs > IDLE_MAX)
+      errors.push({ field: 'trigger.idleSecs', code: 'idle_out_of_range' });
+    if (
+      !Number.isInteger(form.maxWaitSecs) ||
+      form.maxWaitSecs < MAX_WAIT_MIN_MIN * 60 ||
+      form.maxWaitSecs > MAX_WAIT_MIN_MAX * 60
+    )
+      errors.push({ field: 'trigger.maxWaitSecs', code: 'max_wait_out_of_range' });
+  } else {
+    const timeOk = TIME_RE.test(form.time);
+    if (!timeOk) errors.push({ field: 'trigger.time', code: 'time_invalid' });
+    const zoneOk = isValidZone(form.tz);
+    if (!zoneOk) errors.push({ field: 'trigger.tz', code: 'tz_invalid' });
+    if (form.freq === 'weekly' && form.days.length === 0)
+      errors.push({ field: 'trigger.days', code: 'days_required' });
+    if (form.freq === 'once') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(form.date)) {
+        errors.push({ field: 'trigger.date', code: 'date_invalid' });
+      } else if (zoneOk) {
+        const clock = zoneClock(form.tz, new Date(now));
+        if (form.date < clock.date || form.date > addDays(clock.date, ONCE_MAX_DAYS_AHEAD)) {
+          errors.push({ field: 'trigger.date', code: 'date_out_of_range' });
+        } else if (timeOk && form.date === clock.date && form.time <= clock.time) {
+          errors.push({ field: 'trigger.time', code: 'time_passed' });
+        }
       }
     }
   }
@@ -296,6 +425,68 @@ export function scheduleSummary(t: ScheduleTrigger): string {
     }
   }
 }
+
+const watchSides = (t: Pick<WatchTrigger, 'watchLeft' | 'watchRight'>): string =>
+  t.watchLeft && t.watchRight
+    ? 'both folders'
+    : t.watchLeft
+      ? 'the left folder'
+      : t.watchRight
+        ? 'the right folder'
+        : 'no folder';
+
+/** "Max wait" as minutes, hours or both ("15 min", "2 h", "1 h 30 min"). */
+export function maxWaitText(secs: number): string {
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+/** Same words as the row's trigger text of the backend (`read.rs`), for the review screen. */
+export function watchSummary(t: WatchTrigger): string {
+  let text = `Watches ${watchSides(t)}`;
+  if (t.onChanges) text += ` \u00b7 runs after ${t.idleSecs} s without changes`;
+  if (t.onAvailable) text += ' \u00b7 runs when a folder comes back';
+  return text;
+}
+
+/** AP-3 Policies lines of a watch trigger: burst handling and self-generated changes. */
+export function watchPolicyLines(t: WatchTrigger): string[] {
+  const lines: string[] = [];
+  if (t.onChanges) {
+    lines.push(
+      `Bursts of changes: every new change restarts the ${t.idleSecs} s countdown, so a burst is one run. If changes never stop, one run is queued after ${maxWaitText(t.maxWaitSecs)} at the latest.`,
+    );
+    lines.push('Changes on excluded paths are ignored and do not start the countdown.');
+  }
+  lines.push(
+    "Changes written by the automation's own runs are ignored; a fresh comparison after each run decides whether another is needed.",
+  );
+  lines.push(
+    'Changes during a run are merged into one pending rerun that compares the folders again before it runs.',
+  );
+  if (t.onAvailable) {
+    lines.push('When a watched folder comes back: compare first, then run only if needed.');
+  }
+  lines.push('Lost change notifications: a full comparison runs as soon as it is safe.');
+  return lines;
+}
+
+/** "Waiting for quiet · 7 s" (WA-1.2). */
+export const quietLabel = (secs: number): string => `Waiting for quiet \u00b7 ${secs} s`;
+/** WA-1.2 sub-line of the countdown. */
+export const QUIET_SUBLINE = 'Changes detected \u2014 new changes reset the countdown';
+
+// ── Countdown preview (WA-8) ──
+
+export const previewHint = (idleSecs: number): string =>
+  `Any new change resets the countdown to ${idleSecs} s`;
+
+/** The text a finished preview ends with; `changes` is how many changes were simulated. */
+export const previewDone = (changes: number): string =>
+  `Preview only \u2014 ${changes} ${changes === 1 ? 'change' : 'changes'} batched into one run`;
 
 export function missedText(missed: 'skip' | 'runOnce'): string {
   return missed === 'skip'
@@ -426,6 +617,10 @@ export const RUNTIME_APP_DESC =
   "Runs at the scheduled time if Ferrum is open. Won't run while Ferrum is closed, the PC sleeps or you're signed out.";
 export const RUNTIME_BACKGROUND_DESC =
   "Runs even when Ferrum is closed, as long as you're signed in to Windows. Doesn't wake a sleeping PC or run while you're signed out.";
+export const RUNTIME_APP_DESC_WATCH =
+  "Watches while Ferrum is open. Changes made while it's closed are caught by a fresh comparison on next start.";
+export const RUNTIME_BACKGROUND_DESC_WATCH =
+  "Keeps watching while Ferrum is closed, as long as you're signed in to Windows. Doesn't wake a sleeping PC.";
 export const RUNTIME_BACKGROUND_UNAVAILABLE =
   "The background runner isn't included in this Ferrum build.";
 

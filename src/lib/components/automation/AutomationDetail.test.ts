@@ -96,6 +96,49 @@ describe('AutomationDetail (MH-5)', () => {
     expect(view.getByRole('progressbar', { name: 'Waiting for quiet' })).toBeTruthy();
   });
 
+  it('a watch waiting for quiet: pipeline step 3, remaining seconds and the reset sub-line (WA-1.2, MH-5)', async () => {
+    const d = fixture<AutomationDetail>('automation-get-quiet.json');
+    // The countdown ticks from the backend's deadline: put it 7 s ahead of now.
+    d.quiet = { ...d.quiet!, untilMs: Date.now() + 7000 };
+    const { store } = setup({}, d);
+    const view = within(await openDetail(store));
+    expect(view.getAllByText('Waiting for quiet · 7 s').length).toBeGreaterThan(0);
+    const steps = [...view.getByTestId('pipeline').querySelectorAll('li')];
+    expect(steps.map((li) => li.getAttribute('aria-current'))).toEqual([
+      null,
+      null,
+      'step',
+      null,
+      null,
+    ]);
+    expect(steps[0].classList.contains('done')).toBe(true);
+    expect(steps[3].classList.contains('done')).toBe(false);
+    const label = view.getByTestId('quiet-label').textContent!;
+    expect(label).toMatch(/^Waiting for quiet · [67] s$/);
+    expect(view.getByTestId('quiet-sub').textContent).toBe(
+      'Changes detected — new changes reset the countdown',
+    );
+    const bar = view.getByRole('progressbar', { name: 'Waiting for quiet' });
+    expect(bar.getAttribute('aria-valuemax')).toBe('10');
+    // The watch events of the backend are listed as written.
+    expect(view.getByTestId('events').textContent).toContain(
+      'Changes detected — waiting for 10 s without changes',
+    );
+    expect(view.queryByTestId('current-run')).toBeNull();
+  });
+
+  it('Edit is available for a watch automation and opens its editor', async () => {
+    const { store } = setup();
+    const view = within(await openDetail(store));
+    const edit = view.getByRole('button', { name: 'Edit' }) as HTMLButtonElement;
+    expect(edit.disabled).toBe(false);
+    await fireEvent.click(edit);
+    await screen.findByTestId('watch-fields');
+    expect(
+      (screen.getByRole('checkbox', { name: 'Watch the left folder' }) as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
   it('says Stopping after the current file when the backend reports it, and disables Stop', async () => {
     const d = photo();
     d.automation.status = {

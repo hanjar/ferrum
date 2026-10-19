@@ -648,6 +648,53 @@ fn a_watch_that_keeps_dying_at_once_is_not_rebuilt_in_a_loop() {
     assert_eq!(w.live(), 0);
 }
 
+/// FER-565 follow-up: a watch that stays alive for more than the quick-death window starts the
+/// count again, even when no death follows it. Without that, two quick deaths far apart in time
+/// (a watch made again after the folder came back, dying at once) would add up to Unsupported.
+#[test]
+fn a_watch_that_lived_long_enough_resets_the_quick_death_count() {
+    let w = setup();
+    w.started();
+    w.advance(20 * SEC);
+    // A first quick death: replaced at once (count 1).
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    assert_eq!(w.live(), 1, "the first quick death is replaced");
+    // The new watch lives well past the window; a pass sees it alive and resets the count.
+    w.advance(15 * SEC);
+    w.host.tick();
+    for _ in 0..12 {
+        if w.state() == TriggerState::Watching {
+            break;
+        }
+        w.advance(5 * SEC);
+        tick(&w.host);
+    }
+    assert_eq!(w.live(), 1);
+    assert_eq!(
+        w.state(),
+        TriggerState::Watching,
+        "the comparison after the death is done"
+    );
+    // The watch dies without a word much later; the 30 s look makes it again.
+    let asked = w.rig.world.factory.asked().len();
+    w.rig.world.factory.die(&w.left, false);
+    w.advance(31 * SEC);
+    w.host.tick();
+    assert_eq!(w.rig.world.factory.asked().len(), asked + 1, "made again");
+    assert_eq!(w.live(), 1);
+    // And that one dies at once.
+    w.advance(SEC);
+    w.rig.world.factory.die(&w.left, true);
+    w.host.tick();
+    // Counted as the FIRST quick death again: replaced at once, not held back by a backoff.
+    assert_eq!(w.live(), 1, "the count started again");
+    assert_ne!(w.state(), TriggerState::Unsupported);
+}
+
 // ── WA-5: offline roots ──
 
 #[test]

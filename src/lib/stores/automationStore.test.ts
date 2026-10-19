@@ -246,12 +246,24 @@ describe('AutomationStore', () => {
     store.dispose();
   });
 
-  it('refuses to edit a watch automation here', async () => {
+  it('edits a watch automation: the editor opens with its watch fields (P2.2)', async () => {
     const { store } = make({ get: vi.fn(async () => fixture('automation-get.json') as never) });
     await store.load();
     await store.openEdit('b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e');
-    expect(store.editor).toBeNull();
-    expect(store.notice?.text).toMatch(/not available yet/);
+    expect(store.notice).toBeNull();
+    expect(store.view).toBe('editor');
+    expect(store.editor?.form).toMatchObject({
+      kind: 'watch',
+      name: 'Photo watch',
+      watchLeft: true,
+      watchRight: false,
+      onChanges: true,
+      onAvailable: true,
+      idleSecs: 10,
+      maxWaitSecs: 900,
+    });
+    expect(store.editor?.expectedConfigRev).toBe(2);
+    store.dispose();
   });
 
   it('a re-review lists the profile changes since the approved revision', async () => {

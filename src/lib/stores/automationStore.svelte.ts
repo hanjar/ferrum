@@ -50,6 +50,7 @@ import {
   DETAIL_EVENTS,
   errorMessage,
   formFromDraft,
+  isNetworkPath,
   localErrors,
   mergeErrors,
   newScheduleForm,
@@ -84,6 +85,8 @@ export interface EditorState {
   /** The backend could not be reached (for example outside the desktop app). */
   unavailable?: string;
   dirty: boolean;
+  /** Roots of the chosen profile that the backend refused to watch (WA-2.3); reset with the profile. */
+  refused: { left: boolean; right: boolean };
 }
 
 export interface ReviewState {
@@ -665,10 +668,7 @@ export class AutomationStore {
       };
       const form = formFromDraft(draft, this.#deps.now());
       if (!form) {
-        this.notice = {
-          kind: 'info',
-          text: 'Editing watch-folder automations is not available yet.',
-        };
+        this.notice = { kind: 'error', text: automationErrorMessage('invalid_input') };
         return;
       }
       this.#openEditor({ id, expectedConfigRev: detail.automation.configRev, form });
@@ -684,25 +684,60 @@ export class AutomationStore {
       id: init.id,
       expectedConfigRev: init.expectedConfigRev,
       form: init.form,
-      errors: localErrors(init.form, this.#deps.now()),
+      errors: [],
       checks: [],
       next: [],
       validated: false,
       busy: false,
       dirty: false,
+      refused: { left: false, right: false },
     };
+    this.#dropUnwatchable(this.editor);
+    this.editor.errors = localErrors(
+      this.editor.form,
+      this.#deps.now(),
+      this.unsupportedRoots(this.editor),
+    );
     this.view = 'editor';
     this.#scheduleValidate(0);
+  }
+
+  /** Which roots of the editor's profile cannot be watched: a network share, or one the backend refused. */
+  unsupportedRoots(ed: EditorState | null = this.editor): { left: boolean; right: boolean } {
+    const p = ed ? this.profile(ed.form.profileId) : undefined;
+    return {
+      left: !!ed && (ed.refused.left || (!!p && isNetworkPath(p.left))),
+      right: !!ed && (ed.refused.right || (!!p && isNetworkPath(p.right))),
+    };
+  }
+
+  /**
+   * An unwatchable root cannot stay ticked (its checkbox is disabled): untick it. Returns whether
+   * anything changed. A new automation drops silently; the root's note says why.
+   */
+  #dropUnwatchable(ed: EditorState): boolean {
+    if (ed.form.kind !== 'watch') return false;
+    const un = this.unsupportedRoots(ed);
+    const patch: Partial<ScheduleForm> = {};
+    if (un.left && ed.form.watchLeft) patch.watchLeft = false;
+    if (un.right && ed.form.watchRight) patch.watchRight = false;
+    if (Object.keys(patch).length === 0) return false;
+    ed.form = { ...ed.form, ...patch };
+    return true;
   }
 
   /** The editor changed a field: re-check locally now and ask the backend shortly. */
   changeForm(patch: Partial<ScheduleForm>): void {
     const ed = this.editor;
     if (!ed) return;
+    if (patch.profileId !== undefined && patch.profileId !== ed.form.profileId) {
+      ed.refused = { left: false, right: false };
+    }
     ed.form = { ...ed.form, ...patch };
+    this.#dropUnwatchable(ed);
     ed.dirty = true;
     ed.validated = false;
-    ed.errors = localErrors(ed.form, this.#deps.now());
+    ed.errors = localErrors(ed.form, this.#deps.now(), this.unsupportedRoots(ed));
     this.#scheduleValidate(this.#deps.validateDelayMs);
   }
 
@@ -724,12 +759,30 @@ export class AutomationStore {
     const ed = this.editor;
     if (!ed) return;
     const form = ed.form;
-    const local = localErrors(form, this.#deps.now());
+    const local = localErrors(form, this.#deps.now(), this.unsupportedRoots(ed));
     // The backend validates a draft that already has a name/profile only; local errors are shown anyway.
     ed.busy = true;
     try {
       const res = await this.#deps.backend.validate(toDraft(form));
       if (seq !== this.#validateSeq || this.editor !== ed) return;
+      // The backend knows what a path cannot do (a mapped drive): untick it and ask again.
+      const refusedLeft = res.errors.some(
+        (e) => e.code === 'watch_unsupported_root' && e.field === 'trigger.watchLeft',
+      );
+      const refusedRight = res.errors.some(
+        (e) => e.code === 'watch_unsupported_root' && e.field === 'trigger.watchRight',
+      );
+      if ((refusedLeft && !ed.refused.left) || (refusedRight && !ed.refused.right)) {
+        ed.refused = {
+          left: ed.refused.left || refusedLeft,
+          right: ed.refused.right || refusedRight,
+        };
+        this.#dropUnwatchable(ed);
+        ed.errors = localErrors(ed.form, this.#deps.now(), this.unsupportedRoots(ed));
+        ed.validated = false;
+        this.#scheduleValidate(0);
+        return;
+      }
       ed.errors = mergeErrors(local, res.errors);
       ed.checks = res.checks;
       ed.next = res.next;
@@ -779,7 +832,7 @@ export class AutomationStore {
     const ed = this.editor;
     if (!ed || !this.canContinue) return;
     // The clock moved on since the last edit: a Once time may have passed meanwhile (SC-1.1).
-    const fresh = localErrors(ed.form, this.#deps.now());
+    const fresh = localErrors(ed.form, this.#deps.now(), this.unsupportedRoots(ed));
     if (fresh.length > 0) {
       ed.errors = mergeErrors(ed.errors, fresh);
       return;
@@ -899,7 +952,7 @@ export class AutomationStore {
     const r = this.review;
     if (!r || r.mode !== 'resume') return null;
     const form = formFromDraft(r.draft, this.#deps.now());
-    if (!form || form.freq !== 'once') return null;
+    if (!form || form.kind !== 'schedule' || form.freq !== 'once') return null;
     const bad = localErrors(form, this.#deps.now()).some(
       (e) => e.code === 'time_passed' || e.code === 'date_out_of_range',
     );

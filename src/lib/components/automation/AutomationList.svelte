@@ -119,16 +119,7 @@
         >
           Run now
         </button>
-        <button
-          type="button"
-          disabled={r.kind !== 'schedule'}
-          title={r.kind !== 'schedule'
-            ? 'Editing watch-folder automations is not available yet'
-            : undefined}
-          onclick={() => void store.openEdit(r.id)}
-        >
-          Edit
-        </button>
+        <button type="button" onclick={() => void store.openEdit(r.id)}>Edit</button>
         {#if r.showReview}
           <button type="button" class="primary" onclick={() => void store.openReview(r)}>
             Review changes
