@@ -3,7 +3,7 @@
 Ferrum is a modern, fast, keyboard-centric dual-pane file manager for Windows inspired by classic Total Commander workflows, built using **Tauri 2**, **Rust**, and **Svelte 5**.
 
 > [!NOTE]
-> **Status: Pre-release (v0.2.0)**  
+> **Status: Pre-release (v0.2.1)**  
 > Ferrum is actively being developed. Installers and binaries are currently unsigned, meaning Windows SmartScreen will display an unrecognized app warning during installation or first launch.
 
 ---
@@ -71,7 +71,7 @@ To build Ferrum from source:
 
 ## Download and Install
 
-Download `Ferrum_<version>_x64-setup.exe` from the [Releases](https://github.com/hanjar/ferrum/releases) page (Windows 10/11 x64, NSIS installer, installs per machine). The installer is not code-signed: compare its SHA-256 with the digest on the release page, then use **More info > Run anyway** in SmartScreen. WebView2 is downloaded during install if it is missing. Details: [release notes](docs/release/v0.2.0/RELEASE-NOTES.md) and [upgrade notes](docs/release/v0.2.0/UPGRADE-NOTES.md).
+Download `Ferrum_<version>_x64-setup.exe` from the [Releases](https://github.com/hanjar/ferrum/releases) page (Windows 10/11 x64, NSIS installer, installs per machine). The installer is not code-signed: compare its SHA-256 with the digest on the release page, then use **More info > Run anyway** in SmartScreen. WebView2 is downloaded during install if it is missing. Details: [release notes](docs/release/v0.2.1/RELEASE-NOTES.md) and [upgrade notes](docs/release/v0.2.1/UPGRADE-NOTES.md).
 
 ---
 

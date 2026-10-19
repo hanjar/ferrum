@@ -1,6 +1,6 @@
 [package]
 name = "ferrum"
-version = "0.2.0"
+version = "0.2.1"
 description = "Ferrum — dual-pane file manager"
 authors = ["hanjar and Ferrum contributors"]
 license = "MIT OR Apache-2.0"
