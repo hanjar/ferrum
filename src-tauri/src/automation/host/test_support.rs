@@ -876,7 +876,6 @@ impl Rig {
     }
 }
 
-/// Wait (real time) until the host has nothing in flight.
 /// Wait (without asserting, so it is safe in a `Drop` during a panic) until the host has no worker
 /// in flight. A worker still running when a test ends would hold the store open while the temp
 /// folder is removed.
@@ -887,6 +886,7 @@ pub fn drain(host: &Host<FakeDeps>) {
     }
 }
 
+/// Wait (real time) until the host has nothing in flight.
 pub fn settle(host: &Host<FakeDeps>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     // Two passes: a worker may still be about to start when the first check runs.
