@@ -4,14 +4,13 @@
  */
 import { activePane, inactivePane, refreshPanesMatching } from './panesRegistry.svelte';
 import { toast } from './toastStore.svelte';
+import { baseName, jobs as jobStore, type Job, type JobKind } from './jobsStore.svelte';
 import { planCopy } from '../ipc/mutations';
 import {
-  archiveCancelRequest,
   archiveExtract,
   archiveExtractPreflight,
   archiveMultipartCheck,
   archiveTest,
-  listenArchiveProgress,
   newArchiveRequestId,
   type ArchiveMultipartInfo,
   type ArchiveProgressEvent,
@@ -128,9 +127,12 @@ export type Dialog =
       /** Called when the user dismisses the dialog without submitting (Esc / Cancel). */
       cancel?: () => void;
     }
-  /** FER-79: a running extract / Test Archive job. Batal and Esc cancel it by `requestId`. */
+  /** FER-79: a running pack / extract / Test Archive job. Batal cancels it by `requestId`;
+   *  FER-578: Esc and Background move it to the dock instead. */
   | {
       kind: 'archiveProgress';
+      /** FER-578: the job this dialog shows (jobsStore); Background docks it. */
+      jobId?: string;
       title: string;
       archivePath: string;
       /** "2/5" when a batch has several archives, else empty. */
@@ -258,29 +260,6 @@ function freshRequestId(): string {
   return `arc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function safeCancelRequest(requestId: string): void {
-  try {
-    if (typeof archiveCancelRequest === 'function') {
-      void archiveCancelRequest(requestId);
-    }
-  } catch {
-    // Vitest mock proxy without archiveCancelRequest
-  }
-}
-
-async function safeListenProgress(
-  handler: (ev: ArchiveProgressEvent) => void,
-): Promise<() => void> {
-  try {
-    if (typeof listenArchiveProgress === 'function') {
-      return await listenArchiveProgress(handler);
-    }
-  } catch {
-    // Vitest mock proxy without listenArchiveProgress
-  }
-  return () => {};
-}
-
 /**
  * P3-2: Display sanitizer for member names in error messages and test reports.
  * Replaces control characters (\n, \r, \t, \0, C0/C1), bidi override/isolate/mark
@@ -398,10 +377,10 @@ class DialogStore {
   close() {
     if (this._current === null) return;
     const d = this._current;
-    // FER-79: closing a running job's dialog (Esc) cancels the job. The dialog stays up, marked
-    // "cancelling", until the job really stops and `withProgress` closes it.
+    // FER-578: closing a running job's dialog (Esc) moves the job to the background; it keeps
+    // running (Batal is the explicit way to stop it).
     if (d.kind === 'archiveProgress') {
-      this.cancelArchiveJob();
+      this.sendToBackground();
       return;
     }
     // FER-460: a dismissed scan offer must still settle its caller (no scan).
@@ -421,34 +400,59 @@ class DialogStore {
 
   // ── FER-79: cancellable job with progress ─────────────────────────────
 
-  /** Runs `run(requestId)` while an `archiveProgress` dialog shows the job's progress events.
-   *  The id is registered in the backend cancel registry, so Batal / Esc stop the job. The
-   *  dialog is removed when the job settles, whatever the outcome. */
+  /** Runs `run(requestId)` as a step of a job. A foreground job shows an `archiveProgress` dialog
+   *  with the step's progress events; a docked one (FER-578) runs silently in the dock. The id is
+   *  registered in the backend cancel registry, so Batal stops the job. The dialog is removed when
+   *  the step settles, whatever the outcome.
+   *
+   *  `flow` is the job a multi-step flow (extract batch, test run, pack) owns: it survives the
+   *  step, keeps its docked flag for the next one and is finished by the flow. Without `flow` the
+   *  call is a one-step job that is finished here. */
   async withProgress<T>(
-    label: { title: string; archivePath: string; position?: string },
+    label: { title: string; archivePath: string; position?: string; kind?: JobKind },
     run: (requestId: string) => Promise<T>,
+    flow?: Job,
   ): Promise<T> {
     const requestId = freshRequestId();
-    this.open({
-      kind: 'archiveProgress',
-      title: label.title,
-      archivePath: label.archivePath,
-      position: label.position ?? '',
+    const job =
+      flow ??
+      jobStore.begin({
+        kind: label.kind ?? 'extract',
+        title: label.title,
+        subject: label.archivePath,
+        position: label.position,
+      });
+    jobStore.attempt(
+      job,
       requestId,
-      processedBytes: 0,
-      processedEntries: 0,
-      cancelling: false,
-    });
-    let unlisten: () => void = () => {};
-    try {
-      unlisten = await safeListenProgress((ev) => this.applyProgress(ev));
-    } catch {
-      // No progress events: the job still runs and can still be cancelled.
+      { subject: label.archivePath, position: label.position ?? '' },
+      (ev) => this.applyProgress(ev),
+    );
+    if (!job.docked) {
+      this.open({
+        kind: 'archiveProgress',
+        jobId: job.id,
+        title: label.title,
+        archivePath: label.archivePath,
+        position: label.position ?? '',
+        requestId,
+        processedBytes: 0,
+        processedEntries: 0,
+        cancelling: false,
+      });
     }
+    // The one global listener must be up before the backend starts emitting.
+    await jobStore.ensureListening();
     try {
-      return await run(requestId);
+      const result = await run(requestId);
+      if (!flow) jobStore.finish(job, 'done', { silent: true });
+      return result;
+    } catch (e) {
+      if (!flow)
+        jobStore.finish(job, isCancelledError(e) ? 'canceled' : 'failed', { silent: true });
+      throw e;
     } finally {
-      unlisten();
+      jobStore.endAttempt(job);
       const d = this._current;
       if (d?.kind === 'archiveProgress' && d.requestId === requestId) {
         this._current = this.queue.shift() ?? null;
@@ -456,6 +460,7 @@ class DialogStore {
     }
   }
 
+  /** Mirrors a progress event into the open progress dialog (the job already has the numbers). */
   private applyProgress(ev: ArchiveProgressEvent) {
     const d = this.current;
     if (d?.kind !== 'archiveProgress' || d.requestId !== ev.requestId) return;
@@ -467,6 +472,17 @@ class DialogStore {
     if (ev.writtenEntries !== undefined) d.writtenEntries = ev.writtenEntries;
     if (ev.skippedEntries !== undefined) d.skippedEntries = ev.skippedEntries;
     if (ev.renamedEntries !== undefined) d.renamedEntries = ev.renamedEntries;
+  }
+
+  /** FER-578: "Background" button / Esc on the progress dialog. The job keeps running in the dock
+   *  (Alt+B); the dialog closes so the rest of the app is usable and the focus goes back. */
+  sendToBackground(): void {
+    const d = this._current;
+    if (d?.kind !== 'archiveProgress') return;
+    const job = d.jobId ? jobStore.get(d.jobId) : undefined;
+    if (job) jobStore.dock(job);
+    this._current = this.queue.shift() ?? null;
+    toast.show(`${d.title} berjalan di latar belakang (Alt+B)`);
   }
 
   /** FER-55: explicitly show extract summary dialog */
@@ -487,31 +503,68 @@ class DialogStore {
     });
   }
 
-  /** Batal / Esc on the progress dialog. Idempotent. */
+  /** Batal on the progress dialog. Idempotent. */
   cancelArchiveJob() {
     const d = this.current;
     if (d?.kind !== 'archiveProgress' || d.cancelling) return;
     d.cancelling = true;
-    safeCancelRequest(d.requestId);
+    const job = d.jobId ? jobStore.get(d.jobId) : undefined;
+    if (job) jobStore.cancel(job);
+    else jobStore.cancelRequest(d.requestId);
   }
 
   // ── FER-73: password prompt as a promise ──────────────────────────────
 
   /** Opens the masked password dialog; resolves with the typed password, or null when the user
    *  dismisses it. The password is handed to the caller once and not kept here. */
-  private askPassword(archivePath: string, message?: string): Promise<string | null> {
+  private askPassword(archivePath: string, message?: string, job?: Job): Promise<string | null> {
     return new Promise((resolve) => {
-      this.open({
-        kind: 'password',
-        archivePath,
-        message,
-        retry: async (pw) => {
-          this.dismiss();
-          resolve(pw);
+      this.openOrHold(
+        job,
+        {
+          kind: 'password',
+          archivePath,
+          message,
+          retry: async (pw) => {
+            this.dismiss();
+            resolve(pw);
+          },
+          cancel: () => resolve(null),
         },
-        cancel: () => resolve(null),
-      });
+        'Password',
+      );
     });
+  }
+
+  /** FER-578: opens `d` now, unless it belongs to a docked job: that one is held (job turns
+   *  "needs input", a toast says so) and opens only when the user picks it in the dock. */
+  private openOrHold(job: Job | undefined, d: Dialog, label: string): void {
+    if (job?.docked) {
+      const subject = 'archivePath' in d ? baseName(d.archivePath) : job.subject;
+      jobStore.holdPrompt(
+        job,
+        { label, open: () => this.open(d) },
+        `${label} diperlukan: ${subject}`,
+      );
+      return;
+    }
+    this.open(d);
+  }
+
+  /** FER-578: ends a flow. A docked job keeps `show` as its "Lihat hasil" and opens nothing; a
+   *  foreground job is removed and `show` runs now (the dialogs tell the story, as before). */
+  private settleJob(
+    job: Job,
+    outcome: 'done' | 'failed' | 'canceled',
+    summary: string,
+    show: () => void,
+  ): void {
+    if (job.docked) {
+      jobStore.finish(job, outcome, { summary, result: { label: 'Lihat hasil', open: show } });
+      return;
+    }
+    jobStore.finish(job, outcome, { summary, silent: true });
+    show();
   }
 
   /** FER-504: the same masked prompt for LISTING — opening a header-encrypted
@@ -845,16 +898,48 @@ class DialogStore {
     let batchWritten = 0;
     let batchSkipped = 0;
     let batchRenamed = 0;
+    // FER-578: the whole batch is ONE job (docked once, stays docked for the next archive).
+    const flow = jobStore.begin({
+      kind: 'extract',
+      title: errorTitle,
+      subject: jobs[0]?.archivePath ?? '',
+    });
+    /** Ends the batch at its first failure: the error dialog now, or held in a docked job. */
+    const failBatch = (outcome: 'failed' | 'canceled', summary: string, show: () => void) => {
+      wipePasswords(passwords);
+      refreshPanesMatching(target);
+      onDone?.();
+      this.settleJob(flow, outcome, summary, show);
+    };
     const runFrom = (index: number): void => {
       if (index >= jobs.length) {
         wipePasswords(passwords);
         refreshPanesMatching(target);
         onDone?.();
-        if (batchWritten > 0 || batchSkipped > 0 || batchRenamed > 0) {
-          const parts = [`${batchWritten} ditulis`];
-          if (batchSkipped > 0) parts.push(`${batchSkipped} dilewati`);
-          if (batchRenamed > 0) parts.push(`${batchRenamed} dinamai ulang`);
-          toast.show(`Ekstrak selesai: ${parts.join(', ')}`);
+        const parts = [`${batchWritten} ditulis`];
+        if (batchSkipped > 0) parts.push(`${batchSkipped} dilewati`);
+        if (batchRenamed > 0) parts.push(`${batchRenamed} dinamai ulang`);
+        const text = `Ekstrak selesai: ${parts.join(', ')}`;
+        const any = batchWritten > 0 || batchSkipped > 0 || batchRenamed > 0;
+        if (flow.docked) {
+          jobStore.finish(flow, 'done', {
+            summary: any ? text : `${errorTitle} selesai`,
+            result: any
+              ? {
+                  label: 'Lihat hasil',
+                  open: () =>
+                    this.showExtractSummary({
+                      written: batchWritten,
+                      skipped: batchSkipped,
+                      renamed: batchRenamed > 0 ? batchRenamed : undefined,
+                      target,
+                    }),
+                }
+              : undefined,
+          });
+        } else {
+          jobStore.finish(flow, 'done', { silent: true });
+          if (any) toast.show(text);
         }
         return;
       }
@@ -876,48 +961,63 @@ class DialogStore {
                 password,
                 requestId,
               );
-              const d = this.current;
-              if (d?.kind === 'archiveProgress' && d.requestId === requestId) {
-                if (d.writtenEntries !== undefined) batchWritten += d.writtenEntries;
-                if (d.skippedEntries !== undefined) batchSkipped += d.skippedEntries;
-                if (d.renamedEntries !== undefined) batchRenamed += d.renamedEntries;
+              if (flow.requestId === requestId) {
+                if (flow.writtenEntries !== undefined) batchWritten += flow.writtenEntries;
+                if (flow.skippedEntries !== undefined) batchSkipped += flow.skippedEntries;
+                if (flow.renamedEntries !== undefined) batchRenamed += flow.renamedEntries;
               }
               return res;
             },
+            flow,
           );
         } catch (e: unknown) {
           if (isCancelledError(e)) {
             // Members that finished stay (they are whole); the one in flight was discarded.
-            wipePasswords(passwords);
-            refreshPanesMatching(target);
-            onDone?.();
-            this.open({ kind: 'error', title: errorTitle, message: EXTRACT_CANCELLED });
+            failBatch('canceled', 'Dibatalkan', () =>
+              this.open({ kind: 'error', title: errorTitle, message: EXTRACT_CANCELLED }),
+            );
             return;
           }
           if (isPasswordError(e)) {
-            this.open({
-              kind: 'password',
-              archivePath: job.archivePath,
-              message: wrongPasswordMessage(e, job.archivePath),
-              cancel: () => wipePasswords(passwords),
-              retry: async (pw) => {
-                this.dismiss();
-                void attempt(pw);
+            this.openOrHold(
+              flow,
+              {
+                kind: 'password',
+                archivePath: job.archivePath,
+                message: wrongPasswordMessage(e, job.archivePath),
+                cancel: () => {
+                  wipePasswords(passwords);
+                  jobStore.finish(flow, 'canceled', {
+                    summary: 'Dibatalkan: password tidak diberikan',
+                    silent: true,
+                  });
+                },
+                retry: async (pw) => {
+                  this.dismiss();
+                  void attempt(pw);
+                },
               },
-            });
+              'Password',
+            );
             return;
           }
-          wipePasswords(passwords);
-          refreshPanesMatching(target);
-          onDone?.();
           const member = e instanceof FsError ? e.memberPath : undefined;
           const msg = e instanceof FsError ? e.message : String(e);
           if (isMultipartError(e)) {
-            await this.showMultipart(job.archivePath, msg, errorTitle);
+            failBatch(
+              'failed',
+              `${errorTitle} gagal: ${baseName(job.archivePath)}`,
+              () => void this.showMultipart(job.archivePath, msg, errorTitle),
+            );
             return;
           }
-          const displayMsg = member ? `Gagal di: ${sanitizeMemberPath(member)}\n${msg}` : msg;
-          this.open({ kind: 'error', title: errorTitle, message: displayMsg });
+          const displayMsg = member
+            ? `Gagal di: ${sanitizeMemberPath(member)}
+${msg}`
+            : msg;
+          failBatch('failed', `${errorTitle} gagal: ${baseName(job.archivePath)}`, () =>
+            this.open({ kind: 'error', title: errorTitle, message: displayMsg }),
+          );
           return;
         }
         runFrom(index + 1);
@@ -958,10 +1058,17 @@ class DialogStore {
    *  "dibatalkan" in the report. */
   private async runTestArchive(archives: string[]): Promise<void> {
     const reports: ArchiveTestItem[] = [];
+    // FER-578: the whole run is ONE job (docked once, stays docked for the next archive).
+    const flow = jobStore.begin({
+      kind: 'test',
+      title: 'Test archive',
+      subject: archives[0] ?? '',
+    });
     for (let i = 0; i < archives.length; i++) {
       const item = await this.testOneArchive(
         archives[i]!,
         archives.length > 1 ? `${i + 1}/${archives.length}` : '',
+        flow,
       );
       reports.push(item);
       if (item.status === 'cancelled') {
@@ -973,21 +1080,24 @@ class DialogStore {
     }
     const cancelled = reports.some((r) => r.status === 'cancelled');
     const problems = reports.filter((r) => r.status !== 'passed').length;
-    this.open({
-      kind: 'testReport',
-      title: cancelled
-        ? 'Test archive dibatalkan'
-        : problems === 0
-          ? 'Archive test passed'
-          : `Archive test: ${problems} problem(s)`,
-      reports,
-    });
+    const title = cancelled
+      ? 'Test archive dibatalkan'
+      : problems === 0
+        ? 'Archive test passed'
+        : `Archive test: ${problems} problem(s)`;
+    this.settleJob(flow, cancelled ? 'canceled' : problems === 0 ? 'done' : 'failed', title, () =>
+      this.open({ kind: 'testReport', title, reports }),
+    );
   }
 
   /** Tests one archive. An encrypted one asks for the password in the masked dialog and retries
    *  until it passes, the user dismisses the prompt, or the test cancels (FER-73). The password
    *  exists only inside this call: it is not stored in state, history or the report. */
-  private async testOneArchive(archivePath: string, position: string): Promise<ArchiveTestItem> {
+  private async testOneArchive(
+    archivePath: string,
+    position: string,
+    flow: Job,
+  ): Promise<ArchiveTestItem> {
     const started = performance.now();
     let password: string | undefined;
     let item: ArchiveTestItem;
@@ -998,6 +1108,7 @@ class DialogStore {
           const report = await this.withProgress(
             { title: 'Test archive', archivePath, position },
             (requestId) => archiveTest(archivePath, password, requestId),
+            flow,
           );
           item = summarizeArchiveTest(archivePath, report.entries);
           if (item.status !== 'passwordRequired') break;
@@ -1035,6 +1146,7 @@ class DialogStore {
         const typed = await this.askPassword(
           archivePath,
           wrong ? wrongPasswordText(archivePath) : undefined,
+          flow,
         );
         if (typed === null) {
           item.note = 'Password tidak diberikan.';
