@@ -48,6 +48,7 @@ fn internal() -> ProviderError {
     ProviderError {
         kind: ProviderErrorKind::Network,
         attempts: 0,
+        detail: None,
     }
 }
 
@@ -61,6 +62,7 @@ fn outcome_json(outcome: PlanOutcome) -> Result<Value, ProviderError> {
             .map(|steps| json!({ "kind": "chain", "chain": steps }))
             .map_err(|_| internal()),
         PlanOutcome::Question { text } => Ok(json!({ "kind": "question", "text": text })),
+        PlanOutcome::Hint { hint } => Ok(json!({ "kind": "hint", "hint": hint.id() })),
     }
 }
 

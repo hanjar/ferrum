@@ -119,6 +119,16 @@ Delete rule: use items.delete only when the user explicitly asks to delete or re
 
 const DELETE_CAPABILITY_PROMPTS: [(&str, &str); 1] = [("items.delete", ITEMS_DELETE_PROMPT)];
 
+/// FER-573 UI hint (opt-in pseudo capability, appended last so every older prompt stays
+/// byte-identical). Offered only while Disk Usage is NOT open, i.e. exactly when `diskUsage.query`
+/// is not offered. The model cannot read sizes; for a size question it replies with a fixed hint
+/// object and the app tells the user to open Disk Usage (a button runs that read-only action).
+/// The reply carries no path, no text and no size: the hint id is the only thing accepted.
+const UI_HINT_PROMPT: &str = "Hint (no capability; the app shows its own fixed text and a button): when the user asks how big files or folders are, or what takes the most space (\"berapa ukuran semua folder\", \"folder terbesar\", \"how large is this\"), you cannot read sizes. Reply with exactly {\"kind\":\"hint\",\"hint\":\"openDiskUsage\"} and nothing else. Never guess a size and never name a path.
+";
+
+const UI_HINT_CAPABILITY_PROMPTS: [(&str, &str); 1] = [("ui.hint", UI_HINT_PROMPT)];
+
 /// FER-576 chain rule, added only when navigation or delete is offered. A chain is ONE reply with a
 /// `steps` list; the app runs the steps one at a time and asks for approval at each mutating step.
 const CHAIN_PROMPT: &str = "Chain: when the request needs several steps in order, reply with ONE object {\"schemaVersion\":1,\"requestId\":<requestId>,\"steps\":[<intent>,...]} instead of an envelope (2 to 4 steps, no other fields). Allowed steps, in this order and each at most once: pane.navigate, archive.create, items.delete. Every step uses the same panel value. Example: \"arsipkan D:\\x\\a.csv ke 7zip paling kecil lalu hapus\" -> steps: pane.navigate with that path, archive.create with selector {\"kind\":\"selected\"} format 7z level ultra, items.delete with selector {\"kind\":\"selected\"}. Add items.delete only when the user asked to delete the original; the app deletes it only after the archive was created and tested.
@@ -134,6 +144,7 @@ fn all_capability_prompts() -> impl Iterator<Item = &'static (&'static str, &'st
         .chain(DISK_USAGE_CAPABILITY_PROMPTS.iter())
         .chain(NAVIGATE_CAPABILITY_PROMPTS.iter())
         .chain(DELETE_CAPABILITY_PROMPTS.iter())
+        .chain(UI_HINT_CAPABILITY_PROMPTS.iter())
 }
 
 const PROMPT_TAIL: &str = "Follow-up: when the request starts with \"Follow-up to the previous plan\" it carries previousPlan (the intent you or the app produced earlier, without file names) and the user's change. Reply with ONE complete new intent envelope that applies only the requested change and keeps every other previousPlan field. Never add paths or file names; an output name is only a plain basename the user typed.
@@ -270,11 +281,15 @@ impl ProviderErrorKind {
     }
 }
 
-/// Error carrying only a stable kind and attempt count; provider bodies are never kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Error carrying a stable kind and attempt count. FER-573: for an HTTP error it may also carry
+/// `detail`, a short sanitized summary of the provider's own error message (see
+/// `summarize_error_body`); raw bodies, headers and URLs are never kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl fmt::Display for ProviderError {
@@ -285,7 +300,11 @@ impl fmt::Display for ProviderError {
 impl std::error::Error for ProviderError {}
 
 pub(super) fn fail(kind: ProviderErrorKind, attempts: u32) -> ProviderError {
-    ProviderError { kind, attempts }
+    ProviderError {
+        kind,
+        attempts,
+        detail: None,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -663,6 +682,149 @@ pub(super) fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+/// FER-573: max characters of the provider's error message shown to the user.
+pub const MAX_DETAIL_CHARS: usize = 300;
+
+/// A run of this many base64/hex/token-like characters is treated as a possible key and hidden.
+const LONG_TOKEN_CHARS: usize = 32;
+
+/// Sanitizes free text from a provider error for display: drops control characters (including
+/// ANSI escapes), redacts the known secret, `Bearer` tokens, `sk-` keys, long token-like runs and
+/// URL query strings, collapses whitespace and truncates. Returns `None` when nothing is left.
+pub fn sanitize_detail(text: &str, secrets: &[&str]) -> Option<String> {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ANSI CSI sequence: ESC [ ... final letter.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        plain.push(if c.is_control() { ' ' } else { c });
+    }
+    let redacted = redact(&plain, secrets);
+    let words: Vec<String> = redacted.split_whitespace().map(clean_word).collect();
+    let joined = words.join(" ");
+    let out = truncate_chars(joined.trim(), MAX_DETAIL_CHARS);
+    (!out.is_empty()).then_some(out)
+}
+
+/// Long runs that look like a key: base64/hex/alphanumeric blobs, or JWT-like mixed-case runs with
+/// digits. Hyphenated lowercase names (model ids such as `antigravity/gemini-4-argon-high`) pass.
+fn looks_like_secret(run: &str) -> bool {
+    if run.chars().count() < LONG_TOKEN_CHARS {
+        return false;
+    }
+    let digit = run.chars().any(|c| c.is_ascii_digit());
+    let upper = run.chars().any(|c| c.is_ascii_uppercase());
+    let lower = run.chars().any(|c| c.is_ascii_lowercase());
+    let plain = !run.contains(['-', '.', '/']);
+    if plain {
+        digit || (upper && lower)
+    } else {
+        upper && digit
+    }
+}
+
+fn clean_word(word: &str) -> String {
+    let mut word = word.to_owned();
+    if (word.contains("://") || word.contains("www."))
+        && let Some(pos) = word.find(['?', '#'])
+    {
+        word.truncate(pos);
+    }
+    // Hide long token-like runs (base64 / hex / JWT-ish) anywhere in the word.
+    let is_tokenish = |c: char| c.is_ascii_alphanumeric() || "+/=_-.".contains(c);
+    let flush = |run: &mut String, out: &mut String| {
+        if looks_like_secret(run) {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in word.chars() {
+        if is_tokenish(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// FER-573: the human-readable message of a provider error body. Only the standard message
+/// fields are read (`error.message`, `message`, `error` as a string); if that message embeds a
+/// JSON object (some gateways wrap the upstream error), the embedded object's own message
+/// replaces it. A non-JSON body (plain text or HTML) is stripped of tags. The result is
+/// sanitized and truncated; nothing else from the body (headers, ids, extra fields) is used.
+pub fn summarize_error_body(body: &str, secrets: &[&str]) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let raw = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => message_field(&value)?,
+        Err(_) => strip_tags(trimmed),
+    };
+    sanitize_detail(&unwrap_embedded_json(&raw), secrets)
+}
+
+fn message_field(value: &Value) -> Option<String> {
+    let text = |v: &Value| v.as_str().map(str::to_owned);
+    value
+        .pointer("/error/message")
+        .and_then(text)
+        .or_else(|| value.get("message").and_then(text))
+        .or_else(|| value.get("error").and_then(text))
+}
+
+/// `"[x] [404]: { "error": { "message": "Not found" } } (reset after 1m)"` ->
+/// `"[x] [404]: Not found (reset after 1m)"`.
+fn unwrap_embedded_json(text: &str) -> String {
+    let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else {
+        return text.to_owned();
+    };
+    if end <= start {
+        return text.to_owned();
+    }
+    let Ok(inner) = serde_json::from_str::<Value>(&text[start..=end]) else {
+        return text.to_owned();
+    };
+    let Some(message) = message_field(&inner) else {
+        return text.to_owned();
+    };
+    format!("{}{}{}", &text[..start], message, &text[end + 1..])
+}
+
+fn strip_tags(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn log_line(deps: &Deps<'_>, secret: &Secret, line: &str) {
     let clean = redact(line, &[secret.expose()]).replace(['\n', '\r'], " ");
     deps.log.log(&truncate_chars(&clean, 300));
@@ -785,6 +947,7 @@ pub(super) fn send(
             body: body.clone(),
             timeout: deadline - now,
         };
+        let mut detail = None;
         let (kind, retry_after) = match deps.transport.post_json(&request, cancel) {
             Err(TransportError::Timeout) => {
                 return Err(fail(ProviderErrorKind::Timeout, *attempts));
@@ -816,6 +979,7 @@ pub(super) fn send(
                     return Ok(response.body);
                 }
                 let kind = classify(response.status, &response.body);
+                detail = summarize_error_body(&response.body, &[secret.expose()]);
                 log_line(
                     deps,
                     secret,
@@ -831,7 +995,11 @@ pub(super) fn send(
             }
         };
         if !kind.retryable() || *attempts - first_attempt >= max_attempts {
-            return Err(fail(kind, *attempts));
+            return Err(ProviderError {
+                kind,
+                attempts: *attempts,
+                detail,
+            });
         }
         let delay = retry_after
             .map(|d| d.min(MAX_RETRY_AFTER))
@@ -859,6 +1027,25 @@ pub enum PlanOutcome {
     Question {
         text: String,
     },
+    /// FER-573: the model cannot answer a size question; the app tells the user to open Disk
+    /// Usage. Accepted only when `ui.hint` was offered and `diskUsage.query` was not.
+    Hint {
+        hint: UiHint,
+    },
+}
+
+/// The only hint the model may give (a fixed id, never free text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiHint {
+    OpenDiskUsage,
+}
+
+impl UiHint {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::OpenDiskUsage => "openDiskUsage",
+        }
+    }
 }
 
 enum Interpreted {
@@ -899,6 +1086,18 @@ fn interpret_for(body: &str, request_id: &str, offered: &[&str], user_text: &str
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(content.trim()) else {
         return echo();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("hint") {
+        let allowed = offered.contains(&"ui.hint") && !offered.contains(&"diskUsage.query");
+        let exact = object.len() == 2
+            && object.get("hint").and_then(Value::as_str) == Some(UiHint::OpenDiskUsage.id());
+        return if allowed && exact {
+            Interpreted::Done(PlanOutcome::Hint {
+                hint: UiHint::OpenDiskUsage,
+            })
+        } else {
+            echo()
+        };
+    }
     if object.contains_key("kind") {
         return match question_text(&object) {
             Some(text) => Interpreted::Done(PlanOutcome::Question { text }),
@@ -1035,6 +1234,9 @@ fn finish(
 pub struct ConnectionReport {
     pub ok: bool,
     pub kind: Option<ProviderErrorKind>,
+    /// FER-573: sanitized summary of the provider's own error message, for display only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Explicit user-triggered check. Sends a fixed "ping" with no user text, paths or context.
@@ -1046,6 +1248,7 @@ pub fn test_connection(
     let failed = |kind| ConnectionReport {
         ok: false,
         kind: Some(kind),
+        detail: None,
     };
     if let Err(kind) = config.validate() {
         return failed(kind);
@@ -1071,7 +1274,10 @@ pub fn test_connection(
     };
     let mut attempts = 0;
     match send(&call, &body, CONNECTION_TEST_ATTEMPTS, &mut attempts) {
-        Err(error) => failed(error.kind),
+        Err(error) => ConnectionReport {
+            detail: error.detail.clone(),
+            ..failed(error.kind)
+        },
         Ok(raw) => {
             let valid = serde_json::from_str::<Value>(&raw)
                 .ok()
@@ -1085,6 +1291,7 @@ pub fn test_connection(
                 ConnectionReport {
                     ok: true,
                     kind: None,
+                    detail: None,
                 }
             } else {
                 failed(ProviderErrorKind::Malformed)
@@ -1112,3 +1319,7 @@ mod indexer_tests;
 #[cfg(test)]
 #[path = "provider_chain_tests.rs"]
 mod chain_tests;
+
+#[cfg(test)]
+#[path = "provider_detail_tests.rs"]
+mod detail_tests;

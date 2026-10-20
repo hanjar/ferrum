@@ -1,5 +1,6 @@
 import { ContractError } from './contracts';
 import {
+  parseHint,
   parseModelReply,
   type IntentProvider,
   type ProviderEvent,
@@ -55,10 +56,39 @@ export class RemoteProviderError extends Error {
   constructor(
     public readonly code: RemoteProviderErrorCode,
     message: string,
+    /** FER-573: sanitized summary of the provider's own error message (display only). */
+    public readonly detail?: string,
   ) {
     super(message);
     this.name = 'RemoteProviderError';
   }
+}
+
+const MAX_DETAIL_CHARS = 300;
+
+/**
+ * FER-573: the backend already sanitizes `detail`; this is a second, independent pass. Only a string
+ * is accepted; control characters (including ANSI) are removed, whitespace collapsed, key-like
+ * runs hidden and the length bounded. Rendered as text only, never as HTML.
+ */
+export function sanitizeProviderDetail(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const text = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, ' ')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, '[redacted]')
+    .replace(/[A-Za-z0-9+/=_]{40,}/g, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text ? Array.from(text).slice(0, MAX_DETAIL_CHARS).join('') : undefined;
+}
+
+/** Backend rejections may carry `{ kind, detail }`; only the sanitized detail string is read. */
+export function backendErrorDetail(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || error instanceof Error) return undefined;
+  return sanitizeProviderDetail((error as { detail?: unknown }).detail);
 }
 
 // Backend rejections are data objects like { kind }; only known kinds pass, never their messages.
@@ -227,9 +257,11 @@ export class RemoteIntentProvider implements IntentProvider {
         result && typeof result === 'object' && (result as { kind?: unknown }).kind === 'chain'
           ? (result as { chain?: unknown }).chain
           : undefined;
-      const question = chainResult === undefined ? parseQuestion(result) : undefined;
+      const hint = chainResult === undefined ? parseHint(result, request.capabilities) : undefined;
+      const question =
+        chainResult === undefined && hint === undefined ? parseQuestion(result) : undefined;
       const reply =
-        question === undefined
+        question === undefined && hint === undefined
           ? parseModelReply(
               chainResult ?? result,
               request.requestId,
@@ -238,14 +270,19 @@ export class RemoteIntentProvider implements IntentProvider {
             )
           : undefined;
       if (request.signal.aborted) throw new RemoteProviderError('cancelled', 'Request cancelled');
-      if (question !== undefined) yield { kind: 'question', text: question };
+      if (hint !== undefined) yield { kind: 'hint', hint };
+      else if (question !== undefined) yield { kind: 'question', text: question };
       else if (reply) yield reply;
     } catch (error) {
       if (request.signal.aborted) throw new RemoteProviderError('cancelled', 'Request cancelled');
       if (timedOut) throw new RemoteProviderError('timeout', 'Provider timed out');
       if (error instanceof ContractError) throw error;
       const kind = backendErrorKind(error);
-      throw new RemoteProviderError(kind ?? 'backend_failure', SAFE_MESSAGE);
+      throw new RemoteProviderError(
+        kind ?? 'backend_failure',
+        SAFE_MESSAGE,
+        kind ? backendErrorDetail(error) : undefined,
+      );
     } finally {
       clearTimeout(timer);
       request.signal.removeEventListener('abort', abort);

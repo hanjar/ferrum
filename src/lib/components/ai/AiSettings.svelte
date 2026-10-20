@@ -15,6 +15,7 @@
   // sama untuk build dev dan exe; form diisi dari sana begitu pemuatan backend selesai.
   import { onDestroy, onMount } from 'svelte';
   import { backendConnectionTransport } from '../../ai/backendBridge';
+  import { providerSaid } from '../../ai/providerErrors';
   import {
     OUTBOUND_DISCLOSURE,
     testConnection,
@@ -216,7 +217,11 @@
     else if (result.kind === 'cancelled') testNote = { tone: 'info', text: 'Test cancelled' };
     else {
       const text = TEST_ERRORS[result.kind] ?? SETUP_ERRORS[result.kind] ?? 'Connection failed';
-      testNote = { tone: 'bad', text: `Connection failed: ${text} (${result.kind})` };
+      const said = providerSaid(result.detail, saved.model);
+      testNote = {
+        tone: 'bad',
+        text: `Connection failed: ${text} (${result.kind})${said ? `. ${said}` : ''}`,
+      };
     }
   }
 

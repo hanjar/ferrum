@@ -55,6 +55,13 @@ export type MutatingCapabilityId = ProposedIntent['capability'];
  * the result is never sent back to the provider. Mirrors `Intent::ActivityQuery` in Rust. */
 export const ACTIVITY_QUERY_CAPABILITY = 'activity.query';
 export const DISK_USAGE_QUERY_CAPABILITY = 'diskUsage.query';
+/**
+ * FER-573: pseudo capability offered only while Disk Usage is NOT open. The model cannot read sizes;
+ * it may answer a size question with `{kind:'hint',hint:'openDiskUsage'}` and the app shows its own
+ * fixed text plus a button. It never carries a path, a size or free text.
+ */
+export const UI_HINT_CAPABILITY = 'ui.hint';
+export type UiHintId = 'openDiskUsage';
 export type ReadCapabilityId =
   typeof ACTIVITY_QUERY_CAPABILITY | typeof DISK_USAGE_QUERY_CAPABILITY;
 export const MAX_HISTORY_LIMIT = 20;

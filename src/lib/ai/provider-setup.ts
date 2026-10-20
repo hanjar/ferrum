@@ -1,5 +1,6 @@
 import {
   BACKEND_ERROR_KINDS,
+  backendErrorDetail,
   backendErrorKind,
   RemoteProviderError,
   validateProviderConfig,
@@ -36,7 +37,13 @@ export function validateProviderSetup(raw: unknown): ProviderSetup {
 }
 
 export type ConnectionTestResult =
-  { ok: true } | { ok: false; kind: BackendErrorKind | 'backend_failure' };
+  | { ok: true }
+  | {
+      ok: false;
+      kind: BackendErrorKind | 'backend_failure';
+      /** FER-573: sanitized summary of the provider's own error message (display only). */
+      detail?: string;
+    };
 
 // Must invoke a backend command; it resolves { ok, kind } and never receives user text or paths.
 export type BackendConnectionTransport = (
@@ -73,9 +80,12 @@ export async function testConnection(
       if (result && typeof result === 'object' && (result as { ok?: unknown }).ok === true)
         return { ok: true };
       const kind = backendErrorKind(result);
-      return { ok: false, kind: kind ?? 'backend_failure' };
+      const detail = kind ? backendErrorDetail(result) : undefined;
+      return { ok: false, kind: kind ?? 'backend_failure', ...(detail ? { detail } : {}) };
     } catch (error) {
-      return { ok: false, kind: backendErrorKind(error) ?? 'backend_failure' };
+      const kind = backendErrorKind(error);
+      const detail = kind ? backendErrorDetail(error) : undefined;
+      return { ok: false, kind: kind ?? 'backend_failure', ...(detail ? { detail } : {}) };
     }
   })();
   const outcome = await Promise.race([run, cancelled]);

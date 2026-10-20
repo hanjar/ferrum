@@ -132,6 +132,9 @@ function injectTauriMock(page: Page) {
         if (cmd === 'ai_plan_intent') {
           const a = args as { request: { requestId: string; capabilities?: string[] } };
           (w.__plans as unknown[]).push(JSON.parse(JSON.stringify(a)));
+          // FER-573: Disk Usage closed -> the app offers `ui.hint`; the mock model points to it.
+          if (a.request.capabilities?.includes('ui.hint'))
+            return Promise.resolve({ kind: 'hint', hint: 'openDiskUsage' });
           return Promise.resolve({
             schemaVersion: 1,
             requestId: a.request.requestId,
@@ -288,6 +291,27 @@ test.describe('FER-466 AI diskUsage.query (mock IPC, mock provider)', () => {
           !['copy_control_snapshot', 'ai_exec_unresolved'].includes(c),
       ),
     ).toEqual([]);
+  });
+
+  test('FER-573: a size question while Disk Usage is closed points to it, with a button that opens it', async () => {
+    await openChat(page);
+    await ask(page, 'berapa ukuran size semua folder dan file di panel kanan?');
+    await expect(
+      chat(page).getByText(/Buka Disk Usage \(Alt\+Shift\+D\) di panel itu/),
+    ).toBeVisible();
+    await expect(workspace(page)).toBeHidden();
+    const plans = await page.evaluate(
+      () => (window as unknown as { __plans: { request: { capabilities: string[] } }[] }).__plans,
+    );
+    expect(plans).toHaveLength(1);
+    expect(plans[0].request.capabilities).toContain('ui.hint');
+    expect(plans[0].request.capabilities).not.toContain('diskUsage.query');
+    await chat(page)
+      .getByRole('button', { name: /Buka Disk Usage/ })
+      .click();
+    await expect(workspace(page)).toBeVisible();
+    // Open now: the button is gone (it would only close Disk Usage).
+    await expect(chat(page).getByRole('button', { name: /Buka Disk Usage/ })).toHaveCount(0);
   });
 
   test('without any scan the AI says so and offers to open Disk Usage', async () => {

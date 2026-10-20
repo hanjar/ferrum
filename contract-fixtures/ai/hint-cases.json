@@ -1,0 +1,139 @@
+[
+  {
+    "name": "exact hint, ui.hint offered",
+    "offered": [
+      "archive.create",
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage"
+    },
+    "valid": true
+  },
+  {
+    "name": "exact hint, only ui.hint offered",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage"
+    },
+    "valid": true
+  },
+  {
+    "name": "ui.hint not offered",
+    "offered": [
+      "archive.create",
+      "directories.sync"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage"
+    },
+    "valid": false
+  },
+  {
+    "name": "no capability list at all",
+    "offered": [],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage"
+    },
+    "valid": false
+  },
+  {
+    "name": "diskUsage.query is offered too (mutually exclusive)",
+    "offered": [
+      "archive.create",
+      "ui.hint",
+      "diskUsage.query"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage"
+    },
+    "valid": false
+  },
+  {
+    "name": "extra key (path)",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage",
+      "path": "C:\\x"
+    },
+    "valid": false
+  },
+  {
+    "name": "extra key (text)",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "openDiskUsage",
+      "text": "hi"
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown hint id",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "deleteEverything"
+    },
+    "valid": false
+  },
+  {
+    "name": "hint id in another case",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": "opendiskusage"
+    },
+    "valid": false
+  },
+  {
+    "name": "missing hint",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint"
+    },
+    "valid": false
+  },
+  {
+    "name": "hint is an array",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": [
+        "openDiskUsage"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "hint is null",
+    "offered": [
+      "ui.hint"
+    ],
+    "value": {
+      "kind": "hint",
+      "hint": null
+    },
+    "valid": false
+  }
+]

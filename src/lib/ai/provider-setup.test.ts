@@ -49,6 +49,36 @@ describe('provider setup and explicit connection test', () => {
     expect(vi.mocked(transport).mock.calls[0][0]).toEqual(setup);
   });
 
+  it('FER-573: carries the sanitized provider message of a failed test, never for unknown kinds', async () => {
+    const detailed: BackendConnectionTransport = async () => ({
+      ok: false,
+      kind: 'model_unavailable',
+      detail: '[antigravity/x] [404]: Requested entity was not found. sk-abcdef0123456789',
+    });
+    expect(await testConnection(setup, detailed, new AbortController().signal)).toEqual({
+      ok: false,
+      kind: 'model_unavailable',
+      detail: '[antigravity/x] [404]: Requested entity was not found. [redacted]',
+    });
+    const thrown: BackendConnectionTransport = async () => {
+      throw { kind: 'server_error', attempts: 3, detail: 'upstream overloaded' };
+    };
+    expect(await testConnection(setup, thrown, new AbortController().signal)).toEqual({
+      ok: false,
+      kind: 'server_error',
+      detail: 'upstream overloaded',
+    });
+    const unknown: BackendConnectionTransport = async () => ({
+      ok: false,
+      kind: 'rm -rf',
+      detail: 'x',
+    });
+    expect(await testConnection(setup, unknown, new AbortController().signal)).toEqual({
+      ok: false,
+      kind: 'backend_failure',
+    });
+  });
+
   it('reports stable failure kinds and normalizes unknown or thrown failures', async () => {
     const auth: BackendConnectionTransport = async () => ({ ok: false, kind: 'auth' });
     expect(await testConnection(setup, auth, new AbortController().signal)).toEqual({

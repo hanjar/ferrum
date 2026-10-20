@@ -242,6 +242,51 @@ describe('AiSettings (FER-412, order FER-429)', () => {
     expect(screen.getByRole('alert').textContent).toContain('(auth)');
   });
 
+  it('FER-573: shows what the provider said and the model next to the safe code', async () => {
+    configured = true;
+    localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(STORED));
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'ai_test_connection')
+        return {
+          ok: false,
+          kind: 'model_unavailable',
+          detail: '[antigravity/gemini-4-argon-high] [404]: Requested entity was not found.',
+        };
+      return { configured: true };
+    });
+    render(AiSettings, {});
+    await waitFor(() => expect(button('Test connection').disabled).toBe(false));
+    await fireEvent.click(button('Test connection'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Provider said'));
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('Connection failed: Model not available (model_unavailable)');
+    expect(text).toContain('Requested entity was not found.');
+    expect(text).toContain('(model m1)');
+  });
+
+  it('FER-573: renders a hostile provider message as plain text and hides key-like parts', async () => {
+    configured = true;
+    localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(STORED));
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'ai_test_connection')
+        return {
+          ok: false,
+          kind: 'server_error',
+          detail: '<img src=x onerror=alert(1)> Bearer abc123 sk-abcdef0123456789',
+        };
+      return { configured: true };
+    });
+    const { container } = render(AiSettings, {});
+    await waitFor(() => expect(button('Test connection').disabled).toBe(false));
+    await fireEvent.click(button('Test connection'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Provider said'));
+    expect(container.querySelector('img')).toBeNull();
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('<img src=x onerror=alert(1)>');
+    expect(text).not.toContain('abc123');
+    expect(text).not.toContain('sk-abcdef');
+  });
+
   it('can cancel a running connection test', async () => {
     configured = true;
     localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(STORED));

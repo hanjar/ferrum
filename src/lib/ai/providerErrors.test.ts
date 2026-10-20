@@ -4,6 +4,7 @@ import {
   classifyProviderFailure,
   describeProviderError,
   endpointHostPort,
+  providerSaid,
   uiCodeOf,
   type ProviderUiCode,
 } from './providerErrors';
@@ -18,6 +19,30 @@ describe('endpointHostPort', () => {
     );
     expect(endpointHostPort('nonsense')).toBeUndefined();
     expect(endpointHostPort(undefined)).toBeUndefined();
+  });
+});
+
+describe('FER-573: providerSaid / detail', () => {
+  it('formats the provider message with the model and ignores empty or unsafe input', () => {
+    expect(providerSaid('404 Requested entity was not found', 'ag/gemini-4-argon-high')).toBe(
+      'Provider said: 404 Requested entity was not found (model ag/gemini-4-argon-high)',
+    );
+    expect(providerSaid('boom')).toBe('Provider said: boom');
+    expect(providerSaid('boom', 'bad model name!')).toBe('Provider said: boom');
+    expect(providerSaid(undefined, 'm')).toBeUndefined();
+    expect(providerSaid('   ', 'm')).toBeUndefined();
+    expect(providerSaid('key sk-abcdef0123456789')).toBe('Provider said: key [redacted]');
+  });
+
+  it('keeps the code, message and actions unchanged and only adds the detail line', () => {
+    const plain = describeProviderError('server_error', { hostPort: '127.0.0.1:20128' });
+    const withDetail = describeProviderError('server_error', {
+      hostPort: '127.0.0.1:20128',
+      detail: 'upstream overloaded',
+    });
+    expect(plain.detail).toBeUndefined();
+    expect(withDetail.detail).toBe('Provider said: upstream overloaded');
+    expect({ ...withDetail, detail: undefined }).toEqual({ ...plain, detail: undefined });
   });
 });
 

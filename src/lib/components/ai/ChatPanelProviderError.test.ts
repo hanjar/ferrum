@@ -7,6 +7,13 @@ import { aiChatHost } from '../../ai/aiChatHost.svelte';
 import { ChatStore } from '../../ai/chatStore.svelte';
 import { FakeExecutor } from '../../ai/fixtures/chatFixtures';
 import { describeProviderError } from '../../ai/providerErrors';
+import { duWorkspace } from '../../diskUsage/duWorkspace.svelte';
+import * as actions from '../../actions';
+
+vi.mock('../../actions', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../actions')>()),
+  runAction: vi.fn(() => true),
+}));
 import { ProviderStatus } from '../../ai/providerStatus.svelte';
 
 afterEach(() => {
@@ -86,6 +93,41 @@ describe('provider error card', () => {
     );
   });
 
+  it('FER-573: shows "Provider said" (text only) under the failed message', async () => {
+    const m = mount();
+    m.store.send('zip left');
+    await tick();
+    const requestId = m.ex.submitted.at(-1)!.requestId;
+    const runId = m.store.runs.at(-1)!.runId;
+    const view = describeProviderError('model_not_found', {
+      hostPort: '127.0.0.1:20128',
+      detail: '[antigravity/gemini-4-argon-high] [404]: Requested entity was not found. <b>x</b>',
+      model: 'ag/gemini-4-argon-high',
+    });
+    m.ex.emit({
+      runId,
+      requestId,
+      state: 'failed',
+      errorMessage: view.message,
+      providerError: view,
+    });
+    await tick();
+    const detail = screen.getByTestId('provider-error-detail');
+    expect(detail.textContent).toBe(
+      'Provider said: [antigravity/gemini-4-argon-high] [404]: Requested entity was not found. <b>x</b> (model ag/gemini-4-argon-high)',
+    );
+    expect(detail.querySelector('b')).toBeNull();
+    expect(screen.getByTestId('provider-error-message').textContent).toContain(
+      'tidak mengenal model',
+    );
+  });
+
+  it('without a provider message there is no detail line', async () => {
+    const m = mount();
+    await failRun(m, 'server_error');
+    expect(screen.queryByTestId('provider-error-detail')).toBeNull();
+  });
+
   it('not_supported shows what can be done and no buttons', async () => {
     const m = mount();
     m.store.send('hapus semua');
@@ -121,5 +163,45 @@ describe('provider status indicator', () => {
     expect(screen.getByTestId('provider-status').getAttribute('aria-label')).toContain(
       '127.0.0.1:20128',
     );
+  });
+});
+
+describe('FER-573: size question while Disk Usage is closed', () => {
+  async function hintRun(m: ReturnType<typeof mount>) {
+    m.store.send('berapa ukuran size semua folder dan file di panel kanan?');
+    await tick();
+    const requestId = m.ex.submitted.at(-1)!.requestId;
+    const runId = m.store.runs.at(-1)!.runId;
+    m.ex.emit({
+      runId,
+      requestId,
+      state: 'needsInput',
+      modelText:
+        'Ukuran file dan folder dihitung lewat Disk Usage. Buka Disk Usage (Alt+Shift+D) di panel itu, lalu tanya lagi.',
+      uiHint: 'openDiskUsage',
+    });
+    await tick();
+  }
+
+  it('shows the fixed note and a button that runs the Disk Usage action once', async () => {
+    duWorkspace.open = false;
+    vi.mocked(actions.runAction).mockClear();
+    const m = mount();
+    await hintRun(m);
+    expect(screen.getByText(/Buka Disk Usage \(Alt\+Shift\+D\) di panel itu/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: /Buka Disk Usage/ }));
+    expect(actions.runAction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(actions.runAction).mock.calls[0][0].id).toBe('commands.diskUsage');
+  });
+
+  it('hides the button once Disk Usage is open (the action would only close it)', async () => {
+    duWorkspace.open = true;
+    try {
+      const m = mount();
+      await hintRun(m);
+      expect(screen.queryByRole('button', { name: /Buka Disk Usage/ })).toBeNull();
+    } finally {
+      duWorkspace.open = false;
+    }
   });
 });
