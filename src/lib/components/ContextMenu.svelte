@@ -1,5 +1,7 @@
 <script lang="ts">
   import { contextMenu } from '../stores/contextMenuStore.svelte';
+  import { assignMnemonics, menuKeys } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
 
   /**
    * Owner token: FileList mounts one instance per pane, so only the instance
@@ -30,16 +32,16 @@
     return enabledItems()[0];
   }
 
-  function onKeydown(e: KeyboardEvent) {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    e.preventDefault();
-    const list = enabledItems();
-    if (list.length === 0) return;
-    const idx = list.indexOf(document.activeElement as HTMLButtonElement);
-    const next =
-      e.key === 'ArrowDown' ? (idx + 1) % list.length : idx <= 0 ? list.length - 1 : idx - 1;
-    list[next].focus();
-  }
+  // FER-577: arrows / Home / End / accelerator letters / Esc / Tab come from `use:menuKeys`.
+  const menuOpts = { onClose: () => contextMenu.close() };
+
+  /** One unused accelerator letter per item (separators keep their slot as ''). */
+  const labels = $derived.by(() => {
+    const real = contextMenu.items.flatMap((it) => ('separator' in it ? [] : [it.label]));
+    const marked = assignMnemonics(real);
+    let n = 0;
+    return contextMenu.items.map((it) => ('separator' in it ? '' : marked[n++]));
+  });
 
   function onWindowKeydown(e: KeyboardEvent) {
     if (!contextMenu.isOpen || e.key !== 'Escape') return;
@@ -76,17 +78,18 @@
     aria-label="Context menu"
     tabindex="-1"
     bind:this={menuEl}
-    onkeydown={onKeydown}
+    use:menuKeys={menuOpts}
     style:left="{contextMenu.x}px"
     style:top="{contextMenu.y}px"
   >
-    {#each contextMenu.items as it (it)}
+    {#each contextMenu.items as it, i (it)}
       {#if 'separator' in it}
         <div class="sep" role="separator"></div>
       {:else}
         <button
           class="item"
           class:danger={it.danger}
+          data-danger={it.danger ? '' : undefined}
           role="menuitem"
           tabindex="-1"
           disabled={it.disabled}
@@ -106,7 +109,7 @@
                 it.run();
               }}
         >
-          <span class="label">{it.label}</span>
+          <span class="label"><Mnemonic label={labels[i]} alt={false} /></span>
           {#if it.kbd}<span class="kbd">{it.kbd}</span>{/if}
         </button>
       {/if}

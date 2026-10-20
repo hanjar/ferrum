@@ -1,13 +1,9 @@
-/** Svelte action for dialogs whose keyboard handling (Escape, Tab) lives on
- *  the modal element itself: move focus there on open — otherwise it stays
- *  on the file row behind the scrim and the dialog's `onkeydown` never fires —
- *  and hand it back to the opener when the dialog goes away. */
+import { dialog } from './dialogKit';
+
+/** Svelte action for modals whose Escape/Enter handling lives on the modal element itself.
+ *  FER-577: now a thin alias of `use:dialog` (dialogKit.ts): focus moves into the modal on
+ *  open, Tab is trapped, focus returns to the opener on destroy, and the modal counts toward
+ *  `modalDepth()` so the global shortcuts stay quiet behind it. */
 export function focusModal(node: HTMLElement) {
-  const opener = document.activeElement as HTMLElement | null;
-  node.focus();
-  return {
-    destroy() {
-      opener?.focus?.();
-    },
-  };
+  return dialog(node);
 }

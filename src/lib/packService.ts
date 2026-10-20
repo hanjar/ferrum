@@ -18,6 +18,11 @@ import { isInTauri } from './ipc/tauri';
 
 export type PackFormat = 'zip' | 'sevenz' | 'rar';
 
+/** The one user-facing name of a pack format (never the raw kind such as SEVENZ). */
+export function formatLabel(format: PackFormat): string {
+  return format === 'sevenz' ? '7Z' : format.toUpperCase();
+}
+
 export interface PackRequest {
   paths: readonly string[];
   /** Full destination file path of the archive. */

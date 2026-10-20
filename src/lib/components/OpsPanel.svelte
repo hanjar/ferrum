@@ -1,6 +1,8 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import CopyControls from './CopyControls.svelte';
+  import Mnemonic from './Mnemonic.svelte';
+  import { dialog } from '../dialogKit';
   import { ops, pctOf } from '../stores/opsStore.svelte';
   import {
     detailLine,
@@ -38,16 +40,59 @@
   function retry(op: OperationProgress) {
     void ops.retry(op.operationId);
   }
+
+  // FER-577: the panel is a modal. Esc and Alt+B (its own opener, muted globally while a modal
+  // is open) close it; focus starts on the first job so the arrows work immediately.
+  const dialogOpts = {
+    onEscape: () => (ops.panelOpen = false),
+    initial: () =>
+      document.querySelector<HTMLElement>('.panel .job') ??
+      document.querySelector<HTMLElement>('.panel button:not([disabled])'),
+  };
+
+  function onPanelKey(e: KeyboardEvent) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      e.stopPropagation();
+      ops.panelOpen = false;
+      return;
+    }
+    // Arrows walk the job cards (they are not tab stops, only the first control is).
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+    const t = e.target;
+    if (t instanceof HTMLElement && t.closest('select,input,textarea')) return;
+    const jobs = Array.from((e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('.job'));
+    if (jobs.length === 0) return;
+    const at = jobs.findIndex((j) => j === t || j.contains(t as Node));
+    e.preventDefault();
+    const next =
+      e.key === 'Home'
+        ? 0
+        : e.key === 'End'
+          ? jobs.length - 1
+          : Math.max(0, Math.min(jobs.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)));
+    jobs[next].focus();
+  }
 </script>
 
 {#if ops.panelOpen}
   <div class="scrim" onmousedown={() => (ops.panelOpen = false)}></div>
-  <aside class="panel" role="dialog" aria-label="Background Transfer Manager">
+  <aside
+    class="panel"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Background Transfer Manager"
+    tabindex="-1"
+    use:dialog={dialogOpts}
+    onkeydown={onPanelKey}
+  >
     <header>
       <Icon name="queue" size={15} />
       <span class="title">Background Transfer Manager</span>
       {#if hasFinished}
-        <button class="ghost" onclick={() => void ops.clearFinished()}>Clear history</button>
+        <button class="ghost" onclick={() => void ops.clearFinished()}>
+          <Mnemonic label="Clear &history" />
+        </button>
       {/if}
       <button class="icon" title="Collapse" onclick={() => (ops.panelOpen = false)}>
         <Icon name="close" size={11} />
@@ -64,7 +109,7 @@
     {:else}
       <div class="list">
         {#each view.active as op (op.operationId)}
-          <div class="job">
+          <div class="job" tabindex="-1">
             <div class="row1">
               <span class="kind">{op.kind}</span>
               <span class="name mono">{detailLine(op)}</span>
@@ -86,7 +131,7 @@
           <div class="sectionLabel">History</div>
         {/if}
         {#each view.history as op (op.operationId)}
-          <div class="job done">
+          <div class="job done" tabindex="-1">
             <div class="row1">
               <span class="kind">{op.kind}</span>
               <span class="name mono">{detailLine(op)}</span>
@@ -223,6 +268,10 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text3);
+  }
+  .job:focus-visible {
+    outline: 1.5px solid var(--accentLine);
+    outline-offset: -2px;
   }
   .job {
     display: flex;

@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import MenuBar from './MenuBar.svelte';
 import Dialogs from './Dialogs.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
+import { dialog } from '../dialogKit';
 
 const { run, available, markAvailable } = vi.hoisted(() => ({
   run: vi.fn(),
@@ -379,5 +380,52 @@ describe('MenuBar', () => {
       await tick();
       expect(screen.queryByRole('menu', { name: 'Archive' })).toBeNull();
     });
+  });
+});
+
+describe('FER-577: Alt+letter opens a menu', () => {
+  it('underlines the access letters and Alt+F / Alt+W open Files / Show', async () => {
+    render(MenuBar);
+    const bar = screen.getByRole('menubar');
+    expect(Array.from(bar.querySelectorAll('u')).map((u) => u.textContent)).toEqual([
+      'F',
+      'M',
+      'C',
+      'w',
+    ]);
+    fireEvent.keyDown(window, { key: 'f', altKey: true });
+    await tick();
+    expect(screen.getByRole('menu')).toBeTruthy();
+    await vi.waitFor(() => expect(document.activeElement).toBe(item('Open')));
+    fireEvent.keyDown(window, { key: 'w', altKey: true });
+    await tick();
+    await vi.waitFor(() => expect(document.activeElement).toBe(item('Show hidden files')));
+    expect(opener('Show').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('does not touch Alt+D / Alt+B (app shortcuts), Ctrl+Alt, or any Alt while a modal is open', async () => {
+    render(MenuBar);
+    const d = new KeyboardEvent('keydown', { key: 'd', altKey: true, cancelable: true });
+    window.dispatchEvent(d);
+    expect(d.defaultPrevented).toBe(false);
+    const ctrl = new KeyboardEvent('keydown', {
+      key: 'f',
+      altKey: true,
+      ctrlKey: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(ctrl);
+    expect(ctrl.defaultPrevented).toBe(false);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    const host = document.createElement('div');
+    host.tabIndex = -1;
+    document.body.append(host);
+    const modal = dialog(host);
+    fireEvent.keyDown(window, { key: 'f', altKey: true });
+    await tick();
+    expect(screen.queryByRole('menu')).toBeNull();
+    modal.destroy();
+    host.remove();
   });
 });

@@ -1,5 +1,6 @@
 /** Single action registry shared by menus, palette, shortcuts, and keybar. */
 import { ui, fullPageOpen, type Theme } from './uiState.svelte';
+import { modalDepth } from './dialogKit';
 import { activePane, inactivePane } from './stores/panesRegistry.svelte';
 import { dialogs } from './stores/dialogStore.svelte';
 import { ops } from './stores/opsStore.svelte';
@@ -1497,6 +1498,17 @@ export const FULL_PAGE_SHORTCUT_IDS: ReadonlySet<string> = new Set([
 /** True when a full page is open and this action's shortcut must not run. */
 export function shortcutBlockedByFullPage(action: Action): boolean {
   return fullPageOpen() && !FULL_PAGE_SHORTCUT_IDS.has(action.id);
+}
+
+/**
+ * FER-577 (X1): while a modal is open (`use:dialog` counts them) the panes behind it are
+ * unreachable, so only these shortcuts may still run; F5, F8, Delete, F7, Alt+... must not.
+ */
+export const MODAL_SHORTCUT_IDS: ReadonlySet<string> = new Set(['palette.open', 'app.settings']);
+
+/** True when a modal is open and this action's shortcut must not run. */
+export function shortcutBlockedByModal(action: Action): boolean {
+  return modalDepth() > 0 && !MODAL_SHORTCUT_IDS.has(action.id);
 }
 
 export function runAction(action: Action): boolean {
