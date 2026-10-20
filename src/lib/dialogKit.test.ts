@@ -191,6 +191,33 @@ describe('use:dialog', () => {
     a.action.destroy();
   });
 
+  it('Tab from a tabindex=-1 element after the last tabbable stays inside (S1)', () => {
+    const a = open(
+      `<div tabindex="-1"><button id="b1">1</button><button id="b2">2</button>
+       <div id="card" tabindex="-1">card</div></div>`,
+    );
+    const card = a.modal.querySelector<HTMLElement>('#card')!;
+    card.focus();
+    expect(key(card, 'Tab').defaultPrevented).toBe(true);
+    expect(document.activeElement?.id).toBe('b1'); // nothing after it: wrap to the first
+    card.focus();
+    key(card, 'Tab', { shiftKey: true });
+    expect(document.activeElement?.id).toBe('b2'); // previous tabbable
+    a.action.destroy();
+  });
+
+  it('a throwing `initial` does not leave modalDepth raised (N1)', () => {
+    const host = html('<div tabindex="-1"></div>');
+    expect(() =>
+      dialog(host.firstElementChild as HTMLElement, {
+        initial: () => {
+          throw new Error('boom');
+        },
+      }),
+    ).toThrow();
+    expect(modalDepth()).toBe(0);
+  });
+
   it('nested dialogs stack modalDepth', () => {
     const a = open('<div tabindex="-1"></div>');
     const b = open('<div tabindex="-1"></div>');
@@ -315,6 +342,27 @@ describe('use:menuKeys', () => {
     expect(document.activeElement?.id).toBe('m4');
     key(document.activeElement!, 'd');
     expect(document.activeElement?.id).toBe('m3');
+    k.destroy();
+  });
+
+  it('a data-danger item is only focused by its letter, Enter/click runs it (S2)', () => {
+    const m = html(
+      `<div role="menu"><button role="menuitem" id="s1">Open</button>
+       <button role="menuitem" id="d1" data-danger>Delete</button></div>`,
+    ).firstElementChild as HTMLElement;
+    const k = menuKeys(m);
+    const ran = vi.fn();
+    m.querySelector('#d1')!.addEventListener('click', ran);
+    const open = vi.fn();
+    m.querySelector('#s1')!.addEventListener('click', open);
+    m.querySelector<HTMLElement>('#s1')!.focus();
+    m.querySelector<HTMLElement>('#d1')!.dataset.mnemonic = 'd';
+    m.querySelector<HTMLElement>('#s1')!.dataset.mnemonic = 'o';
+    key(document.activeElement!, 'd');
+    expect(document.activeElement?.id).toBe('d1');
+    expect(ran).not.toHaveBeenCalled();
+    key(document.activeElement!, 'o');
+    expect(open).toHaveBeenCalledTimes(1); // safe items still run at once
     k.destroy();
   });
 

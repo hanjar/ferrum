@@ -211,7 +211,6 @@ export interface DialogOptions {
 export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
   let opts = initialOpts;
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  depth += 1;
 
   function focusInitial() {
     if (node.contains(document.activeElement) && document.activeElement !== node) return;
@@ -222,7 +221,10 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
         : node.querySelector<HTMLElement>(want ?? '[data-autofocus]');
     (el ?? node).focus();
   }
+  // FER-577 (N1): count the modal only once the setup did not throw, so a failing `initial`
+  // can never leave modalDepth stuck above zero (which would mute every shortcut).
   focusInitial();
+  depth += 1;
 
   function onKeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.isComposing) return;
@@ -249,7 +251,19 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       const last = list[list.length - 1];
       const active = document.activeElement;
       const outside = !node.contains(active) || active === node;
-      if (e.shiftKey && (active === first || outside)) {
+      if (active instanceof HTMLElement && !outside && !list.includes(active)) {
+        // FER-577 (S1): focus sits on a tabindex=-1 element inside the dialog (an arrow-key
+        // target such as an OpsPanel job). The browser would continue after it, possibly
+        // behind the modal, so pick the neighbouring tabbable ourselves.
+        e.preventDefault();
+        const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+        const next = e.shiftKey
+          ? [...list]
+              .reverse()
+              .find((el) => active.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
+          : list.find((el) => active.compareDocumentPosition(el) & FOLLOWING);
+        (next ?? (e.shiftKey ? last : first)).focus();
+      } else if (e.shiftKey && (active === first || outside)) {
         e.preventDefault();
         last.focus();
       } else if (!e.shiftKey && (active === last || (outside && active !== node))) {
@@ -450,7 +464,7 @@ export function menuKeys(node: HTMLElement, initial: MenuKeysOptions = {}) {
       e.preventDefault();
       e.stopPropagation();
       marked[0].focus();
-      marked[0].click();
+      if (!marked[0].hasAttribute('data-danger')) marked[0].click();
       return;
     }
     const pool =

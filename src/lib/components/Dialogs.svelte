@@ -462,8 +462,10 @@
    * select or textarea (those activate themselves), i.e. on the dialog itself or on a text
    * field / radio / checkbox.
    */
-  function onEnter(_e: KeyboardEvent, t: HTMLElement) {
+  function onEnter(e: KeyboardEvent, t: HTMLElement) {
     if (busy) return;
+    // A held-down or doubled Enter must never confirm a destructive / overwriting dialog.
+    if (e.repeat && (d?.kind === 'delete' || d?.kind === 'copy' || d?.kind === 'move')) return;
     // Delete is destructive: only a bare Enter on the dialog itself confirms. Enter on the
     // "permanently" checkbox does nothing (Space toggles it).
     if (d?.kind === 'delete' && t !== modalEl) return;

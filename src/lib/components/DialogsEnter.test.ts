@@ -90,6 +90,21 @@ describe('FER-577 X2: Enter in the Delete dialog', () => {
   });
 });
 
+describe('FER-577 N5: a repeated Enter never confirms Delete', () => {
+  it('ignores a held-down Enter on the Delete dialog', async () => {
+    render(Dialogs);
+    dialogs.open({ kind: 'delete', paths: ['C:/x/a.txt'], permanent: false });
+    await tick();
+    await vi.waitFor(() => expect(document.activeElement).toBe(modal()));
+    modal().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true }),
+    );
+    await tick();
+    expect(mutMocks.deleteEntries).not.toHaveBeenCalled();
+    expect(dialogs.current?.kind).toBe('delete');
+  });
+});
+
 describe('FER-577 X2: buttons keep native Enter in the other dialogs', () => {
   it('Pack: Enter on Cancel does not start the pack', async () => {
     render(Dialogs);

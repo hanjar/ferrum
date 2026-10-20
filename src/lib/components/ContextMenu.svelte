@@ -89,6 +89,7 @@
         <button
           class="item"
           class:danger={it.danger}
+          data-danger={it.danger ? '' : undefined}
           role="menuitem"
           tabindex="-1"
           disabled={it.disabled}

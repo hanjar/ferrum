@@ -266,9 +266,15 @@ describe('ContextMenu keyboard', () => {
     expect(document.activeElement?.textContent).toContain('Delete');
     key(document.activeElement!, 'Home');
     expect(document.activeElement?.textContent).toContain('Open');
-    const delKey = menu().querySelectorAll<HTMLElement>('[data-mnemonic]')[2].dataset.mnemonic!;
-    key(document.activeElement!, delKey);
-    expect(runs.del).toHaveBeenCalledTimes(1);
+    const marks = Array.from(menu().querySelectorAll<HTMLElement>('[data-mnemonic]'));
+    // S2: the dangerous item is only focused by its letter, Enter (click) runs it.
+    key(document.activeElement!, marks[2].dataset.mnemonic!);
+    expect(document.activeElement).toBe(marks[2]);
+    expect(runs.del).not.toHaveBeenCalled();
+    expect(contextMenu.isOpen).toBe(true);
+    // A safe item runs at once.
+    key(document.activeElement!, marks[1].dataset.mnemonic!);
+    expect(runs.dup).toHaveBeenCalledTimes(1);
     expect(contextMenu.isOpen).toBe(false);
   });
 

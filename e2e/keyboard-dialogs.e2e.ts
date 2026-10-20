@@ -197,6 +197,10 @@ test.describe('Keyboard-first dialogs (FER-577)', () => {
     const del = menu.getByRole('menuitem', { name: /^Delete\b/ }).first();
     const letter = await del.evaluate((el) => (el as HTMLElement).dataset.mnemonic!);
     await page.keyboard.press(letter);
+    // A dangerous item is only focused by its letter (FER-577 S2); Enter runs it.
+    await expect(del).toBeFocused();
+    await expect(page.getByRole('dialog', { name: 'Delete' })).toHaveCount(0);
+    await page.keyboard.press('Enter');
     await expect(page.getByRole('dialog', { name: 'Delete' })).toBeVisible();
   });
 
