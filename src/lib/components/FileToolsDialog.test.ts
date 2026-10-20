@@ -66,9 +66,9 @@ describe('FileToolsDialog', () => {
   it('labels legacy algorithms honestly in the create sheet', () => {
     fileTools.open({ kind: 'checksumCreate', paths: ['C:\\d\\a.txt'] });
     render(FileToolsDialog);
-    expect(screen.getByText('SHA-1 (legacy verify)')).toBeTruthy();
-    expect(screen.getByText('MD5 (legacy verify)')).toBeTruthy();
-    expect(screen.getByText('CRC32 (legacy verify)')).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'SHA-1 (legacy verify)' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'MD5 (legacy verify)' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'CRC32 (legacy verify)' })).toBeTruthy();
   });
 
   it('offers a conflict policy that defaults to refuse and only renames combined files', async () => {

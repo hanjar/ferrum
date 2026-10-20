@@ -8,12 +8,12 @@
    * Stop (RQ-8.1): "Stop the current run?" with the no-rollback note.
    */
   import { onMount } from 'svelte';
+  import { dialog as dialogAction } from '../../dialogKit';
   import type { AutomationStore, DialogState } from '../../stores/automationStore.svelte';
 
   let { store, dialog }: { store: AutomationStore; dialog: DialogState } = $props();
 
   let defaultBtn: HTMLButtonElement | undefined = $state();
-  let box: HTMLDivElement | undefined = $state();
 
   const busy = $derived(
     dialog.kind === 'pause'
@@ -23,27 +23,9 @@
 
   onMount(() => defaultBtn?.focus());
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      store.closeDialog();
-      return;
-    }
-    if (e.key !== 'Tab' || !box) return;
-    // Keep focus inside the dialog.
-    const items = [...box.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
-    if (items.length === 0) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
+  // FER-577: Esc / Tab trap / modalDepth from the shared dialog action. The safe default button
+  // keeps the initial focus (onMount above); Esc stays local so it cannot reach a page behind.
+  const dialogOpts = { onEscape: () => store.closeDialog(), initial: () => defaultBtn };
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -55,8 +37,7 @@
     aria-labelledby="ps-title"
     aria-describedby="ps-body"
     tabindex="-1"
-    bind:this={box}
-    onkeydown={onKey}
+    use:dialogAction={dialogOpts}
     data-testid="{dialog.kind}-dialog"
   >
     {#if dialog.kind === 'pause'}

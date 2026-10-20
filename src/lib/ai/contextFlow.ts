@@ -69,6 +69,8 @@ export class ContextFlow {
       sourcePane: intent.sourcePane,
       target: intent.target,
       outputName: intent.outputName,
+      format: intent.format,
+      level: intent.level,
       scope,
       manifest: this.resolver.entries(scope.handle),
     });
@@ -116,6 +118,8 @@ export class ContextFlow {
       target:
         intent.target.kind === 'pane' ? intent.target : { kind: 'pane', pane: 'activeAtSubmit' },
       outputName: intent.outputName ?? entityArchiveName(location),
+      format: intent.format,
+      level: intent.level,
       scope,
       manifest: this.resolver.entries(scope.handle),
     });

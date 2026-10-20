@@ -14,6 +14,7 @@ import {
   loadColumnWidths,
 } from '../stores/columnsStore.svelte';
 import { ui } from '../uiState.svelte';
+import { prefs } from '../stores/prefsStore.svelte';
 
 vi.mock('../ipc/mutations', () => ({
   createEntry: vi.fn(),
@@ -204,6 +205,59 @@ describe('row context menu', () => {
       cursorEntry: () => ({ name: 'notes.txt', path: 'C:\\bench\\notes.txt', isDir: false }),
     }),
   );
+  it('FER-577 S2: with confirmBeforeDeleting off, Menu key + the Delete letter only focuses Delete', async () => {
+    prefs.fileOperations.confirmBeforeDeleting = false;
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      cursor: 'C:\\bench\\notes.txt',
+    });
+    const body = container.querySelector('.body') as HTMLElement;
+    body.focus();
+    fireEvent.keyDown(body, { key: 'ContextMenu' });
+    await tick();
+    const del = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+      (b) => b.dataset.danger !== undefined && /^Delete/.test(b.textContent?.trim() ?? ''),
+    )!;
+    expect(del).toBeTruthy();
+    fireEvent.keyDown(document.activeElement!, { key: del.dataset.mnemonic! });
+    await tick();
+    expect(document.activeElement).toBe(del);
+    expect(contextMenu.isOpen).toBe(true);
+    expect(dialogs.current).toBeNull();
+    prefs.fileOperations.confirmBeforeDeleting = true;
+  });
+
+  it('FER-577: Menu key / Shift+F10 open the menu for the cursor row, anchored to that row', async () => {
+    const onlistkey = vi.fn();
+    const { container } = render(FileList, {
+      rows: twoRows,
+      viewportOverride: 520,
+      cursor: 'C:\\bench\\notes.txt',
+      onlistkey,
+    });
+    const body = container.querySelector('.body') as HTMLElement;
+    body.focus();
+    const ev = new KeyboardEvent('keydown', {
+      key: 'F10',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    body.dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(contextMenu.isOpen).toBe(true);
+    expect(onlistkey).not.toHaveBeenCalled(); // the pane never sees a menu key
+    contextMenu.close();
+    fireEvent.keyDown(body, { key: 'ContextMenu' });
+    await tick();
+    expect(contextMenu.isOpen).toBe(true);
+    contextMenu.close();
+    fireEvent.keyDown(body, { key: 'ArrowDown' });
+    expect(onlistkey).toHaveBeenCalledTimes(1);
+  });
+
   it('right-click on an unselected row selects it first, then opens the standard menu', async () => {
     const onrowclick = vi.fn();
     const { container } = render(FileList, {

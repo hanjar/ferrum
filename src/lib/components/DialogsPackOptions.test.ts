@@ -78,7 +78,7 @@ describe('FER-59 / FER-66: Pack compression level options in Dialogs and packSer
     archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Reports.zip');
     register(0, DIR, [FILE_A]);
     dialogs.beginPack('zip');
-    const { container, getByText } = render(Dialogs);
+    const { container, getByRole } = render(Dialogs);
     await tick();
 
     const storeRadio = container.querySelector<HTMLInputElement>(
@@ -91,7 +91,7 @@ describe('FER-59 / FER-66: Pack compression level options in Dialogs and packSer
       await tick();
     }
 
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
 
     expect(archiveMocks.archiveCreate).toHaveBeenCalledTimes(1);
@@ -109,7 +109,7 @@ describe('FER-59 / FER-66: Pack compression level options in Dialogs and packSer
     archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Reports.7z');
     register(0, DIR, [FILE_A]);
     dialogs.beginPack('sevenz');
-    const { container, getByText } = render(Dialogs);
+    const { container, getByRole } = render(Dialogs);
     await tick();
 
     const maxRadio = container.querySelector<HTMLInputElement>(
@@ -121,7 +121,7 @@ describe('FER-59 / FER-66: Pack compression level options in Dialogs and packSer
       await tick();
     }
 
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
 
     expect(archiveMocks.archiveCreate).toHaveBeenCalledTimes(1);

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { focusModal } from '../focusModal';
+  import { dialog } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { multiRename } from '../stores/multiRenameStore.svelte';
   import type { CaseMode } from '../multiRename';
 
@@ -28,12 +29,13 @@
     }
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      d.close();
-    }
-  }
+  // FER-577: Esc closes; Enter in a field runs the rename when it is allowed.
+  const dialogOpts = {
+    onEscape: () => d.close(),
+    onEnter: () => {
+      if (d.canRun()) void d.run();
+    },
+  };
 </script>
 
 {#if d.open}
@@ -45,15 +47,14 @@
     aria-modal="true"
     aria-label="Multi-Rename Tool"
     tabindex="-1"
-    use:focusModal
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     <h2>Multi-Rename Tool</h2>
     <p class="path mono">{d.paths.length} selected item{d.paths.length === 1 ? '' : 's'}</p>
 
     <div class="rules">
       <label class="field">
-        <span>Name pattern</span>
+        <span><Mnemonic label="Name &pattern" /></span>
         <input
           bind:value={d.options.pattern}
           placeholder="[N] — name, [E] ext, [C] counter, [DATE], [TIME]"
@@ -63,17 +64,17 @@
       </label>
       <div class="pair">
         <label class="field">
-          <span>Find</span>
+          <span><Mnemonic label="&Find" /></span>
           <input bind:value={d.options.find} spellcheck="false" disabled={d.busy} />
         </label>
         <label class="field">
-          <span>Replace</span>
+          <span><Mnemonic label="R&eplace" /></span>
           <input bind:value={d.options.replace} spellcheck="false" disabled={d.busy} />
         </label>
       </div>
       <div class="pair">
         <label class="field">
-          <span>Case</span>
+          <span><Mnemonic label="&Case" /></span>
           <select bind:value={d.options.caseMode} disabled={d.busy}>
             {#each caseModes as m (m.value)}
               <option value={m.value}>{m.label}</option>
@@ -81,15 +82,15 @@
           </select>
         </label>
         <label class="field narrow">
-          <span>Counter start</span>
+          <span><Mnemonic label="Counter &start" /></span>
           <input type="number" bind:value={d.options.counterStart} disabled={d.busy} />
         </label>
         <label class="field narrow">
-          <span>Step</span>
+          <span><Mnemonic label="S&tep" /></span>
           <input type="number" bind:value={d.options.counterStep} disabled={d.busy} />
         </label>
         <label class="field narrow">
-          <span>Pad</span>
+          <span><Mnemonic label="Pa&d" /></span>
           <input
             type="number"
             min="0"
@@ -100,7 +101,7 @@
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={d.options.regex} disabled={d.busy} />
-          Find is a regular expression
+          <Mnemonic label="Find is a regular e&xpression" />
         </label>
       </div>
     </div>
@@ -141,9 +142,11 @@
     <div class="actions">
       <button class="ghost" onclick={() => d.close()} disabled={d.busy}>Close</button>
       <button class="ghost" onclick={() => void d.undo()} disabled={!d.canUndo()}>
-        Undo last rename
+        <Mnemonic label="&Undo last rename" />
       </button>
-      <button class="primary" onclick={() => void d.run()} disabled={!d.canRun()}>Rename</button>
+      <button class="primary" onclick={() => void d.run()} disabled={!d.canRun()}
+        ><Mnemonic label="&Rename" /></button
+      >
     </div>
   </div>
 {/if}
