@@ -8,6 +8,7 @@
   import { activityPage } from '../stores/activityPageStore.svelte';
   import { activePane } from '../stores/panesRegistry.svelte';
   import type { RetentionDays } from '../ipc/activity';
+  import { dialog, roving } from '../dialogKit';
 
   const choices: RetentionDays[] = [7, 30, 90];
   let busy = $state(false);
@@ -66,6 +67,15 @@
     }
   }
 
+  // FER-577 (B3): the confirmation is a real modal step. Focus goes to the safe "Batal", Tab stays
+  // inside, Esc cancels ONLY this confirmation (it must not close Settings behind it) and focus
+  // returns to the button that asked.
+  const confirmOpts = {
+    initial: '[data-autofocus]',
+    onEscape: () => activityPage.cancelScope(),
+    mnemonics: false,
+  };
+
   async function confirm() {
     await guard(() => activityPage.confirmScope());
   }
@@ -100,7 +110,13 @@
   </p>
 
   <div class="rowTitle" id="retention-label">Retensi riwayat</div>
-  <div class="segmented" role="radiogroup" aria-labelledby="retention-label">
+  <!-- select: false - arrowing onto a shorter retention must not open the delete confirmation. -->
+  <div
+    class="segmented"
+    role="radiogroup"
+    aria-labelledby="retention-label"
+    use:roving={{ select: false }}
+  >
     {#each choices as d (d)}
       <button
         role="radio"
@@ -142,6 +158,9 @@
       role="alertdialog"
       aria-labelledby="scope-title"
       aria-describedby="scope-desc"
+      aria-modal="true"
+      tabindex="-1"
+      use:dialog={confirmOpts}
     >
       <div class="scopeTitle" id="scope-title">{scopeTitle(pending.scope)}</div>
       <div id="scope-desc" aria-live="polite">
@@ -168,7 +187,9 @@
         {/if}
       </div>
       <div class="privacyRow">
-        <button class="privacyBtn" onclick={() => activityPage.cancelScope()}>Batal</button>
+        <button class="privacyBtn" data-autofocus onclick={() => activityPage.cancelScope()}>
+          Batal
+        </button>
         <button
           class="privacyBtn danger armed"
           disabled={busy || pending.busy || pending.preview === null}

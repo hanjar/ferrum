@@ -3,7 +3,6 @@
   import {
     ui,
     PALETTES,
-    type PaletteName,
     type Theme,
     type Density,
     type IconStyle,
@@ -24,7 +23,8 @@
     openThirdPartyNotices,
     type TerminalChoice,
   } from '../ipc/shellOpen';
-  import { dialog } from '../dialogKit';
+  import { dialog, roving } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { prefs } from '../stores/prefsStore.svelte';
   import { copyText } from '../clipboard';
   import { APP_NAME, BUILD_LABEL, BUILD_DETAIL } from '../version';
@@ -49,45 +49,41 @@
     { value: 'light', label: 'Light' },
     { value: 'system', label: 'System' },
   ];
-  const themeValues = themes.map((t) => t.value);
-  const paletteValues = PALETTES.map((p) => p.value);
   const densities: { value: Density; label: string }[] = [
     { value: 'compact', label: 'Compact' },
     { value: 'comfortable', label: 'Comfortable' },
   ];
-  const densityValues = densities.map((d) => d.value);
   const iconStyles: { value: IconStyle; label: string }[] = [
     { value: 'colored', label: 'Colored' },
     { value: 'monochrome', label: 'Monochrome' },
   ];
-  const iconValues = iconStyles.map((i) => i.value);
   const iconThemes: { value: IconTheme; label: string }[] = ICON_THEMES.map((t) => ({
     value: t,
     label: t,
   }));
-  const iconThemeValues = iconThemes.map((i) => i.value);
   const fontLevels: { value: FontLevel; label: string }[] = [
     { value: 's', label: 'Small' },
     { value: 'm', label: 'Medium' },
     { value: 'l', label: 'Large' },
     { value: 'xl', label: 'Extra Large' },
   ];
-  const terminalValues = TERMINAL_CHOICES.map((t) => t.value);
 
   // v3 layout: Appearance is the only functional category this phase; the
   // rest are honest placeholders (epic scope forbids expanding them).
-  const categories: { label: string; active: boolean }[] = [
-    { label: 'Appearance', active: true },
-    { label: 'Tabs', active: true },
-    { label: 'File Operations', active: true },
-    { label: 'Keyboard Shortcuts', active: false },
-    { label: 'Preview', active: true },
-    { label: 'Hotlist', active: true },
-    { label: 'Indexer', active: true },
-    { label: 'Archive', active: true },
-    { label: 'AI', active: true },
-    { label: 'Network', active: false },
-    { label: 'Advanced', active: false },
+  // FER-577 (B3): `mn` is the label with its Alt+letter written `&X`. Every letter is unique
+  // inside the dialog (SettingsKeyboard.test.ts); the placeholders have none.
+  const categories: { label: string; mn: string; active: boolean }[] = [
+    { label: 'Appearance', mn: '&Appearance', active: true },
+    { label: 'Tabs', mn: '&Tabs', active: true },
+    { label: 'File Operations', mn: '&File Operations', active: true },
+    { label: 'Keyboard Shortcuts', mn: 'Keyboard Shortcuts', active: false },
+    { label: 'Preview', mn: '&Preview', active: true },
+    { label: 'Hotlist', mn: '&Hotlist', active: true },
+    { label: 'Indexer', mn: 'Inde&xer', active: true },
+    { label: 'Archive', mn: 'A&rchive', active: true },
+    { label: 'AI', mn: 'A&I', active: true },
+    { label: 'Network', mn: 'Network', active: false },
+    { label: 'Advanced', mn: 'Advanced', active: false },
   ];
 
   // FER-429: the categories are anchors into the one scrolling body. Clicking one scrolls to
@@ -133,7 +129,6 @@
   function limitLabel(bytes: number): string {
     return bytes >= 1_000_000 ? `${bytes / 1_000_000} MB` : `${bytes / 1000} KB`;
   }
-  const previewLimitValues = PREVIEW_TEXT_LIMITS.map(String);
 
   const conflictPolicies = [
     { value: 'ask', label: 'Ask' },
@@ -194,30 +189,45 @@
   // `use:dialog` (dialogKit.ts) instead of a hand-rolled copy.
   const dialogOpts = { onEscape: () => onclose?.() };
 
-  /** Radio semantics for segmented groups: arrows/Home/End move AND select. */
-  function radioKey(e: KeyboardEvent, values: string[], current: string, set: (v: string) => void) {
-    const idx = values.indexOf(current);
-    const go = (i: number) => {
-      const v = values[(i + values.length) % values.length];
-      set(v);
-      const btn = (e.currentTarget as HTMLElement).querySelector<HTMLButtonElement>(
-        `[data-value="${v}"]`,
-      );
-      btn?.focus();
-    };
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+  const CONTROLS =
+    'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]';
+
+  /** First control that sits after the category anchor in the scrolling body. */
+  function firstControlAfter(label: string): HTMLElement | undefined {
+    const anchor = catAnchors().find((el) => el.dataset.cat === label);
+    if (!body || !anchor) return undefined;
+    const inside = anchor.matches(CONTROLS) ? anchor : anchor.querySelector<HTMLElement>(CONTROLS);
+    if (inside) return inside;
+    return Array.from(body.querySelectorAll<HTMLElement>(CONTROLS)).find(
+      (el) => anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  }
+
+  /** Ctrl+PageDown / Ctrl+PageUp: next / previous category, focus lands in its first control. */
+  function stepCategory(by: 1 | -1) {
+    const active = categories.filter((c) => c.active);
+    const at = active.findIndex((c) => c.label === currentCat);
+    const next = active[(at + by + active.length) % active.length];
+    goCategory(next.label);
+    firstControlAfter(next.label)?.focus();
+  }
+
+  function onModalKey(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'PageDown' || e.key === 'PageUp')) {
       e.preventDefault();
-      go(idx + 1);
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      go(idx - 1);
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      go(0);
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      go(values.length - 1);
+      stepCategory(e.key === 'PageDown' ? 1 : -1);
     }
+  }
+
+  /** ArrowRight on a category button: enter that category's first control. */
+  function onCatKey(e: KeyboardEvent, label: string) {
+    if (e.key !== 'ArrowRight' || e.ctrlKey || e.altKey || e.shiftKey) return;
+    const target = firstControlAfter(label);
+    if (!target) return;
+    e.preventDefault();
+    goCategory(label);
+    target.focus();
   }
 </script>
 
@@ -230,10 +240,11 @@
   aria-label="Settings"
   tabindex="-1"
   use:dialog={dialogOpts}
+  onkeydown={onModalKey}
 >
   <aside class="cats">
     <h2>Settings</h2>
-    <nav>
+    <nav aria-label="Settings categories" use:roving={{ items: '.cat', orientation: 'vertical' }}>
       {#each categories as c (c.label)}
         <button
           class="cat"
@@ -242,8 +253,9 @@
           title={c.label}
           aria-current={c.label === currentCat ? 'true' : undefined}
           onclick={() => goCategory(c.label)}
+          onkeydown={(e) => onCatKey(e, c.label)}
         >
-          {c.label}
+          <Mnemonic label={c.mn} />
         </button>
       {/each}
     </nav>
@@ -288,13 +300,7 @@
           <div class="name">Theme</div>
           <div class="desc">Dark is tuned for long sessions in low light</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="Theme"
-          tabindex="-1"
-          onkeydown={(e) => radioKey(e, themeValues, ui.theme, (v) => ui.setTheme(v as Theme))}
-        >
+        <div class="segmented" role="radiogroup" aria-label="Theme" tabindex="-1" use:roving>
           {#each themes as t (t.value)}
             <button
               role="radio"
@@ -315,16 +321,7 @@
           <div class="name">Color theme</div>
           <div class="desc">Accent, file-type and status colors</div>
         </div>
-        <div
-          class="chips"
-          role="radiogroup"
-          aria-label="Color theme"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(e, paletteValues, ui.palette, (v) => {
-              ui.palette = v as PaletteName;
-            })}
-        >
+        <div class="chips" role="radiogroup" aria-label="Color theme" tabindex="-1" use:roving>
           {#each PALETTES as p (p.value)}
             <button
               role="radio"
@@ -352,16 +349,7 @@
           <div class="name">Density</div>
           <div class="desc">Compact fits ~30% more rows; Comfortable is easier on touchpads</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="Density"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(e, densityValues, ui.density, (v) => {
-              ui.density = v as Density;
-            })}
-        >
+        <div class="segmented" role="radiogroup" aria-label="Density" tabindex="-1" use:roving>
           {#each densities as d (d.value)}
             <button
               role="radio"
@@ -384,16 +372,7 @@
           <div class="name">Icon theme</div>
           <div class="desc">Shape of file-type icons</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="Icon theme"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(e, iconThemeValues, ui.iconTheme, (v) => {
-              ui.iconTheme = v as IconTheme;
-            })}
-        >
+        <div class="segmented" role="radiogroup" aria-label="Icon theme" tabindex="-1" use:roving>
           {#each iconThemes as i (i.value)}
             <button
               role="radio"
@@ -416,16 +395,7 @@
           <div class="name">File icons</div>
           <div class="desc">Colour tags by file type</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="File icons"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(e, iconValues, ui.iconStyle, (v) => {
-              ui.iconStyle = v as IconStyle;
-            })}
-        >
+        <div class="segmented" role="radiogroup" aria-label="File icons" tabindex="-1" use:roving>
           {#each iconStyles as i (i.value)}
             <button
               role="radio"
@@ -577,14 +547,7 @@
           <div class="name">Terminal</div>
           <div class="desc">Used by Open Terminal Here</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="Terminal"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(e, terminalValues, ui.terminal, (v) => (ui.terminal = v as TerminalChoice))}
-        >
+        <div class="segmented" role="radiogroup" aria-label="Terminal" tabindex="-1" use:roving>
           {#each TERMINAL_CHOICES as t (t.value)}
             <button
               role="radio"
@@ -651,19 +614,7 @@
           <div class="name">Tab width</div>
           <div class="desc">Fit shrinks to the label; fixed is uniform</div>
         </div>
-        <div
-          class="segmented"
-          role="radiogroup"
-          aria-label="Tab width"
-          tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(
-              e,
-              ['fit', 'fixed'],
-              ui.tabs.tabWidth,
-              (v) => (ui.tabs.tabWidth = v as TabWidth),
-            )}
-        >
+        <div class="segmented" role="radiogroup" aria-label="Tab width" tabindex="-1" use:roving>
           {#each [{ value: 'fit', label: 'Fit' }, { value: 'fixed', label: 'Fixed' }] as t (t.value)}
             <button
               role="radio"
@@ -864,13 +815,7 @@
           role="radiogroup"
           aria-label="Max text preview"
           tabindex="-1"
-          onkeydown={(e) =>
-            radioKey(
-              e,
-              previewLimitValues,
-              String(ui.preview.maxTextBytes),
-              (v) => (ui.preview.maxTextBytes = Number(v)),
-            )}
+          use:roving
         >
           {#each PREVIEW_TEXT_LIMITS as n (n)}
             <button

@@ -8,6 +8,7 @@
    */
   import { compareStore } from '../stores/compareStore.svelte';
   import { isResolvable, type SyncAction, type SyncDirection } from '../syncPlan';
+  import { dialog } from '../dialogKit';
 
   const store = compareStore;
 
@@ -26,6 +27,23 @@
     deleteLeft: 'delete (left)',
     conflict: 'conflict — not executed until decided',
     skip: 'same',
+  };
+
+  // FER-577 (B3): docked panel. The cursor starts on the checked direction; Esc closes the panel,
+  // except while a synchronization runs (a long run must not be hidden or stopped by a stray Esc,
+  // use its Cancel button). The overwrite confirmation below is a real modal step of its own.
+  const panelOpts = {
+    modal: false,
+    mnemonics: false,
+    initial: 'input[name="sync-direction"]:checked',
+    onEscape: () => {
+      if (!store.syncBusy) store.closeSync();
+    },
+  };
+  const confirmOpts = {
+    initial: '[data-autofocus]',
+    onEscape: () => (store.syncConfirm = null),
+    mnemonics: false,
   };
 
   const PAGE = 200;
@@ -49,7 +67,7 @@
 </script>
 
 {#if store.syncOpen}
-  <aside class="panel" aria-label="Synchronize Directories">
+  <aside class="panel" aria-label="Synchronize Directories" tabindex="-1" use:dialog={panelOpts}>
     <div class="headRow">
       <h2>Synchronize Dirs</h2>
       <button class="close" aria-label="Close synchronize panel" onclick={() => store.closeSync()}>
@@ -156,13 +174,22 @@
     {/if}
 
     {#if store.syncConfirm}
-      <div class="confirm" role="alertdialog" aria-label="Confirm overwrite">
+      <div
+        class="confirm"
+        role="alertdialog"
+        aria-label="Confirm overwrite"
+        aria-modal="true"
+        tabindex="-1"
+        use:dialog={confirmOpts}
+      >
         <p>
           {store.syncConfirm.overwrites} file(s) will be overwritten on the target side. Overwritten files
           are replaced, not backed up.
         </p>
         <div class="row buttons">
-          <button type="button" onclick={() => (store.syncConfirm = null)}>Cancel</button>
+          <button type="button" data-autofocus onclick={() => (store.syncConfirm = null)}>
+            Cancel
+          </button>
           <button
             type="button"
             class="primary danger"

@@ -150,12 +150,23 @@ export function tabbables(root: HTMLElement): HTMLElement[] {
   });
 }
 
+/**
+ * The Latin access letter / digit of a key event. On a non-Latin layout (Cyrillic, Greek, ...)
+ * `e.key` is not a Latin letter, so the physical key (`KeyX` / `DigitN`) stands in (FER-577, N3).
+ */
+export function accessKey(e: Pick<KeyboardEvent, 'key' | 'code'>): string | null {
+  if (/^[a-z0-9]$/i.test(e.key)) return e.key;
+  const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code ?? '');
+  if (m) return (m[1] ?? m[2]).toLowerCase();
+  return e.key.length === 1 && /^[\p{L}\p{N}]$/u.test(e.key) ? e.key : null;
+}
+
 /** Native activation keys: Enter on these must not be hijacked by a dialog. */
 function ownsEnter(t: HTMLElement | null, root: HTMLElement): boolean {
   if (!t || t === root) return false;
   if (t.closest('textarea,select')) return true;
   const el = t.closest<HTMLElement>(
-    'button,a[href],summary,[role="button"],[role="menuitem"],[role="tab"],[role="option"]',
+    'button,a[href],summary,input[type="button"],input[type="submit"],input[type="reset"],[role="button"],[role="menuitem"],[role="tab"],[role="option"]',
   );
   return !!el && root.contains(el);
 }
@@ -284,9 +295,10 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       !e.ctrlKey &&
       !e.metaKey &&
       !e.shiftKey &&
-      e.key.length === 1
+      e.location !== 3 && // FER-577 (N2): Alt+Numpad digits are Alt-codes, not accelerators
+      accessKey(e) !== null
     ) {
-      const hit = findMnemonic(node, e.key);
+      const hit = findMnemonic(node, accessKey(e)!);
       if (hit) {
         e.preventDefault();
         e.stopPropagation();
@@ -373,7 +385,9 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
     else return;
     const list = items();
     if (list.length === 0) return;
-    const at = list.findIndex((el) => el === e.target || el.contains(e.target as Node));
+    let at = list.findIndex((el) => el === e.target || el.contains(e.target as Node));
+    // The group itself has focus (a click on its gap): continue from the selected item.
+    if (at < 0 && e.target === node) at = Math.max(0, list.findIndex(isSelected));
     if (at < 0) return;
     e.preventDefault();
     e.stopPropagation();

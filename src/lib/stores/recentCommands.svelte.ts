@@ -16,7 +16,7 @@ export const RECENT_COMMANDS_MAX = 3;
  * the cursor, Tab switches panes, Backspace goes up), and the clipboard reflexes (Ctrl+C / X / V).
  * Without this list the section would always read "Paste, Copy, Go up" and never help.
  */
-export const RECENT_EXCLUDED_IDS: ReadonlySet<string> = new Set([
+export const RECENT_EXCLUDED_IDS: readonly string[] = [
   'palette.open',
   'pane.switch',
   'file.open',
@@ -28,7 +28,7 @@ export const RECENT_EXCLUDED_IDS: ReadonlySet<string> = new Set([
   'file.clipCopy',
   'file.clipCut',
   'file.clipPaste',
-]);
+];
 
 function storage(): Storage | undefined {
   try {
@@ -65,7 +65,7 @@ class RecentCommandsStore {
 
   /** Record a run command id (excluded ids are ignored). Returns true when the list changed. */
   record(id: string): boolean {
-    if (RECENT_EXCLUDED_IDS.has(id) || id === '') return false;
+    if (RECENT_EXCLUDED_IDS.includes(id) || id === '') return false;
     if (this.ids[0] === id) return false;
     this.ids = sanitizeRecent([id, ...this.ids]);
     try {

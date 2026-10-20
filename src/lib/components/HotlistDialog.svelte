@@ -1,7 +1,4 @@
 <script lang="ts">
-  // FER-577: modalDepth (mutes the global shortcuts), Tab trap and focus return; Esc / Enter keep
-  // their own staged handling in onDialogKey.
-  const hotlistDialogOpts = { mnemonics: false };
   // "Configure…" of the Directory Hotlist (FER-458), modelled on Total Commander's "Change
   // directory menu": tree on the left, Add item / Add submenu / Add separator / Delete / Up / Down
   // on the right, Title / Path / Target path / Command fields below. Edits go into a draft that
@@ -9,6 +6,7 @@
   import { tick, untrack } from 'svelte';
   import { hotlist } from '../stores/hotlistStore.svelte';
   import { dialog } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { activePane } from '../stores/panesRegistry.svelte';
   import {
     appendItems,
@@ -273,16 +271,30 @@
     }
   }
 
-  function onDialogKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
+  // FER-577 (B3): the shared dialog action owns Tab trap, focus return, modalDepth, Esc / Enter and
+  // the Alt+letter accelerators. Esc is staged: a drag, then the import view, then the dialog.
+  // Enter (from a field or the dialog itself, never from a button or the tree) is OK, or Import
+  // while the import preview is showing. Ctrl+Enter is OK from anywhere (buttons included).
+  const hotlistDialogOpts = {
+    initial: () => treeEl, // the effect above also focuses it once the tree is laid out
+    onEscape: () => {
       if (press || dragFrom) cancelDrag();
       else if (importOpen) importOpen = false;
       else hotlist.closeConfigure();
-    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    },
+    onEnter: (_e: KeyboardEvent, target: HTMLElement) => {
+      if (target.closest('[role="tree"]')) return;
+      if (importOpen) {
+        if (preview) applyImport();
+      } else void ok();
+    },
+  };
+
+  function onDialogKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      void ok();
+      if (!importOpen) void ok();
+      else if (preview) applyImport();
     }
   }
 
@@ -486,7 +498,9 @@
               }
             }}
           />
-          <button onclick={() => void runPreview()} disabled={importBusy}>Preview</button>
+          <button onclick={() => void runPreview()} disabled={importBusy}
+            ><Mnemonic label="&Preview" /></button
+          >
         </div>
         {#if importError}<p class="err" role="alert">{importError}</p>{/if}
         {#if preview}
@@ -527,17 +541,20 @@
           {/if}
           <div class="row">
             <label
-              ><input type="radio" name="imode" value="append" bind:group={importMode} /> Add to my hotlist</label
+              ><input type="radio" name="imode" value="append" bind:group={importMode} />
+              <Mnemonic label="&Add to my hotlist" /></label
             >
             <label
-              ><input type="radio" name="imode" value="replace" bind:group={importMode} /> Replace my
-              hotlist</label
+              ><input type="radio" name="imode" value="replace" bind:group={importMode} />
+              <Mnemonic label="&Replace my hotlist" /></label
             >
           </div>
         {/if}
         <div class="actions">
           <button class="ghost" onclick={() => (importOpen = false)}>Back</button>
-          <button class="primary" onclick={applyImport} disabled={!preview}>Import</button>
+          <button class="primary" onclick={applyImport} disabled={!preview}
+            ><Mnemonic label="&Import" /></button
+          >
         </div>
       </section>
     {:else}
@@ -601,16 +618,22 @@
           {/if}
         </ul>
         <div class="side">
-          <button onclick={addDir}>Add item</button>
-          <button onclick={addSubmenu}>Add submenu</button>
-          <button onclick={addSeparator}>Add separator</button>
-          <button onclick={addCommand}>Add command</button>
-          <button onclick={remove} disabled={!sel}>Delete item</button>
-          <button onclick={() => move(-1)} disabled={!sel}>Up</button>
-          <button onclick={() => move(1)} disabled={!sel}>Down</button>
-          <button onclick={() => reparent(indent)} disabled={!canIndent}>Into submenu</button>
-          <button onclick={() => reparent(outdent)} disabled={!canOutdent}>Out of submenu</button>
-          <button onclick={() => (importOpen = true)}>Import from Total Commander…</button>
+          <button onclick={addDir}><Mnemonic label="Add &item" /></button>
+          <button onclick={addSubmenu}><Mnemonic label="Add &submenu" /></button>
+          <button onclick={addSeparator}><Mnemonic label="Add se&parator" /></button>
+          <button onclick={addCommand}><Mnemonic label="Add &command" /></button>
+          <button onclick={remove} disabled={!sel}><Mnemonic label="&Delete item" /></button>
+          <button onclick={() => move(-1)} disabled={!sel}><Mnemonic label="&Up" /></button>
+          <button onclick={() => move(1)} disabled={!sel}><Mnemonic label="Do&wn" /></button>
+          <button onclick={() => reparent(indent)} disabled={!canIndent}
+            ><Mnemonic label="Into su&bmenu" /></button
+          >
+          <button onclick={() => reparent(outdent)} disabled={!canOutdent}
+            ><Mnemonic label="&Out of submenu" /></button
+          >
+          <button onclick={() => (importOpen = true)}
+            ><Mnemonic label="Import from Total Co&mmander…" /></button
+          >
           <p class="dim hint kinds">
             Item = shortcut to a folder. Submenu = a group. Separator = a divider line. Command =
             runs a program (asks first). Drag rows to reorder or into a submenu; Ctrl+←/→ moves an
@@ -622,7 +645,7 @@
       <div class="fields">
         {#if selected && selected.type !== 'separator'}
           <label>
-            <span>Title</span>
+            <span><Mnemonic label="&Title" /></span>
             <input
               aria-label="Title"
               value={selected.title}
@@ -632,7 +655,7 @@
           </label>
           {#if selected.type === 'dir'}
             <label>
-              <span>Path</span>
+              <span><Mnemonic label="Pat&h" /></span>
               <input
                 aria-label="Path"
                 value={selected.path}
@@ -641,7 +664,7 @@
               />
             </label>
             <label>
-              <span>Target path</span>
+              <span><Mnemonic label="Tar&get path" /></span>
               <input
                 aria-label="Target path"
                 value={selected.targetPath ?? ''}
@@ -658,7 +681,7 @@
             {/if}
           {:else if selected.type === 'command'}
             <label>
-              <span>Command</span>
+              <span><Mnemonic label="Comm&and" /></span>
               <input
                 aria-label="Command"
                 value={selected.command}
@@ -667,7 +690,7 @@
               />
             </label>
             <label>
-              <span>Arguments</span>
+              <span><Mnemonic label="A&rguments" /></span>
               <input
                 aria-label="Arguments"
                 value={selected.args.join(' ')}
