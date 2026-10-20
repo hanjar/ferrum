@@ -215,14 +215,25 @@ test.describe('archive jobs: cancel, password, multipart', () => {
     await expect(progress).toBeHidden();
   });
 
-  test('Esc on a running extract cancels it too', async () => {
+  test('Esc on a running extract moves it to the background (FER-578); the dock cancels it', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+F9');
     await expect(page.locator('[role="dialog"][data-kind="archiveProgress"]')).toBeVisible();
     await page.keyboard.press('Escape');
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    expect(await calls(page, 'archive_cancel_request')).toHaveLength(0);
+
+    await page.keyboard.press('Alt+B');
+    const job = page.getByTestId('bg-job');
+    await expect(job).toContainText('hang.zip');
+    await job.getByRole('button', { name: 'Cancel' }).click();
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
     const requestId = (await calls(page, 'archive_extract'))[0]!.args['requestId'];
     expect((await calls(page, 'archive_cancel_request'))[0]!.args['requestId']).toBe(requestId);
+    await expect(job).toHaveAttribute('data-state', 'canceled');
+    // Nothing pops up in front of the user; the notice waits behind "Lihat hasil".
+    await expect(page.locator('[role="dialog"][data-kind="error"]')).toBeHidden();
+    await job.getByRole('button', { name: 'Lihat hasil' }).click();
     await expect(page.locator('[role="dialog"][data-kind="error"]')).toContainText('Dibatalkan');
   });
 
@@ -241,12 +252,20 @@ test.describe('archive jobs: cancel, password, multipart', () => {
     await expect(report).toContainText('Dibatalkan');
   });
 
-  test('Test Archive: Esc cancels the test', async () => {
+  test('Test Archive: Esc moves the test to the background; cancelling there marks the report', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+Shift+F9');
     await expect(page.locator('[role="dialog"][data-kind="archiveProgress"]')).toBeVisible();
     await page.keyboard.press('Escape');
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    expect(await calls(page, 'archive_cancel_request')).toHaveLength(0);
+
+    await page.keyboard.press('Alt+B');
+    const job = page.getByTestId('bg-job');
+    await job.getByRole('button', { name: 'Cancel' }).click();
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
+    await expect(job).toHaveAttribute('data-state', 'canceled');
+    await job.getByRole('button', { name: 'Lihat hasil' }).click();
     await expect(page.locator('[role="dialog"][data-kind="testReport"]')).toContainText(
       'Dibatalkan',
     );

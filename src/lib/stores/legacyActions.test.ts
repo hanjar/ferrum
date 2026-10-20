@@ -113,7 +113,7 @@ describe('Quit (respects in-flight operations)', () => {
   });
 
   it('FER-578: running background jobs (docked or not) also ask for confirmation', () => {
-    const job = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'C:\a.zip' });
+    const job = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'C:\\a.zip' });
     jobs.attempt(job, 'req-1');
     jobs.dock(job);
     expect(runAction(getAction('file.quit')!)).toBe(true);
