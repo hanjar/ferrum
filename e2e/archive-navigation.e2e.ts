@@ -378,6 +378,43 @@ test.describe('F2-12 archive navigation E2E', () => {
     expect(calls[1]?.request['memberPath']).toBe('img.png');
   });
 
+  test('FER-575: a real disk folder named folder.zip is not treated as an archive', async () => {
+    await page.evaluate(() => {
+      (window as unknown as { __extraFiles: unknown[] }).__extraFiles.push({
+        name: 'inner.txt',
+        path: 'C:\\fixtures\\folder.zip\\inner.txt',
+        isDir: false,
+        isSymlink: false,
+        size: 5,
+        modifiedMs: 1700000000000,
+        hidden: false,
+      });
+    });
+    await page.reload();
+    const row = left().locator('[data-path="C:\\\\fixtures\\\\folder.zip\\\\inner.txt"]');
+    await row.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => undefined);
+    // The init script resets __extraFiles on reload, so feed the row through a fresh script.
+    if ((await row.count()) === 0) {
+      await page.addInitScript(() => {
+        const w = window as unknown as { __extraFiles: unknown[] };
+        w.__extraFiles.push({
+          name: 'inner.txt',
+          path: 'C:\\fixtures\\folder.zip\\inner.txt',
+          isDir: false,
+          isSymlink: false,
+          size: 5,
+          modifiedMs: 1700000000000,
+          hidden: false,
+        });
+      });
+      await page.reload();
+      await row.waitFor({ state: 'attached', timeout: 10_000 });
+    }
+    await row.dblclick();
+    await expect.poll(() => countInvocations(page, 'shell_open')).toBe(1);
+    expect(await countInvocations(page, 'archive_open_member')).toBe(0);
+  });
+
   test('Alt+F5 packs the selection via keyboard (Enter submits)', async () => {
     await left().locator('[data-path$="other.txt"]').click();
     await page.keyboard.press('Alt+F5');

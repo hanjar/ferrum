@@ -25,7 +25,9 @@ use crate::archive_contract::{
 };
 use crate::archive_jobs::ArchiveProgressEvent;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Largest member opened this way (same ceiling as the extract bridge's per-entry limit).
@@ -76,6 +78,9 @@ fn is_plain_dir(path: &Path) -> bool {
 pub struct OpenTemp {
     root: PathBuf,
     session: String,
+    /// One lock per member key: two quick opens of the same member run one after the other, the
+    /// second one reusing the first one's file (FER-575 S5).
+    locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl OpenTemp {
@@ -88,11 +93,17 @@ impl OpenTemp {
         Self {
             root,
             session: format!("s{secs}-{pid}"),
+            locks: Arc::default(),
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn lock_for(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut map = self.locks.lock().unwrap_or_else(|p| p.into_inner());
+        map.entry(key.to_owned()).or_default().clone()
     }
 
     pub fn session_dir(&self) -> PathBuf {
@@ -139,12 +150,65 @@ impl OpenTemp {
             if name == self.session || now.saturating_sub(started) <= max_age_secs {
                 continue;
             }
+            // A session of a Ferrum instance that is still running keeps its files (S4).
+            if session_owner_alive(&name, started) {
+                continue;
+            }
             if remove_tree(&entry.path()) {
                 removed += 1;
             }
         }
         removed
     }
+}
+
+/// True when the process named in the session folder is still running AND was started no later
+/// than the session's own timestamp (a recycled pid belongs to a process that started later).
+#[cfg(windows)]
+fn session_owner_alive(name: &str, session_secs: u64) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    const FILETIME_UNIX_DIFF_SECS: u64 = 11_644_473_600;
+    let Some(pid) = name
+        .rsplit_once('-')
+        .and_then(|(_, pid)| pid.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    // SAFETY: plain Win32 calls on a handle opened and closed here; out-pointers are locals.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE;
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut a, mut b, mut c) = (zero, zero, zero, zero);
+        let have_times = GetProcessTimes(handle, &mut created, &mut a, &mut b, &mut c) != 0;
+        CloseHandle(handle);
+        if !running {
+            return false;
+        }
+        if !have_times {
+            return true; // running but unreadable: keep its files
+        }
+        let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        let created_secs = (ticks / 10_000_000).saturating_sub(FILETIME_UNIX_DIFF_SECS);
+        // The session stamp is taken after the process started; allow clock rounding.
+        created_secs <= session_secs.saturating_add(5)
+    }
+}
+
+#[cfg(not(windows))]
+fn session_owner_alive(_name: &str, _session_secs: u64) -> bool {
+    false
 }
 
 /// `s<secs>-<pid>` -> secs. Anything else is not a session folder.
@@ -206,52 +270,69 @@ fn member_key(archive_path: &str, size: u64, mtime_ms: u128, member: &str) -> St
     hex::encode(&h.finalize()[..12])
 }
 
-/// The single regular file below `dir` (the extracted member), skipping staging leftovers.
-fn find_extracted(dir: &Path) -> Option<PathBuf> {
-    fn walk(dir: &Path, found: &mut Vec<PathBuf>, depth: u32) {
-        if depth > 40 || found.len() > 1 {
-            return;
-        }
-        let Ok(read) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in read.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if is_link(&meta) {
-                found.push(path); // makes the result ambiguous -> refused below
-                found.push(PathBuf::new());
-            } else if meta.is_dir() {
-                walk(&path, found, depth + 1);
-            } else if !entry
-                .file_name()
-                .to_string_lossy()
-                .contains(".ferrum-partial-")
-            {
-                found.push(path);
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(dir, &mut found, 0);
-    if found.len() == 1 { found.pop() } else { None }
+/// Where the extracted member lives: the key folder plus the (already validated) member path.
+/// Only this exact path is ever reused or opened; files next to it (editor lock and swap files)
+/// are ignored.
+fn expected_file(key_dir: &Path, member: &MemberPath) -> PathBuf {
+    member
+        .as_str()
+        .split('/')
+        .fold(key_dir.to_path_buf(), |p, part| p.join(part))
 }
 
-/// Copy the archive's `Zone.Identifier` stream (if any) onto `target`. Best effort for a missing
-/// source; an archive WITH a stream whose copy fails is an error, because the file would then
-/// open without the internet-origin marking.
+/// `path` is a regular file and not a link of any kind.
+fn is_plain_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !is_link(&m))
+}
+
+/// Characters that reorder or hide text in a displayed name (bidi controls, RLO, ...).
+fn has_format_chars(name: &str) -> bool {
+    name.chars().any(|c| {
+        matches!(c,
+            '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
+    })
+}
+
+/// Copy the archive's `Zone.Identifier` stream (if any) onto `target`. ONLY "the stream does not
+/// exist" (or a volume without streams) means "no mark"; any other failure to read it (a browser
+/// or scanner holding it, access denied, a network error) aborts the open, because the file
+/// would otherwise open without its internet-origin marking (S2).
 #[cfg(windows)]
 fn copy_motw(archive: &Path, target: &Path) -> Result<(), ArchiveError> {
+    copy_motw_with(archive, target, |p| std::fs::File::open(p))
+}
+
+#[cfg(windows)]
+fn copy_motw_with(
+    archive: &Path,
+    target: &Path,
+    open: impl FnOnce(&Path) -> std::io::Result<std::fs::File>,
+) -> Result<(), ArchiveError> {
     use std::io::Read;
+    // ERROR_INVALID_NAME: a volume (FAT/exFAT) that has no alternate streams.
+    const ERROR_INVALID_NAME: i32 = 123;
     let stream = |p: &Path| {
         let mut s = p.as_os_str().to_owned();
         s.push(":Zone.Identifier");
         PathBuf::from(s)
     };
-    let Ok(file) = std::fs::File::open(stream(archive)) else {
-        return Ok(()); // no mark on the archive
+    let file = match open(&stream(archive)) {
+        Ok(f) => f,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(ERROR_INVALID_NAME) =>
+        {
+            return Ok(()); // no mark on the archive
+        }
+        Err(e) => {
+            return Err(err(
+                ArchiveErrorCode::Io,
+                format!(
+                    "The archive's Zone.Identifier (internet origin mark) could not be read, so the file was not opened: {e}"
+                ),
+            ));
+        }
     };
     let mut data = Vec::new();
     file.take(MAX_ZONE_BYTES + 1)
@@ -288,6 +369,12 @@ pub fn extract_member(
         return Err(err(
             ArchiveErrorCode::InvalidMemberPath,
             "No file selected inside the archive",
+        ));
+    }
+    if has_format_chars(member.as_str()) {
+        return Err(err(
+            ArchiveErrorCode::InvalidMemberPath,
+            "The file name contains hidden direction or formatting characters and was not opened",
         ));
     }
     let archive = Path::new(archive_path);
@@ -348,18 +435,18 @@ pub fn extract_member(
         member.as_str(),
     ));
 
-    // Reuse an earlier, complete extraction of this very member of this unchanged archive.
+    // Serialise opens of the same member: the second waits, then reuses the first one's file.
+    let lock = temp.lock_for(&key_dir.to_string_lossy());
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Reuse an earlier extraction of this very member of this unchanged archive. Only the exact
+    // expected path counts; a key folder that holds a result is NEVER removed (the user may have
+    // saved edits there, and editors leave lock/swap files beside it).
+    let expected = expected_file(&key_dir, &member);
     if is_plain_dir(&key_dir) {
-        if let Some(file) = find_extracted(&key_dir) {
-            copy_motw(archive, &file)?;
-            return Ok(file);
-        }
-        // Left over from a failed or concurrent attempt: start clean.
-        if !remove_tree(&key_dir) {
-            return Err(err(
-                ArchiveErrorCode::Io,
-                "A stale temp folder could not be cleared",
-            ));
+        if is_plain_file(&expected) {
+            copy_motw(archive, &expected)?;
+            return Ok(expected);
         }
     } else if std::fs::symlink_metadata(&key_dir).is_ok() {
         return Err(err(
@@ -367,9 +454,15 @@ pub fn extract_member(
             "The temp folder is not a plain directory",
         ));
     }
-    std::fs::create_dir(&key_dir).map_err(|e| io_err("temp folder", e))?;
+    let created = match std::fs::create_dir(&key_dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(io_err("temp folder", e)),
+    };
     if !is_plain_dir(&key_dir) {
-        let _ = remove_tree(&key_dir);
+        if created {
+            let _ = remove_tree(&key_dir);
+        }
         return Err(err(
             ArchiveErrorCode::UnsafeEntry,
             "The temp folder is not a plain directory",
@@ -391,18 +484,24 @@ pub fn extract_member(
     };
     let outcome = crate::archive_jobs::run_extract(provider, &request, request_id, emit)
         .and_then(|()| {
-            find_extracted(&key_dir).ok_or_else(|| {
-                err(
+            if is_plain_file(&expected) {
+                Ok(expected.clone())
+            } else {
+                Err(err(
                     ArchiveErrorCode::Io,
                     "The file was not extracted from the archive",
-                )
-            })
+                ))
+            }
         })
         .and_then(|file| copy_motw(archive, &file).map(|()| file));
     match outcome {
         Ok(file) => Ok(file),
         Err(e) => {
-            let _ = remove_tree(&key_dir);
+            // Only a folder this call created is removed; a folder that existed before is left
+            // as it was.
+            if created {
+                let _ = remove_tree(&key_dir);
+            }
             Err(e)
         }
     }
@@ -652,7 +751,7 @@ mod tests {
     fn opens_a_member_of_a_rar() {
         let dir = tempfile::tempdir().unwrap();
         let Some(archive) = make_rar(dir.path(), &[]) else {
-            eprintln!("skipped: Rar.exe not found (set FERRUM_RAR_EXE)");
+            eprintln!("SKIPPED, NOT A PASS: Rar.exe not found (set FERRUM_RAR_EXE)");
             return;
         };
         let temp = OpenTemp::new(dir.path().join("open-temp"));
@@ -669,7 +768,7 @@ mod tests {
     fn header_encrypted_rar_asks_for_a_password_then_opens() {
         let dir = tempfile::tempdir().unwrap();
         let Some(archive) = make_rar(dir.path(), &["-hpFerrumTest123"]) else {
-            eprintln!("skipped: Rar.exe not found (set FERRUM_RAR_EXE)");
+            eprintln!("SKIPPED, NOT A PASS: Rar.exe not found (set FERRUM_RAR_EXE)");
             return;
         };
         let temp = OpenTemp::new(dir.path().join("open-temp"));
@@ -824,5 +923,178 @@ mod tests {
         assert_eq!(e.code, ArchiveErrorCode::UnsafeEntry);
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
         assert_eq!(temp.cleanup_stale(u64::MAX, 0), 0);
+    }
+
+    #[test]
+    fn an_edited_result_with_editor_lock_files_beside_it_is_reused_not_deleted() {
+        let f = fixture(&[("docs/report.docx", b"original")]);
+        let first = open(&f.temp, &f.archive, "docs/report.docx").unwrap();
+        std::fs::write(&first, b"edited by the user").unwrap();
+        let lock = first.parent().unwrap().join(".~lock.report.docx#");
+        std::fs::write(&lock, b"lo").unwrap();
+        std::fs::write(first.parent().unwrap().join("~$report.docx"), b"x").unwrap();
+        let again = open(&f.temp, &f.archive, "docs/report.docx").unwrap();
+        assert_eq!(first, again);
+        assert_eq!(std::fs::read(&again).unwrap(), b"edited by the user");
+        assert!(lock.exists());
+    }
+
+    #[test]
+    fn a_stray_file_in_the_key_folder_does_not_hide_the_member() {
+        let f = fixture(&[("a.txt", b"fresh")]);
+        let first = open(&f.temp, &f.archive, "a.txt").unwrap();
+        std::fs::remove_file(&first).unwrap();
+        std::fs::write(first.parent().unwrap().join("other.tmp"), b"x").unwrap();
+        let again = open(&f.temp, &f.archive, "a.txt").unwrap();
+        assert_eq!(first, again);
+        assert_eq!(std::fs::read(&again).unwrap(), b"fresh");
+        assert!(first.parent().unwrap().join("other.tmp").exists());
+    }
+
+    #[test]
+    fn bidi_and_format_characters_in_a_member_name_are_refused_early() {
+        let f = fixture(&[("a.txt", b"x")]);
+        for name in [
+            "gpj.\u{202E}exe",
+            "a\u{200B}.txt",
+            "x\u{2066}y.txt",
+            "\u{FEFF}a.txt",
+        ] {
+            let e = open(&f.temp, &f.archive, name).unwrap_err();
+            assert_eq!(e.code, ArchiveErrorCode::InvalidMemberPath, "{name:?}");
+            assert!(e.message.contains("formatting"), "{name:?}");
+        }
+        assert!(
+            !f.temp.root().exists(),
+            "nothing is created for a refused name"
+        );
+    }
+
+    #[test]
+    fn two_quick_opens_of_one_member_both_succeed_with_the_same_file() {
+        let f = fixture(&[("a.txt", b"payload")]);
+        let archive = f.archive.to_string_lossy().into_owned();
+        let results: Vec<_> = std::thread::scope(|scope| {
+            (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        extract_member(
+                            &crate::archive_zip::ZipProvider::new(),
+                            &f.temp,
+                            &archive,
+                            "a.txt",
+                            None,
+                            None,
+                            &mut noop,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+        let first = results[0].as_ref().unwrap();
+        for r in &results {
+            assert_eq!(r.as_ref().unwrap(), first);
+        }
+        assert_eq!(std::fs::read(first).unwrap(), b"payload");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_zone_stream_that_cannot_be_read_aborts_the_open() {
+        let f = fixture(&[("a.txt", b"hi")]);
+        let mut stream = f.archive.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::write(&stream, b"[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
+        // Another program holds the stream without sharing (sharing violation, not "missing").
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&stream)
+            .unwrap();
+        let e = open(&f.temp, &f.archive, "a.txt").unwrap_err();
+        assert_eq!(e.code, ArchiveErrorCode::Io);
+        assert!(e.message.contains("Zone.Identifier"), "{}", e.message);
+        drop(held);
+        // The failed open left no half-made result, and once readable it works with the mark.
+        let out = open(&f.temp, &f.archive, "a.txt").unwrap();
+        let mut copied = out.as_os_str().to_owned();
+        copied.push(":Zone.Identifier");
+        assert!(std::fs::read(&copied).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_missing_zone_stream_counts_as_no_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        let target = dir.path().join("t.txt");
+        std::fs::write(&archive, b"x").unwrap();
+        std::fs::write(&target, b"x").unwrap();
+        let denied = copy_motw_with(&archive, &target, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(denied.unwrap_err().code, ArchiveErrorCode::Io);
+        let shared = copy_motw_with(&archive, &target, |_| {
+            Err(std::io::Error::from_raw_os_error(32))
+        });
+        assert!(shared.is_err());
+        let missing = copy_motw_with(&archive, &target, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(missing.is_ok());
+        let no_streams = copy_motw_with(&archive, &target, |_| {
+            Err(std::io::Error::from_raw_os_error(123))
+        });
+        assert!(no_streams.is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_mark_is_copied_again_when_a_result_is_reused() {
+        let f = fixture(&[("a.txt", b"hi")]);
+        let first = open(&f.temp, &f.archive, "a.txt").unwrap();
+        let mut copied = first.as_os_str().to_owned();
+        copied.push(":Zone.Identifier");
+        assert!(std::fs::read(&copied).is_err(), "no mark at first");
+        // The archive gains a mark later; a stream write may touch the archive's times, so pin
+        // the archive identity (size + mtime) by restoring the mtime afterwards.
+        let before = std::fs::metadata(&f.archive).unwrap().modified().unwrap();
+        let mut stream = f.archive.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::write(&stream, b"[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f.archive)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+        let again = open(&f.temp, &f.archive, "a.txt").unwrap();
+        assert_eq!(first, again, "same archive identity -> reuse");
+        assert_eq!(
+            std::fs::read(&copied).unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_session_of_a_running_instance_is_kept_a_recycled_pid_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("open-temp");
+        let temp = OpenTemp::with_session(root.clone(), 1, 1);
+        let pid = std::process::id();
+        let live = root.join(format!("s{}-{pid}", now_secs()));
+        // Same pid but a session stamp from before this process existed: a recycled pid.
+        let recycled = root.join(format!("s100-{pid}"));
+        for d in [&live, &recycled] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(temp.cleanup_stale(u64::MAX, 0), 1);
+        assert!(live.exists());
+        assert!(!recycled.exists());
     }
 }

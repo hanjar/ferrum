@@ -491,14 +491,20 @@
     try {
       // FER-575: a file inside an archive is not a disk path. The backend extracts that member
       // to its temp folder and opens it through the confirmed shell path; no receipt (temp file).
-      if (archiveMemberOf(path)) {
+      if (archiveMemberOf(path, knownArchives)) {
         await openArchiveMemberAt(path, {
+          knownArchives,
           passwordFor: archiveFetcher?.passwordFor,
+          forgetPassword: archiveFetcher?.forgetPassword,
           rememberPassword: archiveFetcher?.rememberPassword,
           askPassword: (p, wrong) => dialogs.askArchivePassword(p, wrong),
           showWorking: (name) => {
-            toast.show(`Membuka ${name} dari arsip…`, 600_000);
-            return () => toast.show('', 0);
+            const message = `Membuka ${name} dari arsip…`;
+            toast.show(message, 600_000);
+            // Clear only our own notice, never a newer unrelated toast.
+            return () => {
+              if (toast.message === message) toast.show('', 0);
+            };
           },
           onError: (message) =>
             dialogs.open({ kind: 'error', title: 'Open from archive', message }),

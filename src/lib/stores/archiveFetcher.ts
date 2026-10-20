@@ -175,7 +175,12 @@ export function createArchiveAwareFetcher(
     passwordFor: (archivePath: string): string | undefined => passwords.get(archivePath),
     /** FER-575: keep a password that just opened a member (cleared on leaving the archive). */
     rememberPassword: (archivePath: string, password: string): void => {
-      passwords.set(archivePath, password);
+      // Only while the pane is still inside that archive: after it left, the map was cleared and
+      // a late success must not bring the password back.
+      if (currentArchive === archivePath.toLowerCase()) passwords.set(archivePath, password);
+    },
+    forgetPassword: (archivePath: string): void => {
+      passwords.delete(archivePath);
     },
   });
 }

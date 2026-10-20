@@ -8,15 +8,21 @@
 import { archiveOpenMember, newArchiveRequestId } from '../ipc/archive';
 import { isCancelledError, isPasswordError } from '../ipc/archiveErrors';
 import { FsError } from '../ipc/types';
-import { splitArchiveLocation } from './archiveFetcher';
+import { findArchiveRoot } from './archiveFetcher';
 
 export interface OpenArchiveMemberDeps {
+  /** Archives this pane actually opened as virtual folders. A path is routed to the archive
+   *  command only when it lies inside one of these: a REAL disk folder that merely happens to be
+   *  named `backup.zip` keeps opening through the normal shell path. */
+  knownArchives: ReadonlySet<string>;
   /** The password that already unlocked this archive in the pane, if any. */
   passwordFor?: (archivePath: string) => string | undefined;
   /** Masked prompt (FER-504 dialog); resolves null when dismissed. */
   askPassword: (archivePath: string, wrong: boolean) => Promise<string | null>;
   /** Keep a password that just worked, for the next open while the pane stays in the archive. */
   rememberPassword?: (archivePath: string, password: string) => void;
+  /** Drop a remembered password that turned out to be wrong. */
+  forgetPassword?: (archivePath: string) => void;
   /** Called after `slowMs` while the extraction is still running; the returned function clears it. */
   showWorking?: (memberName: string) => () => void;
   /** Failure other than a dismissed password prompt or a cancel. */
@@ -28,13 +34,19 @@ export interface OpenArchiveMemberDeps {
 /** What `openArchiveMemberAt` did: `notMember` leaves the path for the normal disk open. */
 export type OpenArchiveMemberResult = 'notMember' | 'opened' | 'declined' | 'failed';
 
-/** `archive path + member path` when `path` is a file INSIDE an archive, else null. */
-export function archiveMemberOf(path: string): { archivePath: string; memberPath: string } | null {
-  const loc = splitArchiveLocation(path);
-  if (!loc || loc.memberPath === '') return null;
-  const memberPath = loc.memberPath.replace(/\\/g, '/').replace(/\/+$/, '');
+/** `archive path + member path` when `path` is a file INSIDE a known (opened) archive, else null. */
+export function archiveMemberOf(
+  path: string,
+  knownArchives: ReadonlySet<string>,
+): { archivePath: string; memberPath: string } | null {
+  const root = findArchiveRoot(path, knownArchives);
+  if (!root) return null;
+  const memberPath = path
+    .slice(root.length + 1)
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '');
   if (memberPath === '') return null;
-  return { archivePath: loc.archivePath, memberPath };
+  return { archivePath: root, memberPath };
 }
 
 function messageOf(e: unknown): string {
@@ -48,7 +60,7 @@ export async function openArchiveMemberAt(
   path: string,
   deps: OpenArchiveMemberDeps,
 ): Promise<OpenArchiveMemberResult> {
-  const target = archiveMemberOf(path);
+  const target = archiveMemberOf(path, deps.knownArchives);
   if (!target) return 'notMember';
   const { archivePath, memberPath } = target;
   const name = memberPath.slice(memberPath.lastIndexOf('/') + 1);
@@ -78,6 +90,7 @@ export async function openArchiveMemberAt(
         if (!isPasswordError(e)) throw e;
         stopWorking(); // the prompt must not sit under a "working" notice
         const wrong = e instanceof FsError && e.archiveCode === 'badPassword';
+        if (wrong) deps.forgetPassword?.(archivePath);
         const typed = await deps.askPassword(archivePath, wrong);
         if (typed === null) return 'declined'; // dismissed: no error, nothing opened
         password = typed;

@@ -11,8 +11,17 @@ vi.mock('../ipc/archive', () => ({
 const { archiveMemberOf, openArchiveMemberAt } = await import('./openArchiveMember');
 const { FsError } = await import('../ipc/types');
 
+const KNOWN: ReadonlySet<string> = new Set([
+  'C:\\data\\arsip.rar',
+  'D:\\a.ZIP',
+  'C:\\a.zip',
+  'C:\\a.7z',
+  'C:\\a.rar',
+]);
+
 function deps(over: Partial<Parameters<typeof openArchiveMemberAt>[1]> = {}) {
   return {
+    knownArchives: KNOWN,
     askPassword: vi.fn(async () => null as string | null),
     onError: vi.fn(),
     ...over,
@@ -29,19 +38,19 @@ beforeEach(() => {
 
 describe('archiveMemberOf', () => {
   it('splits a file inside an archive into archive path and slash-separated member', () => {
-    expect(archiveMemberOf('C:\\data\\arsip.rar\\docs\\Laporan 1.pdf')).toEqual({
+    expect(archiveMemberOf('C:\\data\\arsip.rar\\docs\\Laporan 1.pdf', KNOWN)).toEqual({
       archivePath: 'C:\\data\\arsip.rar',
       memberPath: 'docs/Laporan 1.pdf',
     });
-    expect(archiveMemberOf('D:\\a.ZIP\\x.txt')).toEqual({
+    expect(archiveMemberOf('D:\\a.ZIP\\x.txt', KNOWN)).toEqual({
       archivePath: 'D:\\a.ZIP',
       memberPath: 'x.txt',
     });
   });
 
   it('is null for plain disk files and for the archive file itself', () => {
-    expect(archiveMemberOf('C:\\data\\notes.txt')).toBeNull();
-    expect(archiveMemberOf('C:\\data\\arsip.rar')).toBeNull();
+    expect(archiveMemberOf('C:\\data\\notes.txt', KNOWN)).toBeNull();
+    expect(archiveMemberOf('C:\\data\\arsip.rar', KNOWN)).toBeNull();
   });
 });
 
@@ -155,5 +164,34 @@ describe('openArchiveMemberAt', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('only real opened archives are routed to the archive command (S3)', () => {
+  const folderFile = 'C:\\data\\backup.zip\\notes.txt';
+  it('a real disk folder named backup.zip is left to the normal open', async () => {
+    expect(archiveMemberOf(folderFile, KNOWN)).toBeNull();
+    const d = deps();
+    expect(await openArchiveMemberAt(folderFile, d)).toBe('notMember');
+    expect(bridge.open).not.toHaveBeenCalled();
+  });
+
+  it('the same path becomes an archive member once the pane opened that archive', async () => {
+    const known = new Set(['C:\\data\\backup.zip']);
+    expect(await openArchiveMemberAt(folderFile, deps({ knownArchives: known }))).toBe('opened');
+    expect(bridge.open).toHaveBeenCalledWith(
+      'C:\\data\\backup.zip',
+      'notes.txt',
+      undefined,
+      'arc-test',
+    );
+  });
+
+  it('a wrong password is forgotten, not kept', async () => {
+    bridge.open.mockRejectedValueOnce(archiveErr('badPassword')).mockResolvedValueOnce(true);
+    const forget = vi.fn();
+    const d = deps({ askPassword: vi.fn(async () => 'good'), forgetPassword: forget });
+    await openArchiveMemberAt('C:\\a.rar\\x.txt', d);
+    expect(forget).toHaveBeenCalledWith('C:\\a.rar');
   });
 });
