@@ -7,6 +7,7 @@
   import { modalDepth } from '../dialogKit';
   import { BUILD_LABEL_COMPACT, BUILD_DETAIL } from '../version';
   import { ops } from '../stores/opsStore.svelte';
+  import { jobs } from '../stores/jobsStore.svelte';
   import { aiChatHost } from '../ai/aiChatHost.svelte';
 
   const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -130,8 +131,8 @@
       }}
     >
       <Icon name="queue" />
-      {#if ops.active.length > 0}
-        <span class="badge">{ops.active.length}</span>
+      {#if ops.active.length + jobs.runningCount > 0}
+        <span class="badge" data-testid="ops-badge">{ops.active.length + jobs.runningCount}</span>
       {/if}
     </button>
     <button

@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Dialogs from './Dialogs.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
+import { jobs } from '../stores/jobsStore.svelte';
 
 // FER-79 / FER-73 / FER-75: the dialogs for a running archive job, the password prompt and
 // the multipart explanation. The IPC is mocked; only the UI contract is under test.
@@ -27,12 +28,16 @@ vi.mock('../ipc/archive', () => ({
 
 afterEach(() => {
   dialogs.current = null;
+  jobs.reset();
   ipc.cancel.mockReset();
 });
 
 function openProgress(over: Record<string, unknown> = {}) {
+  const job = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'C:\\a\\big.zip' });
+  jobs.attempt(job, 'req-1');
   dialogs.open({
     kind: 'archiveProgress',
+    jobId: job.id,
     title: 'Unpack',
     archivePath: 'C:\\a\\big.zip',
     position: '',
@@ -71,13 +76,46 @@ describe('archive progress dialog', () => {
     );
   });
 
-  it('Esc cancels the job instead of just hiding the dialog', async () => {
+  it('Esc moves the job to the background and does NOT cancel it (FER-578)', async () => {
     render(Dialogs);
     openProgress();
     await tick();
     await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
-    expect(ipc.cancel).toHaveBeenCalledWith('req-1');
-    expect(dialogs.current).toMatchObject({ kind: 'archiveProgress', cancelling: true });
+    expect(ipc.cancel).not.toHaveBeenCalled();
+    expect(dialogs.current).toBeNull();
+    expect(jobs.list).toHaveLength(1);
+    expect(jobs.list[0]).toMatchObject({ docked: true, state: 'running' });
+  });
+
+  it('the Background button docks the job and keeps it running', async () => {
+    render(Dialogs);
+    openProgress();
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: 'Background' }));
+    expect(ipc.cancel).not.toHaveBeenCalled();
+    expect(dialogs.current).toBeNull();
+    expect(jobs.list[0]).toMatchObject({ docked: true, state: 'running' });
+  });
+
+  it('Alt+G is the Background accelerator; Batal stays a plain, separate button', async () => {
+    render(Dialogs);
+    openProgress();
+    await tick();
+    const bg = screen.getByRole('button', { name: 'Background' });
+    expect(bg.getAttribute('data-mnemonic')).toBe('g');
+    expect(screen.getByRole('button', { name: 'Batal' }).getAttribute('data-mnemonic')).toBeNull();
+    await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'g', code: 'KeyG', altKey: true });
+    expect(dialogs.current).toBeNull();
+    expect(jobs.list[0]?.docked).toBe(true);
+    expect(ipc.cancel).not.toHaveBeenCalled();
+  });
+
+  it('the initial focus is on Background (Enter docks, never cancels)', async () => {
+    render(Dialogs);
+    openProgress();
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Background' }));
   });
 
   it('clicking the backdrop does not cancel a running job', async () => {

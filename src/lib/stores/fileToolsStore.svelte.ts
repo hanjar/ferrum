@@ -5,6 +5,8 @@
  * and cancellation live in the existing OpsPanel).
  */
 import { activePane } from './panesRegistry.svelte';
+import { jobs, type Job } from './jobsStore.svelte';
+import { toast } from './toastStore.svelte';
 import { splitArchiveLocation } from './archiveFetcher';
 import {
   cancelChecksumRequest,
@@ -62,8 +64,131 @@ class FileToolsStore {
   password = $state('');
   /** Set after an enqueue: the queue panel owns the rest of the story. */
   enqueued = $state(false);
+  /** FER-578: the running verify / member hash that was moved to the background (dock). */
+  private bgJob: Job | null = null;
+  private bgDialog: FileToolsDialog | null = null;
+  /** Result / error of the background run: kept apart from `error`, `verify`, ... which belong to
+   *  whichever dialog is on screen now. */
+  private bgRun: {
+    verify: VerifyReport | null;
+    memberHash: ArchiveMemberChecksum | null;
+    memberCancelled: boolean;
+    error: string;
+    algorithm: Algorithm;
+  } = { verify: null, memberHash: null, memberCancelled: false, error: '', algorithm: 'sha256' };
+
+  /** A verify / member hash is running and may be sent to the background. */
+  get canBackground(): boolean {
+    return (this.verifying || this.hashing) && this.bgJob === null && this.current !== null;
+  }
+
+  /**
+   * FER-578: close the dialog but let the verification / member hash run on; the dock lists it
+   * and "Lihat hasil" brings the dialog back with the result. Esc and the Background button.
+   */
+  sendToBackground(): void {
+    const d = this.current;
+    if (!d || !this.canBackground) return;
+    const verify = d.kind === 'checksumVerify';
+    const subject =
+      d.kind === 'checksumVerify'
+        ? d.paths.length === 1
+          ? d.paths[0]!
+          : `${d.paths.length} items`
+        : d.kind === 'archiveChecksum'
+          ? `${d.archivePath}\\${d.memberPath}`
+          : '';
+    const job = jobs.begin({
+      kind: 'verify',
+      title: verify ? 'Verify checksums' : 'Hash archive member',
+      subject,
+      docked: true,
+    });
+    jobs.setCancelHook(job, () => void this.cancelVerify());
+    this.bgJob = job;
+    this.bgDialog = d;
+    this.bgRun = {
+      verify: this.verify,
+      memberHash: this.memberHash,
+      memberCancelled: this.memberCancelled,
+      error: this.error,
+      algorithm: this.algorithm,
+    };
+    this.pushProgress();
+    this.current = null;
+    toast.show(`${job.title} berjalan di latar belakang (Alt+B)`);
+  }
+
+  private pushProgress(): void {
+    const job = this.bgJob;
+    const p = this.progress;
+    if (!job || !p) return;
+    jobs.update(job, {
+      processedBytes: p.processedBytes,
+      processedEntries: p.filesDone,
+      totalEntries: p.filesTotal > 0 ? p.filesTotal : undefined,
+      currentMember: p.current,
+    });
+  }
+
+  /** The background run ended: keep the outcome in the dock; "Lihat hasil" restores the dialog. */
+  private settleBackground(): void {
+    const job = this.bgJob;
+    const dlg = this.bgDialog;
+    if (!job || !dlg) return;
+    this.bgJob = null;
+    this.bgDialog = null;
+    const snap = { ...this.bgRun };
+    let outcome: 'done' | 'failed' | 'canceled' = 'done';
+    let summary = `${job.title}: selesai`;
+    if (snap.error) {
+      outcome = 'failed';
+      summary = `${job.title} gagal: ${snap.error}`;
+    } else if (snap.verify) {
+      const other = snap.verify.outcomes.length - snap.verify.ok - snap.verify.mismatched;
+      summary = `Verify: ${snap.verify.ok} OK, ${snap.verify.mismatched} mismatched, ${other} other`;
+      if (snap.verify.cancelled) outcome = 'canceled';
+      else if (snap.verify.mismatched > 0 || other > 0) outcome = 'failed';
+    } else if (snap.memberCancelled) {
+      outcome = 'canceled';
+      summary = `${job.title} dibatalkan`;
+    } else if (snap.memberHash) {
+      summary = `${snap.memberHash.algorithm.toUpperCase()}: ${snap.memberHash.hash}`;
+    }
+    jobs.finish(job, outcome, {
+      summary,
+      result: { label: 'Lihat hasil', open: () => this.reopen(dlg, snap) },
+    });
+  }
+
+  /** Bring the verify / hash dialog back with the result it produced in the background. */
+  private reopen(
+    dlg: FileToolsDialog,
+    snap: {
+      verify: VerifyReport | null;
+      memberHash: ArchiveMemberChecksum | null;
+      memberCancelled: boolean;
+      error: string;
+      algorithm: Algorithm;
+    },
+  ): void {
+    this.current = dlg;
+    this.busy = false;
+    this.progress = null;
+    this.verify = snap.verify;
+    this.memberHash = snap.memberHash;
+    this.memberCancelled = snap.memberCancelled;
+    this.error = snap.error;
+    this.algorithm = snap.algorithm;
+    this.enqueued = false;
+  }
 
   open(d: FileToolsDialog) {
+    // One verification at a time: they share the progress state of this store.
+    if (this.bgJob && (d.kind === 'checksumVerify' || d.kind === 'archiveChecksum')) {
+      toast.show('Verifikasi checksum lain masih berjalan di latar belakang (Alt+B)');
+      return;
+    }
     this.current = d;
     this.busy = false;
     this.error = '';
@@ -80,7 +205,8 @@ class FileToolsStore {
   }
 
   close() {
-    if (this.busy || this.verifying || this.hashing) return;
+    // While a verification runs in the background the dialog on screen is another one.
+    if (this.busy || ((this.verifying || this.hashing) && this.bgJob === null)) return;
     this.password = '';
     this.current = null;
   }
@@ -89,12 +215,22 @@ class FileToolsStore {
     this.error = e instanceof FsError ? e.message : String(e);
   }
 
+  /** Error of a verify / hash run: its own slot while that run is in the background. */
+  private failRun(e: unknown) {
+    const msg = e instanceof FsError ? e.message : String(e);
+    if (this.bgJob) this.bgRun.error = msg;
+    else this.error = msg;
+  }
+
   /** Run `work` with a progress listener bound to `requestId`; always unlistens. */
   private async withProgress<T>(requestId: string, work: () => Promise<T>): Promise<T> {
     this.progress = null;
     const listener: { stop: (() => void) | null; done: boolean } = { stop: null, done: false };
     void onChecksumProgress((p) => {
-      if (!listener.done && p.requestId === requestId) this.progress = p;
+      if (!listener.done && p.requestId === requestId) {
+        this.progress = p;
+        this.pushProgress();
+      }
     }).then((u) => {
       if (listener.done) u();
       else listener.stop = u;
@@ -114,11 +250,14 @@ class FileToolsStore {
     this.verifyRequestId = `verify-${Date.now()}-${++verifySeq}`;
     try {
       const id = this.verifyRequestId;
-      this.verify = await this.withProgress(id, () => verifyChecksums(paths, id));
+      const report = await this.withProgress(id, () => verifyChecksums(paths, id));
+      if (this.bgJob) this.bgRun.verify = report;
+      else this.verify = report;
     } catch (e) {
-      this.fail(e);
+      this.failRun(e);
     } finally {
       this.verifying = false;
+      this.settleBackground();
     }
   }
 
@@ -140,17 +279,22 @@ class FileToolsStore {
     const id = `member-${Date.now()}-${++verifySeq}`;
     this.verifyRequestId = id;
     try {
-      this.memberHash = await this.withProgress(id, () =>
+      const hash = await this.withProgress(id, () =>
         checksumArchiveMember(d.archivePath, d.memberPath, this.algorithm, {
           password: this.password || undefined,
           requestId: id,
         }),
       );
+      if (this.bgJob) this.bgRun.memberHash = hash;
+      else this.memberHash = hash;
     } catch (e) {
-      if (e instanceof FsError && e.code === 'cancelled') this.memberCancelled = true;
-      else this.fail(e);
+      if (e instanceof FsError && e.code === 'cancelled') {
+        if (this.bgJob) this.bgRun.memberCancelled = true;
+        else this.memberCancelled = true;
+      } else this.failRun(e);
     } finally {
       this.hashing = false;
+      this.settleBackground();
     }
   }
 
@@ -160,7 +304,7 @@ class FileToolsStore {
     try {
       await cancelChecksumRequest(this.verifyRequestId);
     } catch (e) {
-      this.fail(e);
+      this.failRun(e);
     }
   }
 

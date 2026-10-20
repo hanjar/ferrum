@@ -8,6 +8,7 @@
   } from '../ipc/mutations';
   import { clipboardFinishCut } from '../ipc/clipboardFiles';
   import { ops } from '../stores/opsStore.svelte';
+  import { baseName, jobs } from '../stores/jobsStore.svelte';
   import { untrack } from 'svelte';
   import { formatLabel, runPack, type PackFormat } from '../packService';
   import { dialog, roving } from '../dialogKit';
@@ -402,23 +403,41 @@
   function submitPack(paths: string[], target: string, fmt: PackFormat) {
     busy = true;
     const level = packLevel;
+    // FER-578: Esc / Background docks the job; its outcome is then kept in the dock instead of
+    // opening a dialog over whatever the user is doing now.
+    const flow = jobs.begin({ kind: 'pack', title: 'Pack', subject: target });
     dialogs
-      .withProgress({ title: 'Pack', archivePath: target }, (requestId) =>
-        runPack({ paths, target, format: fmt, requestId, level }),
+      .withProgress(
+        { title: 'Pack', archivePath: target },
+        (requestId) => runPack({ paths, target, format: fmt, requestId, level }),
+        flow,
       )
       .then(() => {
-        busy = false;
-        dialogs.close();
+        // withProgress already removed the progress dialog. Never `dialogs.close()` here: by now
+        // the current dialog belongs to someone else (e.g. another job's password prompt).
+        // `busy` is shared by every dialog; a docked pack must not reset another one's.
+        if (!flow.docked) busy = false;
+        jobs.finish(flow, 'done', { summary: `Pack selesai: ${baseName(target)}` });
         activePane()?.refresh();
       })
       .catch((e) => {
-        busy = false;
+        if (!flow.docked) busy = false;
         if (isCancelledError(e)) {
-          dialogs.close();
+          jobs.finish(flow, 'canceled', { summary: 'Pack dibatalkan' });
           return;
         }
         const msg = e instanceof FsError ? e.message : String(e);
-        dialogs.open({ kind: 'pack', paths, target, format: fmt, initialError: msg });
+        const reopen = () =>
+          dialogs.open({ kind: 'pack', paths, target, format: fmt, initialError: msg });
+        if (flow.docked) {
+          jobs.finish(flow, 'failed', {
+            summary: `Pack gagal: ${baseName(target)}`,
+            result: { label: 'Lihat galat', open: reopen },
+          });
+        } else {
+          jobs.finish(flow, 'failed', { silent: true });
+          reopen();
+        }
       });
   }
 
@@ -867,6 +886,16 @@
       <div class="actions">
         <button class="ghost" onclick={() => dialogs.cancelArchiveJob()} disabled={d.cancelling}>
           Batal
+        </button>
+        <!-- FER-578: Esc does the same; the job keeps running in the dock (Alt+B). -->
+        <button
+          class="primary"
+          data-autofocus
+          data-testid="job-background"
+          title="Lanjutkan di latar belakang (Esc)"
+          onclick={() => dialogs.sendToBackground()}
+        >
+          <Mnemonic label="Back&ground" />
         </button>
       </div>
     {:else if d.kind === 'multipart'}
