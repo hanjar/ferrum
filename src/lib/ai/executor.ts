@@ -334,6 +334,8 @@ interface ChainState {
 /** FER-573: fixed text (never model text) shown when a size question arrives while Disk Usage is closed. */
 export const DISK_USAGE_HINT_TEXT =
   'Ukuran file dan folder dihitung lewat Disk Usage. Buka Disk Usage (Alt+Shift+D) di panel itu, lalu tanya lagi.';
+export const DISK_USAGE_ALREADY_OPEN_TEXT =
+  'Disk Usage sudah terbuka. Tanyakan lagi tentang ukurannya.';
 const FOLLOWUP_PROVIDER_ERROR =
   'Provider tidak dapat memproses perubahan; rencana sebelumnya tidak berlaku lagi. Ulangi perubahan atau ketik "batal".';
 const RUNNING_MESSAGE =
@@ -2071,7 +2073,12 @@ export class AiExecutor implements ChatExecutor {
    */
   private showHint(run: Run, epoch: number): void {
     const duPort = this.deps.diskUsage;
-    if (!duPort || safeDiskUsageAvailable(duPort) || !this.offered().includes(UI_HINT_CAPABILITY)) {
+    // Race: Disk Usage was opened after the question was sent. Say so calmly; no button, no error.
+    if (duPort && safeDiskUsageAvailable(duPort)) {
+      this.emit(run, 'needsInput', { modelText: DISK_USAGE_ALREADY_OPEN_TEXT });
+      return;
+    }
+    if (!duPort || !this.offered().includes(UI_HINT_CAPABILITY)) {
       this.failProvider(run, epoch, new RemoteProviderError('malformed', 'Unexpected hint'));
       return;
     }

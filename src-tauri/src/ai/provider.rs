@@ -630,7 +630,6 @@ pub fn redact(text: &str, secrets: &[&str]) -> String {
     for secret in secrets.iter().filter(|s| s.len() >= 4) {
         s = s.replace(secret, "[redacted]");
     }
-    s = redact_after(&s, "Bearer ");
     s = redact_after(&s, "bearer ");
     redact_sk(&s)
 }
@@ -638,7 +637,8 @@ pub fn redact(text: &str, secrets: &[&str]) -> String {
 fn redact_after(text: &str, marker: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
-    while let Some(pos) = rest.find(marker) {
+    // ASCII lowercasing keeps byte offsets, so the marker matches in any letter case.
+    while let Some(pos) = rest.to_ascii_lowercase().find(marker) {
         let (head, tail) = rest.split_at(pos + marker.len());
         out.push_str(head);
         let len: usize = tail
@@ -705,6 +705,11 @@ pub fn sanitize_detail(text: &str, secrets: &[&str]) -> Option<String> {
                     }
                 }
             }
+            continue;
+        }
+        // Bidi/format characters (RLO etc.) are dropped, not spaced, so they cannot reorder the
+        // text and a key split by a zero-width character still matches verbatim.
+        if crate::hotlist::model::is_format_char(c) {
             continue;
         }
         plain.push(if c.is_control() { ' ' } else { c });

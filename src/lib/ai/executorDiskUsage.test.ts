@@ -5,7 +5,12 @@ import type { RunState, RunUpdate } from './chatStore.svelte';
 import { ok } from './commands';
 import type { DiskUsageQueryKind, IntentEnvelope, PaneSnapshot } from './contracts';
 import type { DiskUsageActiveScan, DiskUsageQueryPort } from './diskUsageQuery';
-import { AiExecutor, DISK_USAGE_HINT_TEXT, type ExecutorDeps } from './executor';
+import {
+  AiExecutor,
+  DISK_USAGE_ALREADY_OPEN_TEXT,
+  DISK_USAGE_HINT_TEXT,
+  type ExecutorDeps,
+} from './executor';
 import { RemoteProviderError } from './remote-provider';
 import type { ExecutionLedgerPort } from './executorLedger';
 import type { QueuePort } from './executorQueue';
@@ -277,12 +282,17 @@ describe('FER-573: size question while Disk Usage is closed', () => {
     expect(JSON.stringify(t.provider.requests[0])).not.toContain('D:');
   });
 
-  it('fails closed: a hint when Disk Usage is open (or not offered) is an invalid reply', async () => {
+  it('a hint that arrives after Disk Usage was opened shows a calm note without a button', async () => {
     const open = setup(fakePort());
     open.provider.next = () => ({ kind: 'hint', hint: 'openDiskUsage' });
     const runId = open.submit();
-    await vi.waitFor(() => expect(open.stateOf(runId)).toBe('failed'));
+    await vi.waitFor(() => expect(open.stateOf(runId)).toBe('needsInput'));
     expect(open.last(runId).uiHint).toBeUndefined();
+    expect(open.last(runId).modelText).toBe(DISK_USAGE_ALREADY_OPEN_TEXT);
+    expect(open.last(runId).providerError).toBeUndefined();
+  });
+
+  it('fails closed: a hint without a Disk Usage port is an invalid reply', async () => {
     const noPort = setup(undefined);
     noPort.provider.next = () => ({ kind: 'hint', hint: 'openDiskUsage' });
     const id2 = noPort.submit();

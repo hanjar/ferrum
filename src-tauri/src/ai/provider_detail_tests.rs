@@ -64,6 +64,52 @@ fn html_and_plain_text_bodies_are_stripped_and_bounded() {
     );
 }
 
+/// S2: the user's actual key is hidden verbatim even when no heuristic would catch it.
+#[test]
+fn the_actual_key_is_redacted_verbatim_without_any_heuristic() {
+    for key in ["abcdefghijkl", "my-key-abc-123"] {
+        let body = format!(r#"{{"error":{{"message":"invalid api key {key} for this route"}}}}"#);
+        let text = summarize_error_body(&body, &[key]).unwrap();
+        assert!(!text.contains(key), "{key} leaked in {text}");
+        assert!(text.contains("[redacted]"));
+        // Same key split by zero-width / bidi characters still matches.
+        let split = format!(
+            r#"{{"message":"bad {}\u200B{}\u202E end"}}"#,
+            &key[..3],
+            &key[3..]
+        );
+        let text = summarize_error_body(&split, &[key]).unwrap();
+        assert!(!text.contains(key) && !text.contains(&key[3..]), "{text}");
+    }
+}
+
+/// S1: bidi and other format characters cannot reorder the text (e.g. the "(model X)" suffix).
+#[test]
+fn bidi_and_format_characters_are_removed() {
+    let rlo =
+        "\u{202E}txt.exe \u{2066}x\u{2069} \u{200B}\u{200F}\u{061C}\u{FEFF}\u{00AD}ok\u{E0041}";
+    let body = serde_json::json!({"error": {"message": rlo}}).to_string();
+    let text = summary(&body).unwrap();
+    assert_eq!(text, "txt.exe x ok");
+    for c in text.chars() {
+        assert!(
+            !c.is_control() && !crate::hotlist::model::is_format_char(c),
+            "{c:?}"
+        );
+    }
+}
+
+#[test]
+fn bearer_is_redacted_in_any_letter_case() {
+    for marker in ["Bearer", "bearer", "BEARER", "BeArEr"] {
+        let text = summary(&format!(
+            r#"{{"message":"auth {marker} secrettoken9 failed"}}"#
+        ))
+        .unwrap();
+        assert!(!text.contains("secrettoken9"), "{text}");
+    }
+}
+
 #[test]
 fn keys_tokens_urls_and_control_characters_are_removed() {
     let body = format!(

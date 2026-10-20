@@ -67,7 +67,8 @@ export class RemoteProviderError extends Error {
 const MAX_DETAIL_CHARS = 300;
 
 /**
- * FER-573: the backend already sanitizes `detail`; this is a second, independent pass. Only a string
+ * FER-573: the backend already sanitizes (and redacts the user's actual key verbatim; this layer
+ * does not know the key, so it only applies the generic patterns) `detail`; this is a second, independent pass. Only a string
  * is accepted; control characters (including ANSI) are removed, whitespace collapsed, key-like
  * runs hidden and the length bounded. Rendered as text only, never as HTML.
  */
@@ -76,6 +77,7 @@ export function sanitizeProviderDetail(raw: unknown): string | undefined {
   const text = raw
     // eslint-disable-next-line no-control-regex
     .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, ' ')
+    .replace(/\p{Cf}/gu, '')
     .replace(/\p{Cc}/gu, ' ')
     .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, '[redacted]')

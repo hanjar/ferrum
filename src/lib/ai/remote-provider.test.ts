@@ -320,6 +320,12 @@ describe('FER-573: provider message summary and UI hint', () => {
     expect(backendErrorDetail({ kind: 'auth', detail: 42 })).toBeUndefined();
   });
 
+  it('removes bidi/format characters so they cannot reorder the text', () => {
+    const out = sanitizeProviderDetail('\u202Etxt.exe \u2066x\u2069 \u200B\u200F\u061C\uFEFFok');
+    expect(out).toBe('txt.exe x ok');
+    expect(/[\p{Cf}\p{Cc}]/u.test(out ?? '')).toBe(false);
+  });
+
   it('never attaches a detail to an unknown kind', async () => {
     const transport: BackendIntentTransport = vi.fn(async () => {
       throw { kind: 'shell_exec', detail: 'rm -rf' };
