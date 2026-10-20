@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 
 const verifyMock = vi.fn();
 const cancelMock = vi.fn();
@@ -16,10 +16,13 @@ vi.mock('../ipc/fileTools', async (importOriginal) => {
 });
 
 const { fileTools } = await import('../stores/fileToolsStore.svelte');
+const { jobs } = await import('../stores/jobsStore.svelte');
 import FileToolsDialog from './FileToolsDialog.svelte';
 
 afterEach(() => {
   cleanup();
+  fileTools.current = null;
+  jobs.reset();
   fileTools.close();
   verifyMock.mockReset();
   cancelMock.mockReset();
@@ -106,5 +109,52 @@ describe('FileToolsDialog', () => {
     await vi.waitFor(() =>
       expect(screen.getByText(/Cancelled — only the items finished/)).toBeTruthy(),
     );
+  });
+
+  it('FER-578: Background closes a running verification into the dock; Close stays disabled', async () => {
+    let finish: (v: unknown) => void = () => {};
+    verifyMock.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    fileTools.open({ kind: 'checksumVerify', paths: ['C:\\d\\big.iso'] });
+    render(FileToolsDialog);
+    expect(
+      ((await screen.findByRole('button', { name: 'Close' })) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    const bg = await screen.findByRole('button', { name: 'Background' });
+    expect(bg.getAttribute('data-mnemonic')).toBe('g');
+    await fireEvent.click(bg);
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(cancelMock).not.toHaveBeenCalled();
+    expect(jobs.docked).toHaveLength(1);
+    finish({
+      requested: 1,
+      ok: 1,
+      mismatched: 0,
+      outcomes: [{ path: 'C:\\d\\big.iso', status: 'ok' }],
+    });
+    await vi.waitFor(() => expect(jobs.docked[0]?.state).toBe('done'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('FER-578: Esc on a running verification backgrounds it instead of doing nothing', async () => {
+    let finish: (v: unknown) => void = () => {};
+    verifyMock.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    fileTools.open({ kind: 'checksumVerify', paths: ['C:\\d\\big.iso'] });
+    render(FileToolsDialog);
+    await screen.findByRole('button', { name: 'Background' });
+    await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(jobs.docked).toHaveLength(1);
+    finish({ requested: 1, ok: 1, mismatched: 0, outcomes: [] });
+    await vi.waitFor(() => expect(jobs.docked[0]?.state).toBe('done'));
+  });
+
+  it('FER-578: Esc on a finished verification just closes it', async () => {
+    verifyMock.mockResolvedValue({ requested: 1, ok: 1, mismatched: 0, outcomes: [] });
+    fileTools.open({ kind: 'checksumVerify', paths: ['C:\\d\\a.txt'] });
+    render(FileToolsDialog);
+    await vi.waitFor(() => expect(screen.getByText(/OK ·/)).toBeTruthy());
+    await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(jobs.list).toHaveLength(0);
   });
 });

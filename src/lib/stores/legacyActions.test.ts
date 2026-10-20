@@ -26,6 +26,7 @@ import { actionForEvent, getAction, isEnabled, matches, runAction } from '../act
 import { registerPane, type PaneApi } from './panesRegistry.svelte';
 import { dialogs } from './dialogStore.svelte';
 import { ops } from './opsStore.svelte';
+import { jobs } from './jobsStore.svelte';
 import { ui } from '../uiState.svelte';
 import { viewState } from './viewStateStore.svelte';
 import {
@@ -61,6 +62,7 @@ beforeEach(() => {
   dialogs.close();
   viewPresets.reset();
   ops.ops = new Map();
+  jobs.reset();
   webviewMock.instances.length = 0;
   webviewMock.getByLabel.mockClear().mockResolvedValue(null);
   for (const p of [0, 1] as const) {
@@ -108,6 +110,38 @@ describe('Quit (respects in-flight operations)', () => {
     expect(runAction(getAction('file.quit')!)).toBe(true);
     expect(dialogs.current).toMatchObject({ kind: 'quitConfirm', operations: 1 });
     expect(dialogs.current).not.toBeNull();
+  });
+
+  it('FER-578: running background jobs (docked or not) also ask for confirmation', () => {
+    const job = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'C:\\a.zip' });
+    jobs.attempt(job, 'req-1');
+    jobs.dock(job);
+    expect(runAction(getAction('file.quit')!)).toBe(true);
+    expect(dialogs.current).toMatchObject({ kind: 'quitConfirm', operations: 1 });
+    dialogs.close();
+
+    // queued operations and jobs add up
+    ops.ops = new Map([
+      [
+        'op_1',
+        {
+          operationId: 'op_1',
+          kind: 'copy',
+          state: 'running',
+          processedBytes: 0,
+          processedFiles: 0,
+        },
+      ],
+    ]);
+    expect(runAction(getAction('file.quit')!)).toBe(true);
+    expect(dialogs.current).toMatchObject({ kind: 'quitConfirm', operations: 2 });
+    dialogs.close();
+
+    // a finished job no longer blocks quitting
+    ops.ops = new Map();
+    jobs.finish(job, 'done', { silent: true });
+    expect(runAction(getAction('file.quit')!)).toBe(true);
+    expect(dialogs.current).toBeNull();
   });
 
   it('quitConfirm only appears from the action, never as a stray default', () => {

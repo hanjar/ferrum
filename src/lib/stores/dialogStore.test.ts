@@ -10,6 +10,7 @@ const { dialogs, summarizeArchiveTest, sanitizeMemberPath } = await import('./di
 const { registerPane } = await import('./panesRegistry.svelte');
 const { ui } = await import('../uiState.svelte');
 const { FsError } = await import('../ipc/types');
+const { jobs } = await import('./jobsStore.svelte');
 
 const unregisters: (() => void)[] = [];
 
@@ -34,6 +35,7 @@ function register(
 
 afterEach(() => {
   dialogs.close();
+  jobs.reset();
   ui.activePane = 0;
   for (const off of unregisters.splice(0)) off();
 });
@@ -575,7 +577,7 @@ describe('FER-79 cancel and progress for extract', () => {
     archivePreflightMock.mockResolvedValue({ totalFiles: 1, totalBytes: 1, conflicts: [] });
   });
 
-  it('extract gets a request id and shows a progress dialog that Esc/close cancels with that id', async () => {
+  it('extract gets a request id and shows a progress dialog; Batal cancels with that id', async () => {
     register(0, 'C:\\Projects', ['C:\\Projects\\big.zip']);
     register(1, 'D:\\Backup');
     const job = deferred<void>();
@@ -591,7 +593,7 @@ describe('FER-79 cancel and progress for extract', () => {
       cancelling: false,
     });
 
-    dialogs.close(); // Esc
+    dialogs.cancelArchiveJob(); // Batal
     expect(archiveCancelMock).toHaveBeenCalledWith(id);
     // The dialog stays up, marked cancelling, until the job really stops.
     expect(dialogs.current).toMatchObject({ kind: 'archiveProgress', cancelling: true });
@@ -653,7 +655,8 @@ describe('FER-79 cancel and progress for extract', () => {
     job.resolve();
     await flush();
     expect(dialogs.current).toBeNull();
-    expect(progressHandler).toBeNull(); // listener released
+    // FER-578: one global listener serves every job; the finished job is gone.
+    expect(jobs.list).toHaveLength(0);
   });
 
   it('F5 from inside an archive is cancellable too (same queue)', async () => {
@@ -665,7 +668,7 @@ describe('FER-79 cancel and progress for extract', () => {
     await flush();
     const id = archiveExtractMock.mock.calls[0]![5] as string;
     expect(dialogs.current).toMatchObject({ kind: 'archiveProgress', requestId: id });
-    dialogs.close();
+    dialogs.cancelArchiveJob();
     expect(archiveCancelMock).toHaveBeenCalledWith(id);
     job.reject(cancelledError());
     await flush();
@@ -873,14 +876,14 @@ describe('FER-79 cancel in Test Archive', () => {
     expect(d.reports.map((r) => r.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
   });
 
-  it('Esc on the progress dialog cancels the test too', async () => {
+  it('Batal on the progress dialog cancels the test too', async () => {
     register(0, 'C:\\Projects', ['C:\\Projects\\a.zip']);
     const job = deferred<unknown>();
     archiveTestMock.mockReturnValue(job.promise);
     dialogs.beginTestArchive();
     await flush();
     const id = archiveTestMock.mock.calls[0]![2] as string;
-    dialogs.close();
+    dialogs.cancelArchiveJob();
     expect(archiveCancelMock).toHaveBeenCalledWith(id);
     job.reject(cancelledError());
     await flush();

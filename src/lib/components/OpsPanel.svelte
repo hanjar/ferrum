@@ -4,6 +4,8 @@
   import Mnemonic from './Mnemonic.svelte';
   import { dialog } from '../dialogKit';
   import { ops, pctOf } from '../stores/opsStore.svelte';
+  import { jobs, jobPercent, isJobActive, type Job } from '../stores/jobsStore.svelte';
+  import { tick } from 'svelte';
   import {
     detailLine,
     durationMsOf,
@@ -28,8 +30,63 @@
   // restart semantics are "retry from scratch", so a pause button would lie.
   const view = $derived(splitBtm(ops.all));
   const hasFinished = $derived(
-    ops.all.some((o) => o.state === 'completed' || o.state === 'failed' || o.state === 'cancelled'),
+    ops.all.some(
+      (o) => o.state === 'completed' || o.state === 'failed' || o.state === 'cancelled',
+    ) || jobs.hasFinished,
   );
+  const jobState: Record<Job['state'], string> = {
+    running: 'Running',
+    needsInput: 'Needs your input',
+    queued: 'Waiting (same folder)',
+    cancelling: 'Cancelling…',
+    done: 'Completed',
+    failed: 'Failed',
+    canceled: 'Cancelled',
+  };
+  const kindLabel: Record<Job['kind'], string> = {
+    pack: 'Pack',
+    extract: 'Extract',
+    test: 'Test archive',
+    verify: 'Verify',
+  };
+
+  /** FER-578: the row's main action - answer a held prompt, or read a finished job's result.
+   *  The panel closes first so the dialog is not stacked over it. */
+  async function jobPrimary(job: Job) {
+    const run =
+      job.state === 'needsInput'
+        ? () => jobs.openPrompt(job)
+        : job.result
+          ? () => jobs.openResult(job)
+          : null;
+    if (!run) return;
+    ops.panelOpen = false;
+    await tick();
+    run();
+  }
+
+  /** Remove a finished row and keep the keyboard inside the panel: focus goes to the neighbour
+   *  row (or the panel itself when none is left), never to the body. */
+  async function dismissJob(job: Job) {
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const at = rows.findIndex((r) => r.dataset.jobId === job.id);
+    jobs.remove(job);
+    await tick();
+    const left = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const next = left[Math.min(Math.max(at, 0), left.length - 1)];
+    (next ?? document.querySelector<HTMLElement>('.panel'))?.focus();
+  }
+
+  function jobKey(e: KeyboardEvent, job: Job) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void jobPrimary(job);
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && !isJobActive(job)) {
+      e.preventDefault();
+      void dismissJob(job);
+    }
+  }
   const expanded = new SvelteSet<OperationId>();
 
   function toggleDetail(id: OperationId) {
@@ -90,7 +147,13 @@
       <Icon name="queue" size={15} />
       <span class="title">Background Transfer Manager</span>
       {#if hasFinished}
-        <button class="ghost" onclick={() => void ops.clearFinished()}>
+        <button
+          class="ghost"
+          onclick={() => {
+            jobs.clearFinished();
+            void ops.clearFinished();
+          }}
+        >
           <Mnemonic label="Clear &history" />
         </button>
       {/if}
@@ -99,14 +162,91 @@
       </button>
     </header>
 
-    {#if ops.all.length === 0}
+    {#if jobs.docked.length > 0}
+      <div class="sectionLabel">Background jobs</div>
+      <div class="list" data-testid="jobs-list">
+        {#each jobs.docked as job (job.id)}
+          {@const pct = jobPercent(job)}
+          <div
+            class="job"
+            class:done={!isJobActive(job)}
+            tabindex="-1"
+            data-testid="bg-job"
+            data-job-id={job.id}
+            data-state={job.state}
+            onkeydown={(e) => jobKey(e, job)}
+          >
+            <div class="row1">
+              <span class="kind"
+                >{kindLabel[job.kind]}{job.position ? ` (${job.position})` : ''}</span
+              >
+              <span class="name mono" title={job.subject}>{job.subject}</span>
+              <span class="pct mono">{pct === null ? '' : `${pct}%`}</span>
+            </div>
+            <div
+              class="bar"
+              role="progressbar"
+              aria-label={`${kindLabel[job.kind]} progress`}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={pct ?? undefined}
+            >
+              <div
+                class="fill"
+                class:indeterminate={pct === null && isJobActive(job)}
+                style:width={pct === null && !isJobActive(job)
+                  ? '100%'
+                  : pct === null
+                    ? undefined
+                    : `${pct}%`}
+              ></div>
+            </div>
+            {#if job.state === 'running' && job.currentMember}
+              <div class="name mono">{job.currentMember}</div>
+            {/if}
+            {#if job.summary}
+              <div class="jobSummary" class:errorText={job.state === 'failed'}>{job.summary}</div>
+            {/if}
+            <div class="row2">
+              <span>{jobState[job.state]}</span>
+              <span class="rowActions">
+                {#if job.state === 'needsInput'}
+                  <button class="ghost" onclick={() => void jobPrimary(job)}>
+                    {job.prompt?.label ?? 'Respond'}…
+                  </button>
+                {/if}
+                {#if isJobActive(job)}
+                  <button
+                    class="ghost danger"
+                    disabled={job.state === 'cancelling'}
+                    onclick={() => jobs.cancel(job)}>Cancel</button
+                  >
+                {:else}
+                  {#if job.result}
+                    <button class="ghost" onclick={() => void jobPrimary(job)}>
+                      {job.result.label}
+                    </button>
+                  {/if}
+                  <button class="ghost" onclick={() => void dismissJob(job)}>Dismiss</button>
+                {/if}
+              </span>
+            </div>
+          </div>
+        {/each}
+      </div>
+      {#if ops.all.length > 0}
+        <div class="sectionLabel">Transfers</div>
+      {/if}
+    {/if}
+
+    {#if ops.all.length === 0 && jobs.docked.length === 0}
       <div class="empty">
         <p>No transfers.</p>
         <button class="ghost" onclick={() => void ops.enqueueDummy(1500)}>
           Run 1.5s test job
         </button>
       </div>
-    {:else}
+    {:else if ops.all.length > 0}
       <div class="list">
         {#each view.active as op (op.operationId)}
           <div class="job" tabindex="-1">
@@ -315,6 +455,23 @@
     border-radius: 2px;
     background: var(--line2);
     overflow: hidden;
+  }
+  .fill.indeterminate {
+    width: 35%;
+    animation: slide 1.1s ease-in-out infinite alternate;
+  }
+  @keyframes slide {
+    from {
+      margin-left: 0;
+    }
+    to {
+      margin-left: 65%;
+    }
+  }
+  .jobSummary {
+    font-size: calc(11px + var(--uiStep, 0px));
+    color: var(--text2);
+    overflow-wrap: anywhere;
   }
   .fill {
     height: 100%;

@@ -8,6 +8,8 @@ import { fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Dialogs from './Dialogs.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
+import { jobs } from '../stores/jobsStore.svelte';
+import { toast } from '../stores/toastStore.svelte';
 import { registerPane, type PaneApi } from '../stores/panesRegistry.svelte';
 import { ui } from '../uiState.svelte';
 import { FsError } from '../ipc/types';
@@ -62,6 +64,7 @@ beforeEach(() => {
 
 afterEach(() => {
   dialogs.close();
+  jobs.reset();
   for (const off of unregisters.splice(0)) off();
 });
 
@@ -167,7 +170,7 @@ describe('Pack dialog submit', () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it('Esc during packing cancels the running job', async () => {
+  it('Batal during packing cancels the running job', async () => {
     let cancelCalled = false;
     archiveMocks.archiveCreate.mockImplementation(() => {
       return new Promise((_, reject) => {
@@ -187,10 +190,64 @@ describe('Pack dialog submit', () => {
     await tick();
 
     expect(dialogs.current).toMatchObject({ kind: 'archiveProgress' });
-    await fireEvent.keyDown(getByRole('dialog'), { key: 'Escape' });
+    await fireEvent.click(getByRole('button', { name: 'Batal' }));
     await tick();
     expect(cancelCalled).toBe(true);
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
+    expect(jobs.list).toHaveLength(0);
+  });
+
+  it('Esc during packing moves it to the background; the finish opens no dialog (FER-578)', async () => {
+    let finish: (v: string) => void = () => {};
+    archiveMocks.archiveCreate.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    open();
+    const { getByRole } = render(Dialogs);
+    await tick();
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await tick();
+    expect(dialogs.current).toMatchObject({ kind: 'archiveProgress' });
+
+    await fireEvent.keyDown(getByRole('dialog'), { key: 'Escape' });
+    await tick();
+    expect(archiveMocks.archiveCancelRequest).not.toHaveBeenCalled();
+    expect(dialogs.current).toBeNull();
+    expect(jobs.docked).toHaveLength(1);
+
+    // The user does something else meanwhile; a later dialog must not be closed by the pack.
+    dialogs.open({ kind: 'mkdir', parent: DIR });
+    finish('C:\\Data\\Invoice.zip');
+    await vi.waitFor(() => expect(jobs.docked[0]?.state).toBe('done'));
+    expect(dialogs.current).toMatchObject({ kind: 'mkdir' });
+    expect(refresh).toHaveBeenCalled();
+    expect(toast.message).toContain('Pack selesai');
+  });
+
+  it('a docked pack that fails keeps the error in the dock; "Lihat galat" reopens Pack', async () => {
+    let fail: (e: unknown) => void = () => {};
+    archiveMocks.archiveCreate.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject;
+        }),
+    );
+    open();
+    const { getByRole } = render(Dialogs);
+    await tick();
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await tick();
+    await fireEvent.keyDown(getByRole('dialog'), { key: 'Escape' });
+    await tick();
+
+    fail(new FsError({ code: 'io', message: 'disk is full' }));
+    await vi.waitFor(() => expect(jobs.docked[0]?.state).toBe('failed'));
+    expect(dialogs.current).toBeNull();
+    jobs.openResult(jobs.docked[0]!);
+    expect(dialogs.current).toMatchObject({ kind: 'pack', initialError: 'disk is full' });
   });
 
   it('failure keeps the dialog open, shows the FsError message and does not refresh', async () => {
@@ -204,5 +261,36 @@ describe('Pack dialog submit', () => {
     await findByText(/disk is full/);
     expect(dialogs.current).toMatchObject({ kind: 'pack' });
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('FER-578 S3: a finishing pack does not close another job password prompt', async () => {
+    let finish: (v: string) => void = () => {};
+    archiveMocks.archiveCreate.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    open();
+    const { getByRole } = render(Dialogs);
+    await tick();
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await tick();
+    // Another job's password prompt arrives while the pack progress dialog is up: it queues.
+    const cancel = vi.fn();
+    dialogs.open({
+      kind: 'password',
+      archivePath: 'C:\\x\\enc.zip',
+      retry: async () => {},
+      cancel,
+    });
+    expect(dialogs.queue).toHaveLength(1);
+
+    finish('C:\\Data\\Invoice.zip');
+    await vi.waitFor(() => expect(dialogs.current).toMatchObject({ kind: 'password' }));
+    await tick();
+    await tick();
+    expect(dialogs.current).toMatchObject({ kind: 'password' });
+    expect(cancel).not.toHaveBeenCalled();
   });
 });
