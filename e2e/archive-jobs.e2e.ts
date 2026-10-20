@@ -198,7 +198,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('Batal on a running extract cancels it by its request id and reports the cancel', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+F9');
-    const progress = page.getByRole('dialog', { name: 'archiveProgress' });
+    const progress = page.locator('[role="dialog"][data-kind="archiveProgress"]');
     await expect(progress).toBeVisible();
     await expect(progress).toContainText('hang.zip');
     await expect.poll(async () => (await calls(page, 'archive_extract')).length).toBe(1);
@@ -209,7 +209,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
     expect((await calls(page, 'archive_cancel_request'))[0]!.args['requestId']).toBe(requestId);
 
-    const done = page.getByRole('dialog', { name: 'error' });
+    const done = page.locator('[role="dialog"][data-kind="error"]');
     await expect(done).toBeVisible();
     await expect(done).toContainText('Dibatalkan');
     await expect(progress).toBeHidden();
@@ -218,25 +218,25 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('Esc on a running extract cancels it too', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+F9');
-    await expect(page.getByRole('dialog', { name: 'archiveProgress' })).toBeVisible();
+    await expect(page.locator('[role="dialog"][data-kind="archiveProgress"]')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
     const requestId = (await calls(page, 'archive_extract'))[0]!.args['requestId'];
     expect((await calls(page, 'archive_cancel_request'))[0]!.args['requestId']).toBe(requestId);
-    await expect(page.getByRole('dialog', { name: 'error' })).toContainText('Dibatalkan');
+    await expect(page.locator('[role="dialog"][data-kind="error"]')).toContainText('Dibatalkan');
   });
 
   test('Test Archive: Batal cancels with the test request id and the report says dibatalkan', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+Shift+F9');
-    const progress = page.getByRole('dialog', { name: 'archiveProgress' });
+    const progress = page.locator('[role="dialog"][data-kind="archiveProgress"]');
     await expect(progress).toBeVisible();
     await expect.poll(async () => (await calls(page, 'archive_test')).length).toBe(1);
     const requestId = (await calls(page, 'archive_test'))[0]!.args['requestId'];
     await progress.getByRole('button', { name: 'Batal' }).click();
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
     expect((await calls(page, 'archive_cancel_request'))[0]!.args['requestId']).toBe(requestId);
-    const report = page.getByRole('dialog', { name: 'testReport' });
+    const report = page.locator('[role="dialog"][data-kind="testReport"]');
     await expect(report).toBeVisible();
     await expect(report).toContainText('Dibatalkan');
   });
@@ -244,16 +244,18 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('Test Archive: Esc cancels the test', async () => {
     await row('hang.zip').click();
     await page.keyboard.press('Alt+Shift+F9');
-    await expect(page.getByRole('dialog', { name: 'archiveProgress' })).toBeVisible();
+    await expect(page.locator('[role="dialog"][data-kind="archiveProgress"]')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect.poll(async () => (await calls(page, 'archive_cancel_request')).length).toBe(1);
-    await expect(page.getByRole('dialog', { name: 'testReport' })).toContainText('Dibatalkan');
+    await expect(page.locator('[role="dialog"][data-kind="testReport"]')).toContainText(
+      'Dibatalkan',
+    );
   });
 
   test('Test Archive on an encrypted archive asks for a masked password, retries on a wrong one', async () => {
     await row('enc.zip').click();
     await page.keyboard.press('Alt+Shift+F9');
-    const pw = page.getByRole('dialog', { name: 'password' });
+    const pw = page.locator('[role="dialog"][data-kind="password"]');
     await expect(pw).toBeVisible();
     const input = pw.locator('input');
     await expect(input).toHaveAttribute('type', 'password');
@@ -266,7 +268,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
     await page.keyboard.type('right');
     await page.keyboard.press('Enter');
 
-    const report = page.getByRole('dialog', { name: 'testReport' });
+    const report = page.locator('[role="dialog"][data-kind="testReport"]');
     await expect(report).toBeVisible();
     await expect(report).toContainText('Archive test passed');
     const tests = await calls(page, 'archive_test');
@@ -284,7 +286,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('part 2 of a multipart archive explains itself and opens the first part', async () => {
     await row('x.part2.rar').click();
     await page.keyboard.press('Alt+F9');
-    const dlg = page.getByRole('dialog', { name: 'multipart' });
+    const dlg = page.locator('[role="dialog"][data-kind="multipart"]');
     await expect(dlg).toBeVisible();
     await expect(dlg).toContainText('Ini bagian 2 dari arsip multipart');
     await expect(dlg).toContainText('x.part1.rar');
@@ -306,7 +308,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('opening part 2 (Enter) shows the same explanation instead of a bare error', async () => {
     await row('x.part2.rar').click();
     await page.keyboard.press('Enter');
-    const dlg = page.getByRole('dialog', { name: 'multipart' });
+    const dlg = page.locator('[role="dialog"][data-kind="multipart"]');
     await expect(dlg).toBeVisible();
     await expect(dlg).toContainText('Ini bagian 2 dari arsip multipart');
   });
@@ -314,7 +316,7 @@ test.describe('archive jobs: cancel, password, multipart', () => {
   test('a first part with a missing volume names it and nothing is extracted or tested', async () => {
     await row('y.part1.rar').click();
     await page.keyboard.press('Alt+F9');
-    const dlg = page.getByRole('dialog', { name: 'multipart' });
+    const dlg = page.locator('[role="dialog"][data-kind="multipart"]');
     await expect(dlg).toBeVisible();
     await expect(dlg).toContainText('Bagian arsip multipart hilang');
     await expect(dlg).toContainText('y.part2.rar');

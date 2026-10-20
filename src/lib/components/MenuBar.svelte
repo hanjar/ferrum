@@ -262,6 +262,7 @@
       event.stopPropagation();
       return;
     }
+    if (openByMnemonic(event)) return;
     if (
       openGroup !== null ||
       ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Enter', ' ', 'Escape'].includes(
@@ -320,6 +321,7 @@
   }
 
   function onMenuKeydown(event: KeyboardEvent) {
+    if (openByMnemonic(event)) return; // Alt+letter switches menus while one is open
     event.stopPropagation();
     if (openGroup === null) return;
     const focused = document.activeElement as HTMLButtonElement;

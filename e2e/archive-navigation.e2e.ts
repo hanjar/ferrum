@@ -317,7 +317,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('Alt+F5 packs the selection via keyboard (Enter submits)', async () => {
     await left().locator('[data-path$="other.txt"]').click();
     await page.keyboard.press('Alt+F5');
-    const packDialog = page.getByRole('dialog', { name: 'pack' });
+    const packDialog = page.locator('[role="dialog"][data-kind="pack"]');
     await expect(packDialog).toBeVisible();
     await page.keyboard.press('Enter');
     await expect(packDialog).toBeHidden();
@@ -340,9 +340,9 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('Escape cancels the pack dialog without invoking archive_create', async () => {
     await left().locator('[data-path$="other.txt"]').click();
     await page.keyboard.press('Alt+F5');
-    await expect(page.getByRole('dialog', { name: 'pack' })).toBeVisible();
+    await expect(page.locator('[role="dialog"][data-kind="pack"]')).toBeVisible();
     await page.keyboard.press('Escape');
-    await expect(page.getByRole('dialog', { name: 'pack' })).toBeHidden();
+    await expect(page.locator('[role="dialog"][data-kind="pack"]')).toBeHidden();
     const invocations = await page.evaluate(
       () => (window as unknown as { __archiveInvocations: unknown[] }).__archiveInvocations,
     );
@@ -387,7 +387,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('encrypted archive unlocks the preflight, then extracts WITH the password', async () => {
     await left().locator('[data-path$="encrypted.zip"]').click();
     await page.keyboard.press('Alt+F9');
-    const pwDialog = page.getByRole('dialog', { name: 'password' });
+    const pwDialog = page.locator('[role="dialog"][data-kind="password"]');
     await expect(pwDialog).toBeVisible();
     await page.keyboard.type('secret');
     await page.keyboard.press('Enter');
@@ -434,7 +434,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('Alt+Shift+F9 tests the selected archive and reports the result', async () => {
     await left().locator('[data-path$="sample.zip"]').click();
     await page.keyboard.press('Alt+Shift+F9');
-    const report = page.getByRole('dialog', { name: 'testReport' });
+    const report = page.locator('[role="dialog"][data-kind="testReport"]');
     await expect(report).toBeVisible();
     await expect(report).toContainText('Archive test passed');
     await expect(report).toContainText('sample.zip');
@@ -465,7 +465,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('Alt+Shift+F9 tests a RAR and lists it in the same report', async () => {
     await left().locator('[data-path$="sample.rar"]').click();
     await page.keyboard.press('Alt+Shift+F9');
-    const report = page.getByRole('dialog', { name: 'testReport' });
+    const report = page.locator('[role="dialog"][data-kind="testReport"]');
     await expect(report).toBeVisible();
     await expect(report).toContainText('sample.rar');
     const tested = (await invocations(page)).find((i) => i.cmd === 'archive_test');
@@ -477,9 +477,9 @@ test.describe('F2-12 archive navigation E2E', () => {
     await page.keyboard.press('Control+k');
     await page.keyboard.type('Pack to archive (7z)');
     await page.keyboard.press('Enter');
-    const packDialog = page.getByRole('dialog', { name: 'pack' });
+    const packDialog = page.locator('[role="dialog"][data-kind="pack"]');
     await expect(packDialog).toBeVisible();
-    await expect(packDialog).toContainText('SEVENZ');
+    await expect(packDialog.getByRole('radio', { name: '7Z' })).toBeChecked();
     await page.keyboard.press('Enter');
     await expect(packDialog).toBeHidden();
     const create = (await invocations(page)).find((i) => i.cmd === 'archive_create');
@@ -490,7 +490,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('extract with a name clash asks once and Extract runs with skip', async () => {
     await left().locator('[data-path$="clash.zip"]').click();
     await page.keyboard.press('Alt+F9');
-    const ask = page.getByRole('dialog', { name: 'extractConflicts' });
+    const ask = page.locator('[role="dialog"][data-kind="extractConflicts"]');
     await expect(ask).toBeVisible();
     await expect(ask).toContainText('readme.md');
     expect(await countInvocations(page, 'archive_extract')).toBe(0);
@@ -505,7 +505,7 @@ test.describe('F2-12 archive navigation E2E', () => {
   test('Escape on the extract conflict ask runs no extract', async () => {
     await left().locator('[data-path$="clash.zip"]').click();
     await page.keyboard.press('Alt+F9');
-    const ask = page.getByRole('dialog', { name: 'extractConflicts' });
+    const ask = page.locator('[role="dialog"][data-kind="extractConflicts"]');
     await expect(ask).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(ask).toBeHidden();

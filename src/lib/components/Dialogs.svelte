@@ -508,6 +508,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="dlg-title"
+    data-kind={d.kind}
     tabindex="-1"
     bind:this={modalEl}
     use:dialog={dialogOpts}
