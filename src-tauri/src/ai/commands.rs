@@ -57,6 +57,9 @@ fn outcome_json(outcome: PlanOutcome) -> Result<Value, ProviderError> {
         PlanOutcome::Intent { envelope, .. } => {
             serde_json::to_value(envelope).map_err(|_| internal())
         }
+        PlanOutcome::Chain { chain, .. } => serde_json::to_value(chain)
+            .map(|steps| json!({ "kind": "chain", "chain": steps }))
+            .map_err(|_| internal()),
         PlanOutcome::Question { text } => Ok(json!({ "kind": "question", "text": text })),
     }
 }

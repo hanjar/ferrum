@@ -67,6 +67,11 @@ export const err = (code: CommandErrorCode, message: string, cause?: string): Re
 /** Local context for one request: the immutable snapshot taken at submit. */
 export interface ResolvedContext {
   snapshot: PaneSnapshot;
+  /**
+   * FER-576 (review R2): this step belongs to a chain that deletes, so the archive adapter must measure the
+   * sources (member count, links) before offering the card. Plain archives skip the measurement (no latency).
+   */
+  needCensus?: boolean;
 }
 
 export type Availability =
@@ -86,6 +91,22 @@ export interface PreviewInfo {
   totalBytes: number;
   outputPath?: string;
   warnings: string[];
+  /**
+   * FER-576: digest of the frozen source selection (archive and delete adapters). A chain compares the two so
+   * that "archive, then delete" can only delete exactly what was archived.
+   */
+  selectionDigest?: string;
+  /**
+   * FER-576 (review R1, S6): is the frozen selection exactly this ONE path? A function, not a list: the preview
+   * never carries paths (a test pins that). A chain asks it about the file it navigated to.
+   */
+  selectionIsOnly?: (path: string) => boolean;
+  /** FER-576 (review R1, S3): the output is written inside one of the sources (it would be deleted with them). */
+  outputInsideSource?: boolean;
+  /** FER-576 (review R1, S2): members a 7z / ZIP of the sources must hold (files + empty folders). */
+  expectedMembers?: number;
+  /** FER-576 (review R1, S2): symlinks / junctions inside the sources; an archive silently skips them. */
+  linkCount?: number;
 }
 
 /** What an adapter hands the facade after a read-only prepare. */
@@ -107,6 +128,8 @@ export interface AdapterRun {
   conflictsSkipped: number;
   /** Items that could not be put on the queue (sync): the run must not be reported as fully done. */
   failedToQueue?: number;
+  /** FER-576: app-built text for the partial result when `failedToQueue` > 0 (e.g. which deletes failed). */
+  failureNote?: string;
   outputPath?: string;
   notes: string[];
 }
@@ -149,6 +172,7 @@ export interface CommandReceipt {
   completed: number;
   conflictsSkipped: number;
   failedToQueue?: number;
+  failureNote?: string;
   outputPath?: string;
   notes: string[];
 }
@@ -368,6 +392,7 @@ export class CommandFacade {
         notes: r.notes,
       };
       if (r.failedToQueue) receipt.failedToQueue = r.failedToQueue;
+      if (r.failureNote !== undefined) receipt.failureNote = r.failureNote;
       if (r.outputPath !== undefined) receipt.outputPath = r.outputPath;
       return ok(receipt);
     } catch (e) {

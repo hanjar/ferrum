@@ -121,9 +121,8 @@ export function levelText(level: ArchiveIntentLevel): string {
     case 'normal':
       return 'normal';
     case 'maximum':
-      return 'maksimum';
     case 'ultra':
-      return 'ultra (ukuran paling kecil)';
+      return 'maksimum (level terkuat, sama dengan Max di dialog Pack)';
   }
 }
 

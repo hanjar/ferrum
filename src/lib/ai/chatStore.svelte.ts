@@ -7,6 +7,7 @@ import type { SettleResult } from '../syncService';
 import type { CopyAdjustView } from './copyAdjust';
 import type { IndexerView } from './indexerControl';
 import type { DiskUsageAnswer } from './diskUsageQuery';
+import type { NavigateView } from './paneNavigate';
 import {
   answerItems,
   isOpenable,
@@ -119,6 +120,15 @@ export interface RunUpdate {
   diskUsage?: DiskUsageAnswer;
   /** FER-466: app-built summary of the question that was run (from the parsed intent). */
   diskUsageQuery?: string;
+  /** FER-576: app-built result of a `pane.navigate` (opened folder / selected file). Never sent to the provider. */
+  navigate?: NavigateView;
+  /** FER-576: this run is step `index + 1` of `total` of a multi-step plan; `note` is app-built. */
+  chain?: { index: number; total: number; note?: string };
+  /**
+   * FER-576: this (final) update hands over to a new run for the next step. The store adds a card for it; the
+   * executor then plans it. Ids are app-made, never from the model.
+   */
+  chainNext?: { runId: string; requestId: string; userText: string };
 }
 
 /** AI-09: acuan eksplisit ke rencana yang ingin diubah (bukan ke pesan chat lama). */
@@ -229,6 +239,10 @@ export interface RunView {
   /** FER-466: local Disk Usage answer and the question summary (app text only). */
   diskUsage?: DiskUsageAnswer;
   diskUsageQuery?: string;
+  /** FER-576: result of a `pane.navigate` step (app text only). */
+  navigate?: NavigateView;
+  /** FER-576: this card is step `index + 1` of `total` of a multi-step plan. */
+  chain?: { index: number; total: number; note?: string };
   chosenId?: string;
   /** "Open in panel" in progress / its last note (app text). */
   opening?: boolean;
@@ -1160,6 +1174,31 @@ export class ChatStore {
     r.canApprove = state === 'awaitingApproval' && !r.approvalSent;
   }
 
+  /**
+   * FER-576: the executor handed over to the next step of a multi-step plan. Ids come from the executor (never
+   * from the model); the card appears here before the executor starts planning the step.
+   */
+  private addChainRun(next: { runId: string; requestId: string; userText: string }): void {
+    if (this.run(next.runId)) return;
+    this.runs.push({
+      runId: next.runId,
+      requestId: next.requestId,
+      userText: next.userText,
+      state: 'planning',
+      label: statusLabel('planning'),
+      jobs: [],
+      conflicts: [],
+      approvalSent: false,
+      cancelRequested: false,
+      canApprove: false,
+      revision: 0,
+      revisionNotes: [],
+      superseded: false,
+      checking: false,
+    });
+    this.messages.push({ id: `m-${next.runId}-r`, role: 'run', runId: next.runId });
+  }
+
   private apply(u: RunUpdate): void {
     const r = this.run(u.runId);
     // unknownOutcome hanya boleh ditinggalkan lewat rekonsiliasi executor ("Periksa hasil"); final lain tetap final.
@@ -1190,6 +1229,9 @@ export class ChatStore {
     if (u.indexer !== undefined) r.indexer = u.indexer;
     if (u.diskUsage !== undefined) r.diskUsage = u.diskUsage;
     if (u.diskUsageQuery !== undefined) r.diskUsageQuery = u.diskUsageQuery;
+    if (u.navigate !== undefined) r.navigate = u.navigate;
+    if (u.chain !== undefined) r.chain = u.chain;
     this.setState(r, u.state);
+    if (u.chainNext) this.addChainRun(u.chainNext);
   }
 }

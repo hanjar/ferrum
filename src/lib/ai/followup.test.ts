@@ -315,3 +315,28 @@ describe('FER-209 IntentHistory', () => {
     expect(() => (h.entries() as unknown as unknown[]).push(1)).toThrow();
   });
 });
+
+describe('mergeProviderIntent never swaps the kind of operation (review R2 S1)', () => {
+  const del = (): IntentEnvelope => ({
+    schemaVersion: 1,
+    requestId: 'req_1',
+    intent: { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
+  });
+
+  it('refuses archive -> delete, delete -> archive and archive -> sync', () => {
+    for (const [prev, next] of [
+      [archive(), del()],
+      [del(), archive()],
+      [archive(), sync()],
+      [sync(), archive()],
+    ] as const) {
+      const merged = mergeProviderIntent(prev, next);
+      expect(merged.ok).toBe(false);
+    }
+  });
+
+  it('still accepts a change inside the same operation', () => {
+    expect(mergeProviderIntent(archive(), archive({ format: '7z' })).ok).toBe(true);
+    expect(mergeProviderIntent(del(), del()).ok).toBe(true);
+  });
+});

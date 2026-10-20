@@ -4,7 +4,10 @@
 //! cancel, timeout, strict output, one repair request, redaction) is testable without network.
 //! The credential is read here (backend) and never crosses to the frontend. Nothing in this
 //! module touches the filesystem or the operation queue.
-use super::contract::{IntentEnvelope, MAX_INPUT_BYTES, parse_intent_offered};
+use super::contract::{
+    ChainEnvelope, Intent, IntentEnvelope, MAX_INPUT_BYTES, parse_chain_offered,
+    parse_intent_offered, path_typed_by_user, user_asked_to_delete,
+};
 use super::credential::{self, CREDENTIAL_TARGET, CredentialError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,7 +42,7 @@ const CAPABILITY_PROMPTS: [(&str, &str); 2] = [
         "archive.create",
         "Intent archive.create: {\"capability\":\"archive.create\",\"sourcePane\":\"left\"|\"right\"|\"activeAtSubmit\",\"selector\":{\"kind\":\"selected\"}|{\"kind\":\"allVisible\",\"entries\":\"all\"|\"filesOnly\"}|{\"kind\":\"directoryContents\",\"includeHidden\":bool,\"entries\":\"all\"|\"filesOnly\"} (any selector may also carry \"extensions\":[lowercase extensions without dot, at most 8]),\"format\":\"zip\"|\"7z\",\"level\":optional \"store\"|\"fast\"|\"normal\"|\"maximum\"|\"ultra\",\"target\":{\"kind\":\"sourceDirectory\"}|{\"kind\":\"pane\",\"pane\":\"left\"|\"right\"|\"activeAtSubmit\"},\"outputName\":optional basename only}
 Selector rule: the DEFAULT is entries \"all\" (every item the panel shows, folders included). In this request \"files\" is just a loose word for items: \"semua file di folder kiri\", \"all the files in the left folder\" and \"archive everything\" all mean entries \"all\". Use entries \"filesOnly\" ONLY when the user explicitly says to skip folders (for example \"files only\", \"file saja\", \"tanpa folder\", \"without subfolders\"). Add \"extensions\" only when the user names file types (\"hanya PDF\" -> [\"pdf\"]); it keeps just those files.
-Format rule: format is \"zip\" by default; use \"7z\" only when the user asks for 7z / 7zip / 7-Zip. RAR and other formats are not available. Add \"level\" only when the user states a compression preference: \"paling kecil\", \"terkecil\", \"smallest\", \"max compression\", \"kompresi maksimal\" -> \"ultra\"; \"cepat\"/\"fast\" -> \"fast\"; \"tanpa kompresi\"/\"store\" -> \"store\"; otherwise omit it. Never name a path or file in the intent.
+Format rule: format is \"zip\" by default; use \"7z\" only when the user asks for 7z / 7zip / 7-Zip. RAR and other formats are not available. Add \"level\" only when the user states a compression preference: \"paling kecil\", \"terkecil\", \"smallest\", \"max compression\", \"kompresi maksimal\" -> \"ultra\"; \"cepat\"/\"fast\" -> \"fast\"; \"tanpa kompresi\"/\"store\" -> \"store\"; otherwise omit it. Never put a path in the intent; outputName is a basename only.
 ",
     ),
     (
@@ -99,6 +102,28 @@ Disk usage rule: use diskUsage.query for questions about what takes the most spa
 const DISK_USAGE_CAPABILITY_PROMPTS: [(&str, &str); 1] =
     [("diskUsage.query", DISK_USAGE_QUERY_PROMPT)];
 
+/// FER-576 navigation capability (opt-in, appended after Disk Usage so every older prompt stays
+/// byte-identical). The model copies a path the user typed; the app (and the backend parser)
+/// rejects any path that is not in the request text, then checks the disk locally. No listing, name
+/// or size ever goes to the provider.
+const PANE_NAVIGATE_PROMPT: &str = "Intent pane.navigate (opens a folder in a panel; the app checks the path locally and changes no file): {\"capability\":\"pane.navigate\",\"pane\":\"left\"|\"right\"|\"activeAtSubmit\",\"path\":<the absolute Windows path the user typed, copied exactly>}
+Navigate rule: use pane.navigate only when the request contains a full path such as D:\\Downloads\\a.csv. Copy it exactly as typed. If it is a file the app opens its folder and selects the file. Never invent, complete or guess a path: any path that is not written in the request is rejected.
+";
+
+const NAVIGATE_CAPABILITY_PROMPTS: [(&str, &str); 1] = [("pane.navigate", PANE_NAVIGATE_PROMPT)];
+
+/// FER-576 delete capability (opt-in). Recycle Bin only; the target is always the panel selection.
+const ITEMS_DELETE_PROMPT: &str = "Intent items.delete (moves the items SELECTED in a panel to the Recycle Bin; the user must confirm on a warning card): {\"capability\":\"items.delete\",\"sourcePane\":\"left\"|\"right\"|\"activeAtSubmit\",\"selector\":{\"kind\":\"selected\"}}
+Delete rule: use items.delete only when the user explicitly asks to delete or remove something (\"hapus\", \"delete\", \"buang\"). It can only act on the current selection: never name an item or a path, and it never deletes permanently. If the user wants other items deleted, ask them to select those first.
+";
+
+const DELETE_CAPABILITY_PROMPTS: [(&str, &str); 1] = [("items.delete", ITEMS_DELETE_PROMPT)];
+
+/// FER-576 chain rule, added only when navigation or delete is offered. A chain is ONE reply with a
+/// `steps` list; the app runs the steps one at a time and asks for approval at each mutating step.
+const CHAIN_PROMPT: &str = "Chain: when the request needs several steps in order, reply with ONE object {\"schemaVersion\":1,\"requestId\":<requestId>,\"steps\":[<intent>,...]} instead of an envelope (2 to 4 steps, no other fields). Allowed steps, in this order and each at most once: pane.navigate, archive.create, items.delete. Every step uses the same panel value. Example: \"arsipkan D:\\x\\a.csv ke 7zip paling kecil lalu hapus\" -> steps: pane.navigate with that path, archive.create with selector {\"kind\":\"selected\"} format 7z level ultra, items.delete with selector {\"kind\":\"selected\"}. Add items.delete only when the user asked to delete the original; the app deletes it only after the archive was created and tested.
+";
+
 /// Every capability the backend can describe, mutating first, in prompt order.
 fn all_capability_prompts() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     CAPABILITY_PROMPTS
@@ -107,6 +132,8 @@ fn all_capability_prompts() -> impl Iterator<Item = &'static (&'static str, &'st
         .chain(CONTROL_CAPABILITY_PROMPTS.iter())
         .chain(INDEXER_CAPABILITY_PROMPTS.iter())
         .chain(DISK_USAGE_CAPABILITY_PROMPTS.iter())
+        .chain(NAVIGATE_CAPABILITY_PROMPTS.iter())
+        .chain(DELETE_CAPABILITY_PROMPTS.iter())
 }
 
 const PROMPT_TAIL: &str = "Follow-up: when the request starts with \"Follow-up to the previous plan\" it carries previousPlan (the intent you or the app produced earlier, without file names) and the user's change. Reply with ONE complete new intent envelope that applies only the requested change and keeps every other previousPlan field. Never add paths or file names; an output name is only a plain basename the user typed.
@@ -172,6 +199,9 @@ fn system_prompt(offered: &[&str]) -> String {
         if offered.contains(id) {
             prompt.push_str(fragment);
         }
+    }
+    if offered.contains(&"pane.navigate") || offered.contains(&"items.delete") {
+        prompt.push_str(CHAIN_PROMPT);
     }
     prompt.push_str(PROMPT_TAIL);
     prompt
@@ -421,6 +451,8 @@ impl PlanRequest {
                     + CONTROL_CAPABILITY_PROMPTS.len()
                     + INDEXER_CAPABILITY_PROMPTS.len()
                     + DISK_USAGE_CAPABILITY_PROMPTS.len()
+                    + NAVIGATE_CAPABILITY_PROMPTS.len()
+                    + DELETE_CAPABILITY_PROMPTS.len()
                 && list.iter().all(|id| is_known_capability(id))
                 && list
                     .iter()
@@ -819,6 +851,11 @@ pub enum PlanOutcome {
         envelope: IntentEnvelope,
         repaired: bool,
     },
+    /// FER-576: an ordered multi-step plan (see `parse_chain_offered`).
+    Chain {
+        chain: ChainEnvelope,
+        repaired: bool,
+    },
     Question {
         text: String,
     },
@@ -830,7 +867,12 @@ enum Interpreted {
     Malformed(String),
 }
 
+#[cfg(test)]
 fn interpret(body: &str, request_id: &str, offered: &[&str]) -> Interpreted {
+    interpret_for(body, request_id, offered, "")
+}
+
+fn interpret_for(body: &str, request_id: &str, offered: &[&str], user_text: &str) -> Interpreted {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Interpreted::Malformed(String::new());
     };
@@ -863,6 +905,15 @@ fn interpret(body: &str, request_id: &str, offered: &[&str]) -> Interpreted {
             None => echo(),
         };
     }
+    if object.contains_key("steps") {
+        return match parse_chain_offered(Value::Object(object), request_id, offered, user_text) {
+            Ok(chain) => Interpreted::Done(PlanOutcome::Chain {
+                chain,
+                repaired: false,
+            }),
+            Err(_) => echo(),
+        };
+    }
     // The model may only use what the app offered for this request.
     let offered_ok = object
         .get("intent")
@@ -873,10 +924,23 @@ fn interpret(body: &str, request_id: &str, offered: &[&str]) -> Interpreted {
         return echo();
     }
     match parse_intent_offered(Value::Object(object), request_id, offered) {
-        Ok(envelope) => Interpreted::Done(PlanOutcome::Intent {
-            envelope,
-            repaired: false,
-        }),
+        Ok(envelope) => {
+            // FER-576: a navigation path must be one the user typed; a made-up path is a rejected reply.
+            if let Intent::PaneNavigate(navigate) = &envelope.intent
+                && !path_typed_by_user(&navigate.path, user_text)
+            {
+                return echo();
+            }
+            // FER-576: a delete is only accepted when the user asked to delete.
+            if matches!(envelope.intent, Intent::ItemsDelete(_)) && !user_asked_to_delete(user_text)
+            {
+                return echo();
+            }
+            Interpreted::Done(PlanOutcome::Intent {
+                envelope,
+                repaired: false,
+            })
+        }
         Err(_) => echo(),
     }
 }
@@ -930,7 +994,7 @@ pub fn plan(
     let mut messages = plan_messages(request);
     let body = chat_body(config, messages.clone(), MAX_OUTPUT_TOKENS, true);
     let raw = send(&call, &body, MAX_ATTEMPTS, &mut attempts)?;
-    let echoed = match interpret(&raw, &request.request_id, &offered) {
+    let echoed = match interpret_for(&raw, &request.request_id, &offered, &request.user_text) {
         Interpreted::Done(outcome) => return finish(outcome, false, attempts, cancel),
         Interpreted::Refused => return Err(fail(ProviderErrorKind::Refused, attempts)),
         Interpreted::Malformed(echo) => echo,
@@ -944,7 +1008,7 @@ pub fn plan(
     messages.push(json!({"role": "user", "content": REPAIR_PROMPT}));
     let body = chat_body(config, messages, MAX_OUTPUT_TOKENS, true);
     let raw = send(&call, &body, MAX_ATTEMPTS, &mut attempts)?;
-    match interpret(&raw, &request.request_id, &offered) {
+    match interpret_for(&raw, &request.request_id, &offered, &request.user_text) {
         Interpreted::Done(outcome) => finish(outcome, true, attempts, cancel),
         Interpreted::Refused => Err(fail(ProviderErrorKind::Refused, attempts)),
         Interpreted::Malformed(_) => Err(fail(ProviderErrorKind::Malformed, attempts)),
@@ -962,6 +1026,7 @@ fn finish(
     }
     Ok(match outcome {
         PlanOutcome::Intent { envelope, .. } => PlanOutcome::Intent { envelope, repaired },
+        PlanOutcome::Chain { chain, .. } => PlanOutcome::Chain { chain, repaired },
         question => question,
     })
 }
@@ -1043,3 +1108,7 @@ mod copy_adjust_tests;
 #[cfg(test)]
 #[path = "provider_indexer_tests.rs"]
 mod indexer_tests;
+
+#[cfg(test)]
+#[path = "provider_chain_tests.rs"]
+mod chain_tests;

@@ -52,6 +52,7 @@ pub mod preview_image;
 pub mod profile;
 pub mod properties;
 pub mod protected_dirs;
+pub mod recycle_gate;
 pub mod rename_batch;
 pub mod search;
 pub mod selection_file;
@@ -115,6 +116,9 @@ pub fn run() {
             ipc::create_entry,
             ipc::rename_entry,
             ipc::delete_entries,
+            ipc::ai_recycle_check,
+            ipc::ai_delete_to_recycle,
+            ipc::ai_tree_census,
             ipc::plan_copy,
             ipc::enqueue_copy,
             ipc::enqueue_move,

@@ -175,7 +175,7 @@ function parseRename(payload: string): FollowUpParse {
     return {
       kind: 'rejected',
       message:
-        `Nama "${clip(text)}" tidak aman untuk file ZIP (tanpa pemisah folder, ":", titik di awal/akhir, ` +
+        `Nama "${clip(text)}" tidak aman untuk nama arsip (tanpa pemisah folder, ":", titik di awal/akhir, ` +
         'atau nama perangkat Windows seperti CON). Rencana tidak diubah.',
     };
   }
@@ -364,6 +364,9 @@ function validated(candidate: IntentEnvelope): ApplyResult {
 export function previousIntentSummary(prev: IntentEnvelope): Record<string, unknown> {
   const i = prev.intent;
   if (i.capability === 'directories.sync') return { capability: i.capability, mode: i.mode };
+  // FER-576: a delete has no format/target/name; the follow-up only keeps the shape.
+  if (i.capability === 'items.delete')
+    return { capability: i.capability, sourcePane: i.sourcePane, selector: i.selector };
   return {
     capability: i.capability,
     sourcePane: i.sourcePane,
@@ -390,6 +393,13 @@ export function composeProviderText(prev: IntentEnvelope, text: string): string 
  */
 export function mergeProviderIntent(prev: IntentEnvelope, next: IntentEnvelope): ApplyResult {
   const p = prev.intent;
+  // Review R2 S1: a change never swaps the KIND of operation (an archive card must not become a delete card).
+  if (next.intent.capability !== p.capability) {
+    return {
+      ok: false,
+      message: 'Perubahan tidak boleh mengganti jenis operasi. Rencana tidak diubah.',
+    };
+  }
   const n = structuredClone(next.intent) as ProposedIntent;
   if (
     p.capability === 'archive.create' &&

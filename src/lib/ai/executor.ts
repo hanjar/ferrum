@@ -42,6 +42,7 @@ import {
   type IndexerView,
 } from './indexerControl';
 import { readiness } from '../ipc/indexer';
+import { pathTypedByUser } from './paneNavigate';
 import {
   describeDiskUsageQuery,
   type DiskUsageAnswer,
@@ -84,10 +85,22 @@ import {
   type CommandError,
   type CommandFacade,
   type PreparedCommand,
+  type PreviewInfo,
 } from './commands';
+import {
+  describeNavigate,
+  drivePathCount,
+  userAskedToDelete,
+  type NavigatePort,
+  type NavigateTarget,
+} from './paneNavigate';
 import {
   ACTIVITY_QUERY_CAPABILITY,
   DISK_USAGE_QUERY_CAPABILITY,
+  PANE_NAVIGATE_CAPABILITY,
+  isSafeNavigatePath,
+  type ChainEnvelope,
+  type PaneRef,
   parseDiskUsageQueryKind,
   type DiskUsageQueryKind,
   COPY_ADJUST_CAPABILITY,
@@ -167,6 +180,11 @@ export interface ExecutionGuard {
   ): Promise<{ ok: true } | { ok: false; message: string }>;
   /** The plan was edited, cancelled or finished: the slot no longer applies. */
   revoke?(ticket: ApprovalTicket): void;
+  /**
+   * FER-576 (review R1, S1): the opaque digest the BACKEND computed from its own fingerprints (size, time) of the
+   * sources when `register` ran. Two registrations over the same unchanged sources give the same digest.
+   */
+  scopeDigestOf?(ticket: ApprovalTicket): string | undefined;
 }
 
 export interface ExecutorDeps {
@@ -208,6 +226,19 @@ export interface ExecutorDeps {
    * answer is built here from a local snapshot and never sent to the provider.
    */
   diskUsage?: DiskUsageQueryPort;
+  /**
+   * FER-576: open a path the user typed in a pane. Absent = `pane.navigate` is never offered. Read-only:
+   * nothing is executed or modified.
+   */
+  navigate?: NavigatePort;
+  /**
+   * FER-576: Test Archive for the "archive, then delete" gate. A chain deletes the original ONLY after this
+   * says the archive passed; absent or failing = the delete step is never created (fail closed).
+   */
+  verifyArchive?: (
+    outputPath: string,
+    expected?: { members?: number },
+  ) => Promise<{ ok: boolean; message: string }>;
   /** FER-465: endpoint provider (hanya host:port yang dipakai di pesan galat). */
   providerEndpoint?: () => string | undefined;
   /** FER-465: dipanggil dengan kode aman saat provider gagal (mis. untuk indikator status header). */
@@ -254,6 +285,47 @@ interface Run {
   entity?: boolean;
   /** FER-471/476: this run is a control request (copy.adjust / indexer.*; allows its extra state edges only). */
   control?: boolean;
+  /** FER-576: this run is one step of a multi-step plan; the rest waits here until this step succeeds. */
+  chain?: ChainState;
+  /** FER-576: app-built text for a partial result (e.g. which deletes failed). */
+  partialNote?: string;
+}
+
+type ChainStep = ChainEnvelope['steps'][number];
+
+/** FER-576: where a multi-step plan stands. Lives on the run that is currently executing a step. */
+interface ChainState {
+  /** Capability of the step this run executes. */
+  capability: ChainStep['capability'];
+  /** Ids the follow-up runs derive from. */
+  baseRunId: string;
+  /** Zero-based index of the step this run executes. */
+  index: number;
+  total: number;
+  /** Steps after this one. Cleared by any failure, cancel or refusal: the rest never runs. */
+  rest: ChainStep[];
+  /** The request text of step 1 (a navigation path must be in it). */
+  userText: string;
+  /** Request id the step ids derive from. */
+  baseRequestId: string;
+  /** The previous step was `archive.create`: a delete step needs the archive verified and the same selection. */
+  afterArchive: boolean;
+  /** The chain contains a delete step (review R1: stricter archive, navigate and verification rules apply). */
+  hasDelete: boolean;
+  /** The chain starts with a navigation and deletes: the target must be a FILE and the selection exactly it. */
+  requireFile: boolean;
+  /** Where the navigation put the typed file; restored before the steps that follow the archive. */
+  navTarget?: { side: 'left' | 'right'; target: Extract<NavigateTarget, { kind: 'file' }> };
+  /** Backend digest of the archive step's sources (size, time) when its card was built. */
+  archiveScopeDigest?: string;
+  /** How many members the archive must hold (files + empty folders) for the original to be deleted. */
+  archiveExpectedMembers?: number;
+  /** Digest of the frozen selection the archive step used. */
+  archiveSelectionDigest?: string;
+  /** Test Archive passed for the archive this chain created. */
+  verified?: boolean;
+  /** App-built line shown on the card of this step. */
+  note?: string;
 }
 
 const FOLLOWUP_PROVIDER_ERROR =
@@ -295,6 +367,8 @@ const ENGINE_FAILURE_CAUSES: Readonly<Record<string, string>> = {
   notADirectory: 'tujuan bukan folder',
   unsupported: 'operasi tidak didukung oleh engine',
   io: 'kesalahan baca/tulis disk',
+  recycleRefused: 'backend menolak memindahkan item ke Recycle Bin (tidak ada yang dihapus)',
+  recycleBypassed: 'Windows menghapus item secara permanen, bukan ke Recycle Bin',
 };
 export function engineFailureMessage(cause: string): string | undefined {
   const label = Object.hasOwn(ENGINE_FAILURE_CAUSES, cause)
@@ -524,6 +598,12 @@ export class AiExecutor implements ChatExecutor {
       return no('limit', `Batas ${MAX_REVISIONS} revisi tercapai; buat permintaan baru.`);
     }
     const prev = history.current.envelope;
+    if (prev.intent.capability === 'items.delete') {
+      return no(
+        'invalid_edit',
+        'Penghapusan tidak bisa diubah lewat perubahan. Batalkan, pilih ulang item, lalu buat permintaan baru.',
+      );
+    }
     const next = history.revision + 1;
     if (parsed.kind === 'local') {
       const applied = applyEdit(prev, parsed.edit);
@@ -691,8 +771,12 @@ export class AiExecutor implements ChatExecutor {
     const indexer = indexerPort
       ? offeredIndexerCapabilityIds({ desktopAvailable: safeIndexerAvailable(indexerPort) })
       : [];
-    return read.length || control.length || indexer.length || diskUsage.length
-      ? [...base, ...read, ...control, ...indexer, ...diskUsage]
+    const nav =
+      this.deps.navigate && safeNavigateAvailable(this.deps.navigate)
+        ? [PANE_NAVIGATE_CAPABILITY]
+        : [];
+    return read.length || control.length || indexer.length || diskUsage.length || nav.length
+      ? [...base, ...read, ...control, ...indexer, ...diskUsage, ...nav]
       : base;
   }
 
@@ -1034,6 +1118,14 @@ export class AiExecutor implements ChatExecutor {
       await this.proposeIndexerMode(run, epoch, event.request);
       return;
     }
+    if (event.kind === 'paneNavigate') {
+      await this.runNavigate(run, epoch, event.pane, event.path);
+      return;
+    }
+    if (event.kind === 'chain') {
+      await this.startChain(run, epoch, event.steps);
+      return;
+    }
     run.history = new IntentHistory(event.intent);
     if (!this.emit(run, 'resolving', {})) return;
     await this.buildPlan(run, epoch, event.intent);
@@ -1047,6 +1139,16 @@ export class AiExecutor implements ChatExecutor {
     pending?: { cause: 'local' | 'provider'; note: string },
   ): Promise<void> {
     const snapshot = run.snapshot!;
+    if (
+      envelope.intent.capability === 'items.delete' &&
+      !userAskedToDelete(run.chain?.userText ?? run.userText)
+    ) {
+      // Review R1 S5: a delete card exists only for a request that asks to delete.
+      this.emit(run, 'needsInput', {
+        errorMessage: 'Permintaan Anda tidak meminta menghapus, jadi tidak ada kartu hapus.',
+      });
+      return;
+    }
     const avail = this.deps.capabilities.availability(envelope.intent.capability);
     if (!avail.available) {
       this.emit(run, 'blockedCapability', { blockedReason: avail.reason });
@@ -1054,7 +1156,7 @@ export class AiExecutor implements ChatExecutor {
     }
     const prepared = await this.deps.facade.prepare(
       envelope,
-      { snapshot },
+      { snapshot, ...(run.chain?.hasDelete ? { needCensus: true } : {}) },
       run.entity ? { allowEntitySelector: true } : {},
     );
     if (!this.alive(run, epoch)) {
@@ -1068,6 +1170,12 @@ export class AiExecutor implements ChatExecutor {
     run.prepared = prepared.value;
     run.preparedDropped = false;
     const plan = prepared.value.plan;
+    const chainRefusal = this.chainGate(run, plan.capability, prepared.value.preview);
+    if (chainRefusal) {
+      this.dropPrepared(run);
+      this.setFinal(run, 'stale', { errorMessage: chainRefusal });
+      return;
+    }
     // Revision baru hanya tercatat bila prepare berhasil: perubahan yang gagal tidak "menempel".
     if (pending) run.history!.append(envelope, pending.cause, pending.note);
     run.planId = plan.planId;
@@ -1086,6 +1194,13 @@ export class AiExecutor implements ChatExecutor {
     }
     if (!registered.ok) {
       this.fail(run, epoch, registered.message);
+      return;
+    }
+    const scopeRefusal = this.chainScopeGate(run, plan.capability, ticket);
+    if (scopeRefusal) {
+      this.deps.guard?.revoke?.(ticket);
+      this.dropPrepared(run);
+      this.setFinal(run, 'stale', { errorMessage: scopeRefusal });
       return;
     }
     const conflicts = this.deps.conflictViews?.(plan) ?? [];
@@ -1164,7 +1279,9 @@ export class AiExecutor implements ChatExecutor {
       event.kind === 'copyAdjust' ||
       event.kind === 'indexerStatus' ||
       event.kind === 'indexerSetMode' ||
-      event.kind === 'diskUsageQuery'
+      event.kind === 'diskUsageQuery' ||
+      event.kind === 'paneNavigate' ||
+      event.kind === 'chain'
     ) {
       // Pertanyaan riwayat / penyesuaian copy bukan perubahan rencana: rencana tidak diubah.
       this.emit(run, 'needsInput', {
@@ -1379,6 +1496,22 @@ export class AiExecutor implements ChatExecutor {
       mapped = false;
     }
     this.dropPrepared(run);
+    run.partialNote = receipt.failureNote;
+    if (receipt.state === 'completed' && run.chain?.rest[0]?.capability === 'items.delete') {
+      // FER-576: "archive, then delete": the delete step exists ONLY if the archive passes Test Archive.
+      const verdict = await this.verifyChainArchive(
+        receipt.outputPath,
+        run.chain.archiveExpectedMembers,
+      );
+      if (!verdict.ok) {
+        run.chain.rest = [];
+        this.setFinal(run, 'failed', { errorMessage: verdict.message });
+        return;
+      }
+      run.chain.verified = true;
+      run.chain.note = verdict.message;
+      if (run.cancelRequested) run.chain.rest = [];
+    }
     if (receipt.state === 'completed') {
       // Service selesai in-process (mis. Pack): hasil engine = hasil run.
       run.completedInProcess = receipt.completed;
@@ -1506,8 +1639,11 @@ export class AiExecutor implements ChatExecutor {
       // Some items never reached the queue: a finished job list must not read as "all done".
       summary = { ...summary, outcome: 'partial', failed: summary.failed + run.failedToQueue };
       extra = {
-        errorMessage: `${run.failedToQueue} item gagal masuk antrean dan tidak disalin.`,
         ...extra,
+        errorMessage:
+          extra.errorMessage ??
+          run.partialNote ??
+          `${run.failedToQueue} item gagal masuk antrean dan tidak disalin.`,
       };
     }
     const jobs = this.jobViews(run);
@@ -1553,6 +1689,319 @@ export class AiExecutor implements ChatExecutor {
       } catch {
         this.emit(run, run.state, { errorMessage: 'Permintaan batal gagal dikirim ke antrean.' });
       }
+    }
+  }
+
+  // ───────────────────────── FER-576: navigasi + rantai langkah ─────────────────────────
+
+  /**
+   * `pane.navigate`: open a folder the USER typed. The path must be in the request text (also checked by the
+   * contract parsers and by the Rust provider), absolute and clean, and it must exist. A file opens its folder
+   * and selects the file. No facade/policy/guard/ledger/queue: nothing is written or executed, and the
+   * result (names, listing) never goes to the provider.
+   */
+  private async runNavigate(run: Run, epoch: number, pane: PaneRef, path: string): Promise<void> {
+    run.control = true;
+    const port = this.deps.navigate;
+    if (!port || !this.offered().includes(PANE_NAVIGATE_CAPABILITY)) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Membuka folder dari path yang diketik hanya tersedia di aplikasi desktop Ferrum.',
+      });
+      return;
+    }
+    // Defence in depth: the model's path is only ever one the user typed.
+    if (!isSafeNavigatePath(path) || !pathTypedByUser(path, run.chain?.userText ?? run.userText)) {
+      this.fail(run, epoch, 'Path itu tidak tertulis di permintaan Anda; tidak ada yang dibuka.');
+      return;
+    }
+    const side = pane === 'activeAtSubmit' ? run.snapshot!.activePaneAtSubmit : pane;
+    let target: NavigateTarget;
+    try {
+      target = await port.resolve(path);
+    } catch {
+      target = { kind: 'missing' };
+    }
+    if (!this.alive(run, epoch)) return;
+    if (run.chain?.requireFile && target.kind === 'dir') {
+      // A chain that deletes works on exactly the file the user typed, never on "whatever is in this folder".
+      this.setFinal(run, 'failed', {
+        errorMessage:
+          'Rantai penghapusan hanya berlaku untuk path FILE yang Anda ketik, bukan folder. Tidak ada yang dijalankan.',
+        navigate: { summary: `Membuka ${path}`, result: { ok: false, message: 'Bukan file.' } },
+      });
+      return;
+    }
+    if (target.kind === 'missing') {
+      this.setFinal(run, 'failed', {
+        errorMessage: `Path tidak ditemukan atau tidak bisa dibuka: ${path}. Tidak ada yang diubah.`,
+        navigate: {
+          summary: `Membuka ${path}`,
+          result: { ok: false, message: 'Path tidak ditemukan.' },
+        },
+      });
+      return;
+    }
+    let opened = false;
+    try {
+      opened = await port.open(side, target);
+    } catch {
+      opened = false;
+    }
+    if (!this.alive(run, epoch)) return;
+    const summary = describeNavigate(target);
+    if (!opened) {
+      this.setFinal(run, 'failed', {
+        errorMessage: 'Panel tidak menampilkan folder itu; langkah berikutnya tidak dijalankan.',
+        navigate: {
+          summary,
+          result: { ok: false, message: 'Panel tidak menampilkan folder itu.' },
+        },
+      });
+      return;
+    }
+    if (run.chain && target.kind === 'file') run.chain.navTarget = { side, target };
+    this.setFinal(run, 'succeeded', {
+      navigate: { summary, result: { ok: true, message: 'Folder dibuka di panel.' } },
+    });
+  }
+
+  /**
+   * A multi-step plan ("chain"). Step 1 runs in THIS run; every later step becomes its own run with its own
+   * card, prepared against the panes as they are by then. The remaining steps live on the run that is executing
+   * a step and are dropped by any failure, cancel or refusal. Panel references are bound to a concrete side now,
+   * so clicking the other panel in between cannot redirect a step.
+   */
+  private async startChain(run: Run, epoch: number, raw: ChainEnvelope['steps']): Promise<void> {
+    const pane = run.snapshot!.activePaneAtSubmit;
+    const steps = raw.map((step) => bindPane(step, pane));
+    const offered = this.offered();
+    if (steps.length < 2 || steps.some((step) => !offered.includes(step.capability))) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Salah satu langkah rencana tidak tersedia sekarang; tidak ada yang dijalankan.',
+      });
+      return;
+    }
+    const hasDelete = steps.some((step) => step.capability === 'items.delete');
+    if (hasDelete && steps[0].capability !== PANE_NAVIGATE_CAPABILITY) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Penghapusan setelah arsip hanya berlaku untuk satu file yang path-nya Anda ketik; tidak ada yang dijalankan.',
+      });
+      return;
+    }
+    if (hasDelete && (!userAskedToDelete(run.userText) || drivePathCount(run.userText) > 1)) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Rencana penghapusan butuh permintaan hapus yang jelas dan satu path; tidak ada yang dijalankan.',
+      });
+      return;
+    }
+    run.chain = {
+      index: 0,
+      total: steps.length,
+      rest: steps.slice(1),
+      capability: steps[0].capability,
+      userText: run.userText,
+      baseRequestId: run.requestId,
+      baseRunId: run.runId,
+      afterArchive: false,
+      hasDelete,
+      requireFile: hasDelete && steps[0].capability === PANE_NAVIGATE_CAPABILITY,
+    };
+    await this.runChainStep(run, epoch, steps[0]);
+  }
+
+  private async runChainStep(run: Run, epoch: number, step: ChainStep): Promise<void> {
+    if (step.capability === PANE_NAVIGATE_CAPABILITY) {
+      await this.runNavigate(run, epoch, step.pane, step.path);
+      return;
+    }
+    const envelope: IntentEnvelope = { schemaVersion: 1, requestId: run.requestId, intent: step };
+    run.history = new IntentHistory(envelope);
+    if (!this.emit(run, 'resolving', {})) return;
+    await this.buildPlan(run, epoch, envelope);
+  }
+
+  /** The run for the step after `from`, registered and ready to start. */
+  private makeChainRun(from: Run): { run: Run; step: ChainStep } {
+    const chain = from.chain!;
+    const [step, ...rest] = chain.rest;
+    const index = chain.index + 1;
+    const run: Run = {
+      runId: `${chain.baseRunId}-c${index}`,
+      requestId: `${chain.baseRequestId}-c${index}`,
+      userText: from.userText,
+      state: 'planning',
+      epoch: 0,
+      abort: new AbortController(),
+      preparedDropped: false,
+      revision: 0,
+      approving: false,
+      cancelRequested: false,
+      jobIds: [],
+      seen: new Set(),
+      failedToQueue: 0,
+      conflictsSkipped: 0,
+      checking: false,
+      chain: {
+        ...chain,
+        index,
+        rest,
+        capability: step.capability,
+        afterArchive: chain.capability === 'archive.create',
+        ...(chain.capability === 'archive.create' && chain.note
+          ? { note: chain.note }
+          : { note: undefined }),
+      },
+    };
+    this.runs.set(run.runId, run);
+    return { run, step };
+  }
+
+  private async startChainRun(run: Run, step: ChainStep): Promise<void> {
+    // Let the panes finish re-listing (the previous step may have refreshed them), then look at them fresh.
+    try {
+      await this.deps.navigate?.settled?.();
+    } catch {
+      // best effort: a stale snapshot is refused later, never acted on
+    }
+    if (!this.alive(run, run.epoch)) return;
+    const nav = run.chain?.navTarget;
+    if (nav && run.chain?.afterArchive) {
+      // The archive step refreshed the panels (which clears marks): mark the typed file again, so the delete
+      // card is built for exactly that file.
+      let restored = false;
+      try {
+        restored = (await this.deps.navigate?.open(nav.side, nav.target)) === true;
+        await this.deps.navigate?.settled?.();
+      } catch {
+        restored = false;
+      }
+      if (!this.alive(run, run.epoch)) return;
+      if (!restored) {
+        this.setFinal(run, 'failed', {
+          errorMessage:
+            'File yang Anda ketik tidak dapat ditampilkan lagi di panel; tidak ada yang dihapus.',
+        });
+        return;
+      }
+    }
+    try {
+      run.snapshot = this.deps.capture(run.requestId);
+    } catch {
+      this.fail(run, run.epoch, 'Panel tidak tersedia; langkah berikutnya tidak dijalankan.');
+      return;
+    }
+    await this.runChainStep(run, run.epoch, step);
+  }
+
+  /**
+   * "Archive, then delete" gates, checked when the step's plan is prepared. The archive step records the digest
+   * of the selection it used; the delete step must see the very same selection, and only after Test Archive
+   * passed. Anything else refuses the delete (nothing is deleted).
+   */
+  private chainGate(
+    run: Run,
+    capability: ResolvedPlan['capability'],
+    preview: PreviewInfo,
+  ): string | undefined {
+    const chain = run.chain;
+    if (!chain) return undefined;
+    // Review R2 S1: the card of a step is that step's operation, whatever a follow-up asked for.
+    if (capability !== chain.capability) {
+      return 'Jenis operasi langkah ini tidak boleh diganti; tidak ada yang dijalankan.';
+    }
+    // Review R1 S6: a chain that navigated to a file and deletes works on exactly that file.
+    if (chain.requireFile && chain.navTarget) {
+      if (!preview.selectionIsOnly?.(chain.navTarget.target.path)) {
+        return 'Seleksi bukan persis file yang Anda ketik; tidak ada yang diarsipkan atau dihapus.';
+      }
+    }
+    if (capability === 'archive.create') {
+      if (chain.hasDelete) {
+        // Review R1 S3: the archive must not be written inside what is about to be deleted.
+        if (preview.outputInsideSource !== false) {
+          return 'Arsip akan disimpan di dalam item yang akan dihapus; ia ikut terhapus. Pilih tujuan lain; tidak ada yang dijalankan.';
+        }
+        // Review R1 S2: the Pack engine silently skips symlinks and junctions, so the archive would not hold them.
+        if ((preview.linkCount ?? 1) > 0 || preview.expectedMembers === undefined) {
+          return 'Isi arsip tidak bisa dipastikan lengkap (ada symlink/junction, atau jumlah isi tidak diketahui); tidak ada yang dijalankan.';
+        }
+        chain.archiveExpectedMembers = preview.expectedMembers;
+      }
+      chain.archiveSelectionDigest = preview.selectionDigest;
+      return undefined;
+    }
+    if (capability === 'items.delete') {
+      // Review R1 S5: also checked here, whatever the provider layers did.
+      if (!userAskedToDelete(chain.userText)) {
+        return 'Permintaan Anda tidak meminta menghapus; tidak ada yang dihapus.';
+      }
+      if (chain.afterArchive) {
+        if (!chain.verified) return 'Arsip belum lolos uji; tidak ada yang dihapus.';
+        if (!preview.selectionDigest || preview.selectionDigest !== chain.archiveSelectionDigest) {
+          return 'Item terpilih berubah setelah arsip dibuat. Yang dihapus harus persis yang diarsipkan; tidak ada yang dihapus.';
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Review R1 S1: the backend fingerprints the sources (size, time, identity) when each card is built. The delete
+   * card of "archive, then delete" must fingerprint to the SAME digest as the archive card did, so a file edited
+   * after it was archived is never deleted as if the archive held it. Fail closed when a digest is missing.
+   */
+  private chainScopeGate(
+    run: Run,
+    capability: ResolvedPlan['capability'],
+    ticket: ApprovalTicket,
+  ): string | undefined {
+    const chain = run.chain;
+    const guard = this.deps.guard;
+    if (!chain) return undefined;
+    if (!guard?.scopeDigestOf) {
+      // Without the backend's own fingerprint the delete cannot be tied to what was archived: fail closed.
+      return capability === 'items.delete' && chain.afterArchive
+        ? 'Sidik jari backend tidak tersedia, jadi isi yang dihapus tidak bisa dipastikan sama dengan yang diarsipkan; tidak ada yang dihapus.'
+        : undefined;
+    }
+    const digest = guard.scopeDigestOf(ticket);
+    if (capability === 'archive.create') {
+      chain.archiveScopeDigest = digest;
+      return undefined;
+    }
+    if (capability === 'items.delete' && chain.afterArchive) {
+      if (!digest || digest !== chain.archiveScopeDigest) {
+        return 'Isi item berubah sejak arsip dibuat (ukuran atau waktu ubah). Yang dihapus harus persis yang diarsipkan; tidak ada yang dihapus.';
+      }
+    }
+    return undefined;
+  }
+
+  private async verifyChainArchive(
+    outputPath: string | undefined,
+    expectedMembers: number | undefined,
+  ): Promise<{ ok: boolean; message: string }> {
+    const name = outputPath ? (outputPath.split(/[\\/]/).pop() ?? outputPath) : 'arsip';
+    const refuse = (why: string) => ({
+      ok: false,
+      message: `Arsip ${name} dibuat, tetapi ${why} File asli TIDAK dihapus; periksa arsipnya.`,
+    });
+    const verify = this.deps.verifyArchive;
+    if (!verify || !outputPath) return refuse('tidak dapat diuji, jadi penghapusan dibatalkan.');
+    try {
+      if (expectedMembers === undefined) return refuse('isinya tidak bisa dipastikan lengkap.');
+      const verdict = await verify(outputPath, { members: expectedMembers });
+      if (!verdict.ok) return refuse(`uji arsip GAGAL (${verdict.message}).`);
+      return {
+        ok: true,
+        message: `Arsip ${name} sudah dibuat dan lolos uji arsip (${verdict.message}).`,
+      };
+    } catch {
+      return refuse('uji arsip tidak dapat dijalankan, jadi penghapusan dibatalkan.');
     }
   }
 
@@ -1623,9 +2072,35 @@ export class AiExecutor implements ChatExecutor {
   }
 
   private setFinal(run: Run, state: RunState, extra: Partial<RunUpdate>): void {
-    if (this.emit(run, state, extra) && isFinal(state)) {
+    // FER-576: only a SUCCEEDED step (not cancelled by the user meanwhile) hands over to the next one.
+    const next =
+      state === 'succeeded' && run.chain && run.chain.rest.length > 0 && !run.cancelRequested
+        ? this.makeChainRun(run)
+        : undefined;
+    const update = next
+      ? {
+          ...extra,
+          chainNext: {
+            runId: next.run.runId,
+            requestId: next.run.requestId,
+            userText: next.run.userText,
+          },
+        }
+      : extra;
+    if (this.emit(run, state, update) && isFinal(state)) {
       run.unsub?.();
       this.approvals.forget(run.runId);
+      if (next) {
+        void this.startChainRun(next.run, next.step).catch(() =>
+          this.fail(
+            next.run,
+            next.run.epoch,
+            'Terjadi kesalahan internal; tidak ada yang dijalankan.',
+          ),
+        );
+      }
+    } else if (next) {
+      this.runs.delete(next.run.runId);
     }
   }
 
@@ -1644,6 +2119,15 @@ export class AiExecutor implements ChatExecutor {
       runId: run.runId,
       requestId: run.requestId,
       state,
+      ...(run.chain
+        ? {
+            chain: {
+              index: run.chain.index,
+              total: run.chain.total,
+              ...(run.chain.note ? { note: run.chain.note } : {}),
+            },
+          }
+        : {}),
       ...stripUndefined(extra),
     };
     for (const l of [...this.listeners]) l(update);
@@ -1681,6 +2165,33 @@ function safeDiskUsageAvailable(port: DiskUsageQueryPort): boolean {
   } catch {
     return false; // fail closed: not offered
   }
+}
+
+function safeNavigateAvailable(port: NavigatePort): boolean {
+  try {
+    return port.available() === true;
+  } catch {
+    return false; // fail closed: not offered
+  }
+}
+
+/** FER-576: bind `activeAtSubmit` to the concrete side that was active when the request was made. */
+function bindPane(step: ChainStep, pane: 'left' | 'right'): ChainStep {
+  if (step.capability === PANE_NAVIGATE_CAPABILITY) {
+    return step.pane === 'activeAtSubmit' ? { ...step, pane } : step;
+  }
+  const sourcePane = step.sourcePane === 'activeAtSubmit' ? pane : step.sourcePane;
+  if (step.capability === 'archive.create' && step.target.kind === 'pane') {
+    return {
+      ...step,
+      sourcePane,
+      target: {
+        kind: 'pane',
+        pane: step.target.pane === 'activeAtSubmit' ? pane : step.target.pane,
+      },
+    };
+  }
+  return { ...step, sourcePane };
 }
 
 function safeAvailable(port: ActivityQueryPort): boolean {

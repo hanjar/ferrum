@@ -46,6 +46,13 @@ export interface ArchiveAdapterDeps {
   /** Read-only size estimate for the preview (FER-165); defaults to the occupied-space walk. */
   measure?: (paths: readonly string[], targetDirectory: string) => Promise<PackMeasure | undefined>;
   /**
+   * FER-576 (review R1, S2): how many members the archive must hold and how many symlinks / junctions the sources
+   * contain (the Pack engine skips those silently). Absent or failing = unknown; a chain then never deletes.
+   */
+  census?: (
+    paths: readonly string[],
+  ) => Promise<{ archiveMembers: number; links: number } | undefined>;
+  /**
    * FER-433 (ACT-08 R7 v2): read-only lookup of one history entity (`activity_chat_locate`). Absent =
    * the `entity` selector is refused. Paths stay in the renderer.
    */
@@ -202,7 +209,9 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
       const intent = envelope.intent;
       const format: ArchiveIntentFormat =
         intent.capability === 'archive.create' ? intent.format : 'zip';
-      const level = intent.capability === 'archive.create' ? intent.level : undefined;
+      // `ultra` and `maximum` run the SAME engine level: one name, so the digest never implies a difference.
+      const rawLevel = intent.capability === 'archive.create' ? intent.level : undefined;
+      const level: ArchiveIntentLevel | undefined = rawLevel === 'ultra' ? 'maximum' : rawLevel;
       const label = format === '7z' ? '7z' : 'ZIP';
       const selection = selections.create(scope, deps.resolver.entries(scope.handle));
       const paths = selection.paths();
@@ -211,7 +220,13 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
         () => undefined,
       );
       const facts = measureFacts(measured, label);
+      const census = ctx.needCensus ? await deps.census?.(paths).catch(() => undefined) : undefined;
       const warnings = [...target.warnings, ...facts.warnings];
+      if (census && census.links > 0) {
+        warnings.push(
+          `${census.links} symlink/junction di dalam item tidak ikut diarsipkan (Pack melewatinya).`,
+        );
+      }
       if (paths.some((p) => isInside(target.outputPath, p))) {
         // The engine drops its own output from the input (FER-205); say so instead of surprising the user.
         warnings.push(
@@ -232,6 +247,10 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
           totalBytes: facts.totalBytes,
           outputPath: target.outputPath,
           warnings,
+          selectionDigest: selection.digest,
+          selectionIsOnly: (path) => paths.length === 1 && norm(paths[0]) === norm(path),
+          outputInsideSource: paths.some((p) => isInside(target.outputPath, p)),
+          ...(census ? { expectedMembers: census.archiveMembers, linkCount: census.links } : {}),
         },
         digestParts: [
           scope.handle,

@@ -219,3 +219,31 @@ describe('backend approval guard', () => {
     expect((await guard.authorize(ticket, plan)).ok).toBe(false);
   });
 });
+
+describe('backend approval guard: items.delete (FER-576)', () => {
+  const deletePlan = {
+    ...plan,
+    capability: 'items.delete',
+    operation: { kind: 'items.delete', sourceManifest: 'man-del', sourceDirectory: 'D:\\In' },
+  } as never;
+
+  it('registers the folder as root, the frozen items, and no output name; authorizes with the same root', async () => {
+    invokeMock.mockResolvedValueOnce({ scopeDigest: 'scope_del' }).mockResolvedValueOnce(undefined);
+    const guard = createBackendGuard({ sourcePaths: () => paths });
+    const delTicket = { ...ticket, root: 'D:\\In' } as unknown as ApprovalTicket;
+    expect(await guard.register!(delTicket, deletePlan)).toEqual({ ok: true });
+    const [, reg] = invokeMock.mock.calls[0] as [string, { request: Record<string, unknown> }];
+    expect(reg.request).toMatchObject({ root: 'D:\\In', sourcePaths: paths, outputName: null });
+    expect(await guard.authorize(delTicket, deletePlan)).toEqual({ ok: true });
+    const [name, auth] = invokeMock.mock.calls[1] as [string, { claim: Record<string, unknown> }];
+    expect(name).toBe('ai_authorize_execute');
+    expect(auth.claim).toMatchObject({ root: 'D:\\In', itemScope: 'scope_del' });
+  });
+
+  it('fails closed when the frozen items are not available', async () => {
+    const guard = createBackendGuard({ sourcePaths: () => undefined });
+    const result = await guard.register!(ticket, deletePlan);
+    expect(result.ok).toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});

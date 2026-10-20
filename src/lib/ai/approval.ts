@@ -100,9 +100,15 @@ export class ApprovalManager {
     const s = this.state(runId);
     const op = plan.operation;
     const root =
-      op.kind === 'archive.create' ? op.targetDirectory : `${op.leftRoot}|${op.rightRoot}`;
+      op.kind === 'archive.create'
+        ? op.targetDirectory
+        : op.kind === 'items.delete'
+          ? op.sourceDirectory
+          : `${op.leftRoot}|${op.rightRoot}`;
     const itemScope =
-      op.kind === 'archive.create' ? op.sourceManifest : `${op.leftManifest}|${op.rightManifest}`;
+      op.kind === 'archive.create' || op.kind === 'items.delete'
+        ? op.sourceManifest
+        : `${op.leftManifest}|${op.rightManifest}`;
     const revision = plan.revision + s.epoch;
     const itemCount = plan.preview.itemCount;
     const bindingDigest = digestOf([

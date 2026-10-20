@@ -153,6 +153,8 @@ describe('default capability table', () => {
     const manifest = createCapabilityRegistry(w).describe();
     expect(manifest.map((m) => [m.id, m.available])).toEqual([
       ['archive.create', true],
+      // FER-576: closed until a Recycle Bin port is wired (desktop app only).
+      ['items.delete', false],
       ['directories.sync', true],
     ]);
     const closed = createCapabilityRegistry(wiring({ gates: PENDING }).wiring).describe();

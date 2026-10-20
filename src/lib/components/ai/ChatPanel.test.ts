@@ -39,7 +39,7 @@ describe('ChatPanel', () => {
     const { requestId, runId } = await submit(store, ex);
     ex.emit({ runId, requestId, state: 'awaitingApproval', plan: samplePlan() });
     await tick();
-    expect(screen.getByText('Create ZIP archive')).toBeTruthy();
+    expect(screen.getByText('Create archive (ZIP / 7z)')).toBeTruthy();
     expect(screen.getByText(/D:\\Projects\\Invoice\\Invoice\.zip/)).toBeTruthy();
     expect(screen.getByText(/14 items/)).toBeTruthy();
     const run = screen.getByRole('button', { name: 'Run' });

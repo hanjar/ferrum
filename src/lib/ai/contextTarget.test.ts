@@ -272,3 +272,43 @@ describe('FER-185 hidden/filter surfacing', () => {
     expect(t.previewText).toMatch(/filter/i);
   });
 });
+
+describe('sanitizeOutputName for 7z (FER-576)', () => {
+  it('converts the other archive extension instead of stacking', () => {
+    expect(sanitizeOutputName('x.zip', '7z')).toEqual({ ok: true, name: 'x.7z' });
+    expect(sanitizeOutputName('x.7z', 'zip')).toEqual({ ok: true, name: 'x.zip' });
+    expect(sanitizeOutputName('x', '7z')).toEqual({ ok: true, name: 'x.7z' });
+    expect(sanitizeOutputName('X.7Z', '7z')).toEqual({ ok: true, name: 'X.7Z' });
+  });
+  it('rejects an empty stem and reserved device names', () => {
+    expect(sanitizeOutputName('.zip', '7z').ok).toBe(false);
+    expect(sanitizeOutputName('.7z', '7z').ok).toBe(false);
+    expect(sanitizeOutputName('con.zip', '7z').ok).toBe(false);
+    expect(sanitizeOutputName('a/b', '7z').ok).toBe(false);
+  });
+});
+
+describe('7z target naming (FER-576)', () => {
+  it('names the output .7z and renames a collision to "name (2).7z"', () => {
+    const s = setup();
+    s.host.left.all = [
+      ...s.host.left.all,
+      entry('Invoice.7z', { path: 'D:\\Projects\\Invoice\\Invoice.7z' }),
+    ];
+    const snap = s.svc.capture('req_1');
+    const scope = scopeOf(s.resolver.resolve(snap, 'left', all));
+    const t = ok(
+      resolveArchiveTarget(s.svc, snap, {
+        sourcePane: 'left',
+        target: { kind: 'sourceDirectory' },
+        format: '7z',
+        level: 'ultra',
+        scope,
+        manifest: s.resolver.entries(scope.handle),
+      }),
+    );
+    expect(t.finalName).toBe('Invoice (2).7z');
+    expect(t.previewText).toContain('Format 7z');
+    expect(t.previewText).toContain('maksimum');
+  });
+});
