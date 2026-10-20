@@ -254,6 +254,29 @@ export async function listenArchiveProgress(
   return listen<ArchiveProgressEvent>(ARCHIVE_PROGRESS_EVENT, (ev) => handler(ev.payload));
 }
 
+/**
+ * FER-575: open ONE member of an archive with its default app. The backend parses the
+ * archive/member pair, extracts only that member into Ferrum's temp folder through the fail-closed
+ * extract pipeline and launches it through the confirmed shell path. Resolves with whether the OS
+ * accepted the launch. The password (when any) goes to this command and nowhere else.
+ */
+export async function archiveOpenMember(
+  archivePath: string,
+  memberPath: string,
+  password?: string,
+  requestId?: string,
+): Promise<boolean> {
+  if (!isInTauri()) throw unsupported();
+  return wrap(
+    invoke<boolean>('archive_open_member', {
+      archivePath,
+      memberPath,
+      password: password ?? null,
+      requestId: requestId ?? null,
+    }),
+  );
+}
+
 // ── FER-75: multipart archives ──────────────────────────────────────────
 
 export type ArchiveMultipartInfo =

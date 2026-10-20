@@ -10,6 +10,7 @@ pub mod archive_create_test;
 pub mod archive_extract;
 pub mod archive_jobs;
 pub mod archive_multipart;
+pub mod archive_open;
 pub mod archive_preflight;
 pub mod archive_rar;
 pub mod archive_rar_tool;
@@ -128,6 +129,7 @@ pub fn run() {
             ipc::archive_read,
             ipc::archive_extract,
             ipc::archive_extract_preflight,
+            ipc::archive_open_member,
             ipc::archive_create,
             ipc::archive_test,
             ipc::archive_rar_tool_probe,
@@ -348,6 +350,22 @@ pub fn run() {
             .collect();
             protected_dirs::register(protected);
             install_extract_guard();
+            // FER-575: temp area for archive members opened with their default app. Old sessions
+            // are swept on a background thread; a locked file is simply left for the next start.
+            match profile::local_data_dir(app.handle()) {
+                Some(dir) => {
+                    let temp = archive_open::OpenTemp::new(dir.join("open-temp"));
+                    let sweep = temp.clone();
+                    std::thread::spawn(move || {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs());
+                        sweep.cleanup_stale(now, archive_open::STALE_AFTER_SECS);
+                    });
+                    app.handle().manage(temp);
+                }
+                None => log::warn!("open-temp folder could not be determined"),
+            }
             // FER-471: live copy-thread state for the progress dialog.
             let control_handle = app.handle().clone();
             copy_pool::set_state_sink(Box::new(move |state| {

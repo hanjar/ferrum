@@ -138,7 +138,7 @@ export function createArchiveAwareFetcher(
     }
   }
 
-  return async function fetch(path: string): Promise<FileEntry[]> {
+  async function fetch(path: string): Promise<FileEntry[]> {
     // Leaving the archive — for a disk location or a different archive —
     // forgets every remembered password (FER-504).
     const archive = splitArchiveLocation(path)?.archivePath.toLowerCase() ?? null;
@@ -168,5 +168,19 @@ export function createArchiveAwareFetcher(
 
     // Regular disk directory.
     return listDir(path);
-  };
+  }
+
+  return Object.assign(fetch, {
+    /** FER-575: the password that unlocked `archivePath` in this pane, if any. */
+    passwordFor: (archivePath: string): string | undefined => passwords.get(archivePath),
+    /** FER-575: keep a password that just opened a member (cleared on leaving the archive). */
+    rememberPassword: (archivePath: string, password: string): void => {
+      // Only while the pane is still inside that archive: after it left, the map was cleared and
+      // a late success must not bring the password back.
+      if (currentArchive === archivePath.toLowerCase()) passwords.set(archivePath, password);
+    },
+    forgetPassword: (archivePath: string): void => {
+      passwords.delete(archivePath);
+    },
+  });
 }
