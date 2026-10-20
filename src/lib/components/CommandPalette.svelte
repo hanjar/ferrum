@@ -4,6 +4,8 @@
   import { ui } from '../uiState.svelte';
   import {
     actions,
+    getAction,
+    isEnabled,
     labelOf,
     runAction,
     searchActions,
@@ -26,6 +28,8 @@
   import type { PaneId } from '../uiState.svelte';
   import { hotlist } from '../stores/hotlistStore.svelte';
   import { flattenHotlist, matchHotlist, type PaletteHotItem } from '../hotlist/paletteItems';
+  import { dialog, roving } from '../dialogKit';
+  import { recentCommands } from '../stores/recentCommands.svelte';
 
   type PaletteMode = 'all' | 'folder' | 'file' | 'command';
 
@@ -52,7 +56,7 @@
   let searchSeq = 0;
 
   type FlatItem = {
-    group: 'fav' | 'recent' | 'frequent' | 'hot' | 'loc' | 'cmd';
+    group: 'rcmd' | 'fav' | 'recent' | 'frequent' | 'hot' | 'loc' | 'cmd';
     id: string;
     label: string;
     sub: string;
@@ -132,10 +136,33 @@
     return items;
   });
 
+  /** FER-580: the stored recent ids that exist and can run right now (newest first, max 3). */
+  function recentActions(): Action[] {
+    const out: Action[] = [];
+    for (const id of recentCommands.ids) {
+      const a = getAction(id);
+      if (a && isEnabled(a)) out.push(a);
+    }
+    return out;
+  }
+
   // Empty query (spec §3): labeled groups with limited quotas, favorite-first.
   const EMPTY_QUOTA = { fav: 3, recent: 3, frequent: 3, cmd: 8 } as const;
   const emptyItems = $derived.by((): FlatItem[] => {
     const items: FlatItem[] = [];
+    // FER-580: the commands run last, above everything else, only with a truly empty input.
+    if (query.trim() === '') {
+      for (const a of recentActions()) {
+        items.push({
+          group: 'rcmd',
+          id: `rcmd:${a.id}`,
+          label: labelOf(a),
+          sub: a.group,
+          kbd: shortcutFor(a) ? shortcutLabel(shortcutFor(a)!) : undefined,
+          activate: () => run(a),
+        });
+      }
+    }
     for (const fav of activity.favorites.slice(0, EMPTY_QUOTA.fav)) {
       items.push({
         group: 'fav',
@@ -202,6 +229,24 @@
   const flatItems = $derived(baseItems);
   const total = $derived(flatItems.length);
   const showChips = $derived(query.trim().length >= 2);
+
+  // FER-577: the element that had focus before the palette opened. Captured before the DOM
+  // changes and handed back BEFORE an action runs, so a dialog the action opens remembers a live
+  // element (not the palette input that is about to disappear) as its own return target.
+  let opener: HTMLElement | null = null;
+  $effect.pre(() => {
+    if (!ui.paletteOpen) return;
+    const a = untrack(() => document.activeElement);
+    opener = a instanceof HTMLElement && a !== document.body ? a : null;
+  });
+  function restoreFocus(): void {
+    if (opener?.isConnected) opener.focus();
+    opener = null;
+  }
+  function closePalette(): void {
+    ui.paletteOpen = false;
+    restoreFocus();
+  }
 
   $effect(() => {
     if (ui.paletteOpen) {
@@ -338,18 +383,51 @@
   }
 
   function runResult(i: number): void {
-    flatItems[i]?.activate();
+    const item = flatItems[i];
+    if (!item) return;
+    restoreFocus();
+    item.activate();
   }
 
   function run(a: Action) {
-    if (!runAction(a)) return;
+    if (!isEnabled(a)) return;
     ui.paletteOpen = false;
+    runAction(a);
   }
 
+  const PAGE_STEP = 6;
+
+  function moveTo(i: number): void {
+    if (total === 0) return;
+    index = Math.max(0, Math.min(i, total - 1));
+    selectedId = idAt(index);
+  }
+
+  // Keep the highlighted row visible while the arrows / Page keys move it.
+  $effect(() => {
+    if (!ui.paletteOpen) return;
+    const at = index;
+    queueMicrotask(() =>
+      document.getElementById(`palette-opt-${at}`)?.scrollIntoView?.({ block: 'nearest' }),
+    );
+  });
+
   function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
+    const onChip = e.target instanceof HTMLElement && e.target.closest('.modeChip') !== null;
+    // Esc is handled by use:dialog (dialogOpts.onEscape) before this handler sees it.
+    if (e.key === 'PageDown') {
       e.preventDefault();
-      ui.paletteOpen = false;
+      moveTo(index + PAGE_STEP);
+    } else if (e.key === 'PageUp') {
+      e.preventDefault();
+      moveTo(index - PAGE_STEP);
+    } else if ((e.key === 'Home' || e.key === 'End') && (e.ctrlKey || query === '')) {
+      // In a filled input Home / End keep moving the caret; Ctrl+Home / Ctrl+End jump the list.
+      e.preventDefault();
+      moveTo(e.key === 'Home' ? 0 : total - 1);
+    } else if (onChip && (e.key === 'Enter' || e.key === ' ')) {
+      // Chips are buttons: Enter / Space activate the chip itself, not the highlighted result.
+      return;
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (total > 0) index = Math.min(index + 1, total - 1);
@@ -384,7 +462,18 @@
         : `${total} hasil`,
   );
 
+  // FER-577: Tab trap and modalDepth (the palette is a modal too); focus goes to the input and
+  // is handed back by closePalette(), so the dialog action's own return is off. Esc, arrows and
+  // Enter stay in onKey above (Esc here only guarantees it never leaks past the palette).
+  const dialogOpts = {
+    initial: 'input',
+    onEscape: () => closePalette(),
+    mnemonics: false,
+    returnFocus: false,
+  };
+
   const GROUP_LABEL: Record<FlatItem['group'], string> = {
+    rcmd: 'Recent commands',
     fav: 'Favorites',
     recent: 'Recent',
     frequent: 'Frequent',
@@ -396,13 +485,15 @@
 
 {#if ui.paletteOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="scrim" onmousedown={() => (ui.paletteOpen = false)}></div>
+  <div class="scrim" onmousedown={closePalette}></div>
   <div
     class="palette"
     role="dialog"
     aria-modal="true"
     aria-label="Command palette"
+    tabindex="-1"
     onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     <div class="head">
       <Icon name="search" size={17} />
@@ -421,11 +512,17 @@
       <span class="kbd mono">esc</span>
     </div>
     {#if showChips}
-      <div class="modes" role="toolbar" aria-label="Filter hasil">
+      <div
+        class="modes"
+        role="toolbar"
+        aria-label="Filter hasil"
+        use:roving={{ items: '.modeChip', orientation: 'horizontal', select: false }}
+      >
         {#each MODES as m (m.id)}
           <button
             class="modeChip"
             class:sel={mode === m.id}
+            aria-pressed={mode === m.id}
             onclick={() => {
               mode = m.id;
               index = 0;
@@ -455,6 +552,7 @@
                 selectedId = item.id;
               }}
               onclick={() => {
+                restoreFocus();
                 ui.paletteOpen = false;
                 item.activate();
               }}

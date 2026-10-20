@@ -200,7 +200,14 @@ export interface DialogOptions {
    * button, link, select or textarea; Ctrl+Enter also fires from a textarea).
    */
   onEnter?: (e: KeyboardEvent, target: HTMLElement) => void;
-  /** Keep Tab inside the dialog. Default true. */
+  /**
+   * `false` for a docked, non-blocking panel (Search, Compare, Sync): the panel still gets
+   * initial focus, Esc, Enter rules and focus return, but it does not count toward `modalDepth`
+   * (the global shortcuts keep working) and Tab is not trapped unless `trap: true`.
+   * Default true.
+   */
+  modal?: boolean;
+  /** Keep Tab inside the dialog. Default true for modals, false for `modal: false`. */
   trap?: boolean;
   /** Alt+letter activates the control carrying `data-mnemonic`. Default true. */
   mnemonics?: boolean;
@@ -224,7 +231,8 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
   // FER-577 (N1): count the modal only once the setup did not throw, so a failing `initial`
   // can never leave modalDepth stuck above zero (which would mute every shortcut).
   focusInitial();
-  depth += 1;
+  const counted = opts.modal !== false;
+  if (counted) depth += 1;
 
   function onKeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.isComposing) return;
@@ -240,7 +248,7 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       e.preventDefault();
       e.stopPropagation();
       opts.onEnter(e, t ?? node);
-    } else if (e.key === 'Tab' && opts.trap !== false) {
+    } else if (e.key === 'Tab' && (opts.trap ?? counted)) {
       const list = tabbables(node);
       if (list.length === 0) {
         e.preventDefault();
@@ -294,7 +302,7 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
     },
     destroy() {
       node.removeEventListener('keydown', onKeydown);
-      depth = Math.max(0, depth - 1);
+      if (counted) depth = Math.max(0, depth - 1);
       if (opts.returnFocus !== false && opener?.isConnected) opener.focus?.();
     },
   };
@@ -323,7 +331,9 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
   const isSelected = (el: HTMLElement) =>
     (el instanceof HTMLInputElement && el.checked) ||
     el.getAttribute('aria-checked') === 'true' ||
-    el.getAttribute('aria-selected') === 'true';
+    el.getAttribute('aria-selected') === 'true' ||
+    el.getAttribute('aria-current') === 'true' ||
+    el.getAttribute('aria-pressed') === 'true';
 
   /** Roving tabindex for non-native items; native radios already tab to the checked one. */
   function sync() {
@@ -339,7 +349,14 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['aria-checked', 'aria-selected', 'checked', 'disabled'],
+    attributeFilter: [
+      'aria-checked',
+      'aria-selected',
+      'aria-current',
+      'aria-pressed',
+      'checked',
+      'disabled',
+    ],
   });
 
   function onKeydown(e: KeyboardEvent) {

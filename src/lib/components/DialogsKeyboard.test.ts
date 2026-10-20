@@ -266,7 +266,7 @@ describe('every dialog kind: unique access letters', () => {
 });
 
 describe('X1: shortcuts behind a modal', () => {
-  it('F7 and F8 do nothing while any modal holds the keyboard; Ctrl+K still opens the palette', async () => {
+  it('F7 and F8 do nothing while any modal holds the keyboard; Ctrl+K does not open the palette either (S3)', async () => {
     render(App);
     await vi.waitFor(() =>
       expect(document.querySelectorAll('.row[data-path]').length).toBeGreaterThan(5),
@@ -283,8 +283,7 @@ describe('X1: shortcuts behind a modal', () => {
     expect(dialogs.current).toBeNull();
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     await tick();
-    expect(ui.paletteOpen).toBe(true);
-    ui.paletteOpen = false;
+    expect(ui.paletteOpen).toBe(false);
     act.destroy();
     host.remove();
     fireEvent.keyDown(window, { key: 'F7' });

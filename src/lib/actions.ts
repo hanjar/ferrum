@@ -64,6 +64,7 @@ import { separateTree } from './stores/separateTreeStore.svelte';
 import { duWorkspace } from './diskUsage/duWorkspace.svelte';
 import { openSearchSeparate } from './searchSeparate';
 import { quitApp } from './quit';
+import { recentCommands } from './stores/recentCommands.svelte';
 import { aiChatHost } from './ai/aiChatHost.svelte';
 import { addSelectionToChat, addToChatTargets, askAgentAboutSelection } from './ai/addToChat';
 import { rankMatches, type MatchField } from './paletteMatch';
@@ -899,6 +900,9 @@ export const actions: Action[] = [
     label: 'Command palette',
     group: 'Commands',
     shortcut: ctrl('k'),
+    // FER-577 (S3): over any other modal (Properties, Multi-rename, Ops panel, a dialog of the
+    // store, ...) the palette would run pane actions (Delete, Move, ...) on the panes behind it.
+    available: () => modalDepth() === 0,
     run: () => (ui.paletteOpen = true),
   },
   // ── FER-395: the first opener for the Settings dialog (previously rendered
@@ -1504,7 +1508,7 @@ export function shortcutBlockedByFullPage(action: Action): boolean {
  * FER-577 (X1): while a modal is open (`use:dialog` counts them) the panes behind it are
  * unreachable, so only these shortcuts may still run; F5, F8, Delete, F7, Alt+... must not.
  */
-export const MODAL_SHORTCUT_IDS: ReadonlySet<string> = new Set(['palette.open', 'app.settings']);
+export const MODAL_SHORTCUT_IDS: ReadonlySet<string> = new Set(['app.settings']);
 
 /** True when a modal is open and this action's shortcut must not run. */
 export function shortcutBlockedByModal(action: Action): boolean {
@@ -1514,6 +1518,7 @@ export function shortcutBlockedByModal(action: Action): boolean {
 export function runAction(action: Action): boolean {
   if (!isEnabled(action)) return false;
   action.run!();
+  recentCommands.record(action.id); // FER-580
   return true;
 }
 /** Cmd+H belongs to macOS Hide Application, not Ferrum. */
