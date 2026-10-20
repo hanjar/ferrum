@@ -8,6 +8,9 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:5183',
     browserName: 'chromium',
+    // FER-569: keep evidence for the intermittent waitForSelector timeouts seen only in CI.
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   webServer: {
     command: 'npx vite --port 5183',
