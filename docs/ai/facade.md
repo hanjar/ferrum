@@ -91,3 +91,15 @@ const { facade, registry } = createCommandFacade({
 ```
 
 No new Tauri command, Cargo or `package.json` change is required by this lane.
+
+## archive.create: 7z and compression level (FER-576)
+
+- `format` is `"zip"` (default) or `"7z"`. RAR is never creatable from chat (the intent parser rejects it, Rust and TS).
+- `level` is optional, a closed set: `store | fast | normal | maximum | ultra`. Unknown strings, non-strings and `null` are invalid
+  in both parsers (shared cases in `contract-fixtures/ai/cases.json`). The adapter maps it to the engine's `ArchiveCompressionLevel`
+  (`maximum` and `ultra` both -> `max`, LZMA2 level 9 for 7z, deflate 9 for ZIP). The model never names an engine flag.
+- Execution is the same Pack service as the manual dialog (`runPack`, `format: 'sevenz'`, conflict `skip`: never replaces a file).
+- A typed `.zip`/`.7z` output name is converted to the chosen format's extension. Format and level are part of the plan digest, so
+  changing either needs a fresh approval, and the preview text names them ("Format 7z, kompresi ultra").
+- The provider prompt has a format rule ("paling kecil", "terkecil", "smallest", "max compression" -> `ultra`). The mutating-prompt
+  golden in `provider_activity_tests.rs` was updated for this; re-run `docs/ai/verification.md` against a real provider.
