@@ -37,6 +37,7 @@
   const jobState: Record<Job['state'], string> = {
     running: 'Running',
     needsInput: 'Needs your input',
+    queued: 'Waiting (same folder)',
     cancelling: 'Cancelling…',
     done: 'Completed',
     failed: 'Failed',
@@ -64,6 +65,18 @@
     run();
   }
 
+  /** Remove a finished row and keep the keyboard inside the panel: focus goes to the neighbour
+   *  row (or the panel itself when none is left), never to the body. */
+  async function dismissJob(job: Job) {
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const at = rows.findIndex((r) => r.dataset.jobId === job.id);
+    jobs.remove(job);
+    await tick();
+    const left = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const next = left[Math.min(Math.max(at, 0), left.length - 1)];
+    (next ?? document.querySelector<HTMLElement>('.panel'))?.focus();
+  }
+
   function jobKey(e: KeyboardEvent, job: Job) {
     if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter') {
@@ -71,7 +84,7 @@
       void jobPrimary(job);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !isJobActive(job)) {
       e.preventDefault();
-      jobs.remove(job);
+      void dismissJob(job);
     }
   }
   const expanded = new SvelteSet<OperationId>();
@@ -159,6 +172,7 @@
             class:done={!isJobActive(job)}
             tabindex="-1"
             data-testid="bg-job"
+            data-job-id={job.id}
             data-state={job.state}
             onkeydown={(e) => jobKey(e, job)}
           >
@@ -213,7 +227,7 @@
                       {job.result.label}
                     </button>
                   {/if}
-                  <button class="ghost" onclick={() => jobs.remove(job)}>Dismiss</button>
+                  <button class="ghost" onclick={() => void dismissJob(job)}>Dismiss</button>
                 {/if}
               </span>
             </div>

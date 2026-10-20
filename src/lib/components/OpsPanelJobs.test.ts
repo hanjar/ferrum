@@ -254,4 +254,71 @@ describe('Titlebar badge', () => {
     await tick();
     expect(screen.getByTestId('ops-badge').textContent).toBe('1');
   });
+
+  describe('FER-578 S4: focus stays in the panel after a row is removed', () => {
+    it('Delete moves focus to the neighbour row; the last one falls back to the panel', async () => {
+      const a = dockedJob();
+      jobs.finish(a, 'done', { silent: true });
+      const b = dockedJob({ subject: 'C:\\b\\two.zip' });
+      jobs.finish(b, 'done', { silent: true });
+      render(OpsPanel);
+      await tick();
+      await tick();
+      const rows = () => screen.getAllByTestId('bg-job');
+      rows()[0]!.focus();
+      await fireEvent.keyDown(rows()[0]!, { key: 'Delete' });
+      await tick();
+      await tick();
+      expect(rows()).toHaveLength(1);
+      expect(document.activeElement).toBe(rows()[0]);
+
+      await fireEvent.keyDown(rows()[0]!, { key: 'Delete' });
+      await tick();
+      await tick();
+      expect(jobs.list).toHaveLength(0);
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement?.classList.contains('panel')).toBe(true);
+      // Esc still reaches the panel
+      await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(ops.panelOpen).toBe(false);
+    });
+
+    it('the Dismiss button keeps focus in the panel too', async () => {
+      const a = dockedJob();
+      jobs.finish(a, 'failed', { summary: 'x', silent: true });
+      render(OpsPanel);
+      await tick();
+      (screen.getByRole('button', { name: 'Dismiss' }) as HTMLElement).focus();
+      await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      await tick();
+      await tick();
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it('a queued job shows its waiting state and can be cancelled from the dock', async () => {
+      const a = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'a.zip' });
+      const b = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'b.zip' });
+      jobs.claimTarget(
+        a,
+        'D:\\Out',
+        () => {},
+        () => {},
+      );
+      jobs.claimTarget(
+        b,
+        'd:\\out',
+        () => {},
+        () => jobs.finish(b, 'canceled', { silent: true }),
+      );
+      jobs.dock(a);
+      render(OpsPanel);
+      await tick();
+      const rows = screen.getAllByTestId('bg-job');
+      expect(rows[1]!.getAttribute('data-state')).toBe('queued');
+      expect(rows[1]!.textContent).toContain('Waiting (same folder)');
+      await fireEvent.click(rows[1]!.querySelector('button.danger')!);
+      await tick();
+      expect(b.state).toBe('canceled');
+    });
+  });
 });

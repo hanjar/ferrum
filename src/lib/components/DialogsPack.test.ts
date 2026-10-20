@@ -262,4 +262,35 @@ describe('Pack dialog submit', () => {
     expect(dialogs.current).toMatchObject({ kind: 'pack' });
     expect(refresh).not.toHaveBeenCalled();
   });
+
+  it('FER-578 S3: a finishing pack does not close another job password prompt', async () => {
+    let finish: (v: string) => void = () => {};
+    archiveMocks.archiveCreate.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    open();
+    const { getByRole } = render(Dialogs);
+    await tick();
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await tick();
+    // Another job's password prompt arrives while the pack progress dialog is up: it queues.
+    const cancel = vi.fn();
+    dialogs.open({
+      kind: 'password',
+      archivePath: 'C:\\x\\enc.zip',
+      retry: async () => {},
+      cancel,
+    });
+    expect(dialogs.queue).toHaveLength(1);
+
+    finish('C:\\Data\\Invoice.zip');
+    await vi.waitFor(() => expect(dialogs.current).toMatchObject({ kind: 'password' }));
+    await tick();
+    await tick();
+    expect(dialogs.current).toMatchObject({ kind: 'password' });
+    expect(cancel).not.toHaveBeenCalled();
+  });
 });

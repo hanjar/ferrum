@@ -413,18 +413,17 @@
         flow,
       )
       .then(() => {
-        busy = false;
-        const docked = flow.docked;
+        // withProgress already removed the progress dialog. Never `dialogs.close()` here: by now
+        // the current dialog belongs to someone else (e.g. another job's password prompt).
+        // `busy` is shared by every dialog; a docked pack must not reset another one's.
+        if (!flow.docked) busy = false;
         jobs.finish(flow, 'done', { summary: `Pack selesai: ${baseName(target)}` });
-        if (!docked) dialogs.close();
         activePane()?.refresh();
       })
       .catch((e) => {
-        busy = false;
+        if (!flow.docked) busy = false;
         if (isCancelledError(e)) {
-          const docked = flow.docked;
           jobs.finish(flow, 'canceled', { summary: 'Pack dibatalkan' });
-          if (!docked) dialogs.close();
           return;
         }
         const msg = e instanceof FsError ? e.message : String(e);

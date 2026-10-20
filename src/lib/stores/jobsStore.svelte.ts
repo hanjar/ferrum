@@ -20,12 +20,20 @@ import {
 import { toast } from './toastStore.svelte';
 
 export type JobKind = 'pack' | 'extract' | 'test' | 'verify';
-export type JobState = 'running' | 'needsInput' | 'cancelling' | 'done' | 'failed' | 'canceled';
+export type JobState =
+  'queued' | 'running' | 'needsInput' | 'cancelling' | 'done' | 'failed' | 'canceled';
 
 /** Something the user opens on demand: a held prompt or a finished job's result. */
 export interface JobAction {
   label: string;
   open: () => void;
+  /**
+   * Held prompt only: drop it without an answer (Cancel in the dock). The flow settles through
+   * its normal "prompt dismissed" path (passwords wiped, job finished).
+   */
+  dismiss?: () => void;
+  /** The prompt dialog is already on screen / queued; do not open it twice. */
+  opened?: boolean;
 }
 
 export interface Job {
@@ -57,10 +65,17 @@ export interface Job {
   result?: JobAction;
   startedAt: number;
   finishedAt?: number;
+  /** Normalised extract destination this job holds (serialised per folder). */
+  targetKey?: string;
 }
 
 export function isJobActive(j: Pick<Job, 'state'>): boolean {
-  return j.state === 'running' || j.state === 'needsInput' || j.state === 'cancelling';
+  return (
+    j.state === 'queued' ||
+    j.state === 'running' ||
+    j.state === 'needsInput' ||
+    j.state === 'cancelling'
+  );
 }
 
 /** 0..100, or null when the size of the job is not known. */
@@ -248,7 +263,21 @@ class JobsStore {
   /** Stop the job. Idempotent. The flow settles it (`finish`) once the backend really stopped. */
   cancel(job: Job): void {
     if (job.state === 'cancelling' || !isJobActive(job)) return;
+    const wasQueued = job.state === 'queued';
+    const prompt = job.state === 'needsInput' ? job.prompt : undefined;
     job.state = 'cancelling';
+    if (wasQueued) {
+      // Never started: leave the wait line; the flow ends through its own cancel path.
+      const w = this.removeWaiter(job);
+      w?.abort();
+      return;
+    }
+    if (prompt) {
+      // Waiting for an answer: nothing runs in the backend. Dismiss the prompt instead.
+      job.prompt = undefined;
+      prompt.dismiss?.();
+      return;
+    }
     const hook = this.cancelHooks.get(job.id);
     if (hook) hook();
     else if (job.requestId) safeCancelRequest(job.requestId);
@@ -265,6 +294,7 @@ class JobsStore {
   ): void {
     this.endAttempt(job);
     this.cancelHooks.delete(job.id);
+    this.releaseTarget(job);
     job.prompt = undefined;
     job.state = outcome;
     job.summary = info?.summary ?? '';
@@ -289,7 +319,7 @@ class JobsStore {
     job.prompt = prompt;
     job.state = 'needsInput';
     job.summary = summary;
-    toast.show(summary, 6000, {
+    toast.show(`${summary} (Alt+B)`, 6000, {
       label: 'Buka',
       run: () => this.openPrompt(job),
     });
@@ -298,11 +328,10 @@ class JobsStore {
   /** The user chose the held prompt (dock row or toast): show it now. */
   openPrompt(job: Job): void {
     const prompt = job.prompt;
-    if (!prompt) return;
-    job.prompt = undefined;
-    // The step continues from the answer; until then the job is "running" again.
-    job.state = 'running';
-    job.summary = '';
+    if (!prompt || prompt.opened) return;
+    // The job stays "needs input" until the answer arrives (the dialog may even queue behind
+    // another one); the next step (`attempt`) or the dismiss path ends that state.
+    prompt.opened = true;
     prompt.open();
   }
 
@@ -310,9 +339,64 @@ class JobsStore {
     job.result?.open();
   }
 
+  // ── serialise extracts into the same folder (two at once could overwrite each other) ──
+  private targetHolders = new Map<string, Job>();
+  private targetWaiters = new Map<string, { job: Job; start: () => void; abort: () => void }[]>();
+
+  /** Normalised key of a destination folder (case-insensitive, one separator, no trailing one). */
+  static targetKey(path: string): string {
+    return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  }
+
+  /**
+   * Run `start` now if no other job holds `target`, else queue the job (docked, state `queued`)
+   * until the holder finishes. `abort` runs when a queued job is cancelled.
+   */
+  claimTarget(job: Job, target: string, start: () => void, abort: () => void): void {
+    const key = JobsStore.targetKey(target);
+    job.targetKey = key;
+    if (!this.targetHolders.has(key)) {
+      this.targetHolders.set(key, job);
+      start();
+      return;
+    }
+    job.state = 'queued';
+    job.docked = true;
+    job.summary = 'Menunggu ekstrak lain ke folder yang sama';
+    const q = this.targetWaiters.get(key) ?? [];
+    q.push({ job, start, abort });
+    this.targetWaiters.set(key, q);
+    toast.show(`${job.title}: ${job.summary} (Alt+B)`, 4000);
+  }
+
+  private removeWaiter(job: Job): { abort: () => void } | undefined {
+    const key = job.targetKey;
+    if (!key) return undefined;
+    const q = this.targetWaiters.get(key);
+    const at = q?.findIndex((w) => w.job.id === job.id) ?? -1;
+    if (!q || at < 0) return undefined;
+    const [w] = q.splice(at, 1);
+    return w;
+  }
+
+  private releaseTarget(job: Job): void {
+    const key = job.targetKey;
+    if (!key) return;
+    this.removeWaiter(job);
+    if (this.targetHolders.get(key) !== job) return;
+    this.targetHolders.delete(key);
+    const next = this.targetWaiters.get(key)?.shift();
+    if (!next) return;
+    this.targetHolders.set(key, next.job);
+    next.job.state = 'running';
+    next.job.summary = '';
+    next.start();
+  }
+
   remove(job: Job): void {
     this.endAttempt(job);
     this.cancelHooks.delete(job.id);
+    this.releaseTarget(job);
     const at = this.list.findIndex((j) => j.id === job.id);
     if (at >= 0) this.list.splice(at, 1);
   }
@@ -332,6 +416,8 @@ class JobsStore {
     this.listening = null;
     this.sinks.clear();
     this.cancelHooks.clear();
+    this.targetHolders.clear();
+    this.targetWaiters.clear();
   }
 }
 

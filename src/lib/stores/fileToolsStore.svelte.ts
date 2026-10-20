@@ -67,6 +67,15 @@ class FileToolsStore {
   /** FER-578: the running verify / member hash that was moved to the background (dock). */
   private bgJob: Job | null = null;
   private bgDialog: FileToolsDialog | null = null;
+  /** Result / error of the background run: kept apart from `error`, `verify`, ... which belong to
+   *  whichever dialog is on screen now. */
+  private bgRun: {
+    verify: VerifyReport | null;
+    memberHash: ArchiveMemberChecksum | null;
+    memberCancelled: boolean;
+    error: string;
+    algorithm: Algorithm;
+  } = { verify: null, memberHash: null, memberCancelled: false, error: '', algorithm: 'sha256' };
 
   /** A verify / member hash is running and may be sent to the background. */
   get canBackground(): boolean {
@@ -98,6 +107,13 @@ class FileToolsStore {
     jobs.setCancelHook(job, () => void this.cancelVerify());
     this.bgJob = job;
     this.bgDialog = d;
+    this.bgRun = {
+      verify: this.verify,
+      memberHash: this.memberHash,
+      memberCancelled: this.memberCancelled,
+      error: this.error,
+      algorithm: this.algorithm,
+    };
     this.pushProgress();
     this.current = null;
     toast.show(`${job.title} berjalan di latar belakang (Alt+B)`);
@@ -122,13 +138,7 @@ class FileToolsStore {
     if (!job || !dlg) return;
     this.bgJob = null;
     this.bgDialog = null;
-    const snap = {
-      verify: this.verify,
-      memberHash: this.memberHash,
-      memberCancelled: this.memberCancelled,
-      error: this.error,
-      algorithm: this.algorithm,
-    };
+    const snap = { ...this.bgRun };
     let outcome: 'done' | 'failed' | 'canceled' = 'done';
     let summary = `${job.title}: selesai`;
     if (snap.error) {
@@ -205,6 +215,13 @@ class FileToolsStore {
     this.error = e instanceof FsError ? e.message : String(e);
   }
 
+  /** Error of a verify / hash run: its own slot while that run is in the background. */
+  private failRun(e: unknown) {
+    const msg = e instanceof FsError ? e.message : String(e);
+    if (this.bgJob) this.bgRun.error = msg;
+    else this.error = msg;
+  }
+
   /** Run `work` with a progress listener bound to `requestId`; always unlistens. */
   private async withProgress<T>(requestId: string, work: () => Promise<T>): Promise<T> {
     this.progress = null;
@@ -233,9 +250,11 @@ class FileToolsStore {
     this.verifyRequestId = `verify-${Date.now()}-${++verifySeq}`;
     try {
       const id = this.verifyRequestId;
-      this.verify = await this.withProgress(id, () => verifyChecksums(paths, id));
+      const report = await this.withProgress(id, () => verifyChecksums(paths, id));
+      if (this.bgJob) this.bgRun.verify = report;
+      else this.verify = report;
     } catch (e) {
-      this.fail(e);
+      this.failRun(e);
     } finally {
       this.verifying = false;
       this.settleBackground();
@@ -260,15 +279,19 @@ class FileToolsStore {
     const id = `member-${Date.now()}-${++verifySeq}`;
     this.verifyRequestId = id;
     try {
-      this.memberHash = await this.withProgress(id, () =>
+      const hash = await this.withProgress(id, () =>
         checksumArchiveMember(d.archivePath, d.memberPath, this.algorithm, {
           password: this.password || undefined,
           requestId: id,
         }),
       );
+      if (this.bgJob) this.bgRun.memberHash = hash;
+      else this.memberHash = hash;
     } catch (e) {
-      if (e instanceof FsError && e.code === 'cancelled') this.memberCancelled = true;
-      else this.fail(e);
+      if (e instanceof FsError && e.code === 'cancelled') {
+        if (this.bgJob) this.bgRun.memberCancelled = true;
+        else this.memberCancelled = true;
+      } else this.failRun(e);
     } finally {
       this.hashing = false;
       this.settleBackground();
@@ -281,7 +304,7 @@ class FileToolsStore {
     try {
       await cancelChecksumRequest(this.verifyRequestId);
     } catch (e) {
-      this.fail(e);
+      this.failRun(e);
     }
   }
 

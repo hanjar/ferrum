@@ -368,3 +368,121 @@ describe('Test Archive in the background', () => {
     expect((dialogs.current as { title: string }).title).toMatch(/dibatalkan/);
   });
 });
+
+describe('FER-578 R1: cancel in the dock', () => {
+  it('B1: Cancel on a docked extract that waits for a password ends it as canceled', async () => {
+    const first = deferred<void>();
+    archiveExtractMock.mockReturnValueOnce(first.promise);
+    await startExtract(['C:\\Projects\\enc.zip', 'C:\\Projects\\two.zip']);
+    dialogs.sendToBackground();
+    first.reject(passwordError());
+    await flush();
+    const job = jobs.docked[0]!;
+    expect(job.state).toBe('needsInput');
+
+    jobs.cancel(job);
+    await flush();
+    expect(job.state).toBe('canceled');
+    expect(jobs.runningCount).toBe(0);
+    expect(archiveCancelMock).not.toHaveBeenCalled();
+    // the batch is over: the next archive never started, and nothing can be re-opened
+    expect(archiveExtractMock).toHaveBeenCalledTimes(1);
+    jobs.openPrompt(job);
+    expect(dialogs.current).toBeNull();
+  });
+
+  it('B1: Cancel while the password dialog is already on screen removes it and ends the job', async () => {
+    const first = deferred<void>();
+    archiveExtractMock.mockReturnValueOnce(first.promise);
+    await startExtract(['C:\\Projects\\enc.zip']);
+    dialogs.sendToBackground();
+    first.reject(passwordError());
+    await flush();
+    const job = jobs.docked[0]!;
+    jobs.openPrompt(job);
+    expect(dialogs.current).toMatchObject({ kind: 'password' });
+    jobs.cancel(job);
+    await flush();
+    expect(dialogs.current).toBeNull();
+    expect(job.state).toBe('canceled');
+  });
+
+  it('B1: Cancel on a docked Test Archive waiting for a password finishes the run', async () => {
+    register(0, 'C:\\Projects', ['C:\\Projects\\enc.zip', 'C:\\Projects\\b.zip']);
+    const first = deferred<unknown>();
+    archiveTestMock.mockReturnValueOnce(first.promise);
+    dialogs.beginTestArchive();
+    await flush();
+    dialogs.sendToBackground();
+    first.reject(passwordError());
+    await flush();
+    const job = jobs.docked[0]!;
+    expect(job.state).toBe('needsInput');
+
+    jobs.cancel(job);
+    await flush();
+    expect(job.state).toBe('canceled');
+    expect(jobs.runningCount).toBe(0);
+    expect(archiveTestMock).toHaveBeenCalledTimes(1); // b.zip never started
+    jobs.openResult(job);
+    const report = dialogs.current as { kind: string; title: string };
+    expect(report.kind).toBe('testReport');
+    expect(report.title).toMatch(/dibatalkan/);
+  });
+
+  it('S1: a cancel that lands between two archives of a batch stops the batch', async () => {
+    const first = deferred<void>();
+    archiveExtractMock.mockReturnValueOnce(first.promise);
+    await startExtract(['C:\\Projects\\one.zip', 'C:\\Projects\\two.zip']);
+    dialogs.sendToBackground();
+    const job = jobs.docked[0]!;
+    jobs.cancel(job); // sent to the request of one.zip, which finishes anyway
+    first.resolve();
+    await flush();
+    expect(archiveExtractMock).toHaveBeenCalledTimes(1);
+    expect(job.state).toBe('canceled');
+    expect(jobs.runningCount).toBe(0);
+  });
+});
+
+describe('FER-578 R1: extracts into one folder are serialised', () => {
+  it('S2: the second background extract to the same folder waits for the first', async () => {
+    const first = deferred<void>();
+    archiveExtractMock.mockReturnValueOnce(first.promise).mockResolvedValueOnce(undefined);
+    await startExtract(['C:\\Projects\\one.zip']);
+    dialogs.sendToBackground();
+
+    // a second extract, same destination written in another case
+    register(0, 'C:\\Projects', ['C:\\Projects\\two.zip']);
+    register(1, 'd:\\backup\\');
+    dialogs.beginUnpack();
+    await flush();
+    expect(archiveExtractMock).toHaveBeenCalledTimes(1);
+    const second = jobs.docked.find((j) => j.state === 'queued')!;
+    expect(second).toBeTruthy();
+    expect(dialogs.current).toBeNull();
+
+    first.resolve();
+    await flush();
+    expect(archiveExtractMock).toHaveBeenCalledTimes(2);
+    expect(jobs.docked.every((j) => j.state === 'done')).toBe(true);
+  });
+
+  it('S2: cancelling the queued extract never starts it', async () => {
+    const first = deferred<void>();
+    archiveExtractMock.mockReturnValueOnce(first.promise);
+    await startExtract(['C:\\Projects\\one.zip']);
+    dialogs.sendToBackground();
+    register(0, 'C:\\Projects', ['C:\\Projects\\two.zip']);
+    register(1, 'D:\\Backup');
+    dialogs.beginUnpack();
+    await flush();
+    const second = jobs.docked.find((j) => j.state === 'queued')!;
+    jobs.cancel(second);
+    await flush();
+    expect(second.state).toBe('canceled');
+    first.resolve();
+    await flush();
+    expect(archiveExtractMock).toHaveBeenCalledTimes(1);
+  });
+});

@@ -230,4 +230,45 @@ describe('archive member hash in the background', () => {
     expect(fileTools.current).toMatchObject({ kind: 'archiveChecksum' });
     expect(fileTools.memberHash?.hash).toBe('abc123');
   });
+
+  describe('FER-578 S5: a background run does not share state with the dialog on screen', () => {
+    it('an error of another dialog is not taken as the verify error, and vice versa', async () => {
+      const run = deferred<unknown>();
+      verifyMock.mockReturnValue(run.promise);
+      fileTools.open({ kind: 'checksumVerify', paths: ['C:\\d\\a.bin'] });
+      await flush();
+      fileTools.sendToBackground();
+
+      // Another file tool fails while the verify runs in the background.
+      fileTools.open({ kind: 'split', path: 'C:\\d\\big.iso' });
+      fileTools.error = 'output exists';
+
+      run.resolve(
+        report({ ok: 1, requested: 1, outcomes: [{ path: 'C:\\d\\a.bin', status: 'ok' }] }),
+      );
+      await flush();
+      const job = jobs.docked[0]!;
+      expect(job.state).toBe('done'); // not "failed" with the Split message
+      expect(fileTools.error).toBe('output exists'); // Split dialog keeps its own error
+      expect(fileTools.verify).toBeNull(); // and its dialog does not get the report
+
+      jobs.openResult(job);
+      expect(fileTools.verify?.ok).toBe(1);
+      expect(fileTools.error).toBe('');
+    });
+
+    it('a verify failure in the background does not leak into the dialog on screen', async () => {
+      const run = deferred<unknown>();
+      verifyMock.mockReturnValue(run.promise);
+      fileTools.open({ kind: 'checksumVerify', paths: ['C:\\d\\a.bin'] });
+      await flush();
+      fileTools.sendToBackground();
+      fileTools.open({ kind: 'split', path: 'C:\\d\\big.iso' });
+      run.reject(new FsError({ code: 'io', message: 'read error' }));
+      await flush();
+      expect(fileTools.error).toBe('');
+      expect(jobs.docked[0]?.state).toBe('failed');
+      expect(jobs.docked[0]?.summary).toContain('read error');
+    });
+  });
 });

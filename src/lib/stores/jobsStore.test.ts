@@ -200,14 +200,14 @@ describe('needsInput', () => {
     expect(job.state).toBe('needsInput');
     expect(jobs.needInputCount).toBe(1);
     expect(jobs.runningCount).toBe(1);
-    expect(toast.message).toBe('Password diperlukan: big.zip');
+    expect(toast.message).toBe('Password diperlukan: big.zip (Alt+B)');
     expect(toast.action?.label).toBe('Buka');
     expect(open).not.toHaveBeenCalled();
 
     toast.runAction();
     expect(open).toHaveBeenCalledTimes(1);
-    expect(job.state).toBe('running');
-    expect(job.prompt).toBeUndefined();
+    // Still waiting for the answer (the dialog may be queued behind another one).
+    expect(job.state).toBe('needsInput');
     // the prompt does not open twice
     jobs.openPrompt(job);
     expect(open).toHaveBeenCalledTimes(1);
@@ -230,5 +230,73 @@ describe('helpers', () => {
     expect(baseName('C:\\a\\b.zip')).toBe('b.zip');
     expect(baseName('a/b/c.7z')).toBe('c.7z');
     expect(baseName('plain')).toBe('plain');
+  });
+});
+
+describe('FER-578 R1: cancel while waiting', () => {
+  it('Cancel on a needsInput job dismisses the prompt and sends nothing to the backend', () => {
+    const job = start();
+    jobs.dock(job);
+    const dismiss = vi.fn();
+    jobs.holdPrompt(job, { label: 'Password', open: vi.fn(), dismiss }, 'Password diperlukan');
+    jobs.cancel(job);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(cancelMock).not.toHaveBeenCalled();
+    expect(job.prompt).toBeUndefined();
+    // the flow settles it the way a dismissed prompt does
+    jobs.finish(job, 'canceled', { silent: true });
+    expect(job.state).toBe('canceled');
+    expect(jobs.runningCount).toBe(0);
+    // the toast "Buka" can no longer bring it back
+    jobs.openPrompt(job);
+    expect(job.state).toBe('canceled');
+  });
+});
+
+describe('FER-578 R1: one extract per destination folder', () => {
+  it('the second job waits (queued, docked), starts when the first finishes; case-insensitive', () => {
+    const a = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'a.zip' });
+    const b = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'b.zip' });
+    const startA = vi.fn();
+    const startB = vi.fn();
+    jobs.claimTarget(a, 'D:\\Out\\Dir\\', startA, vi.fn());
+    jobs.claimTarget(b, 'd:/out/DIR', startB, vi.fn());
+    expect(startA).toHaveBeenCalledTimes(1);
+    expect(startB).not.toHaveBeenCalled();
+    expect(b).toMatchObject({ state: 'queued', docked: true });
+    expect(jobs.runningCount).toBe(2);
+
+    jobs.finish(a, 'done', { silent: true });
+    expect(startB).toHaveBeenCalledTimes(1);
+    expect(b.state).toBe('running');
+    jobs.finish(b, 'done', { silent: true });
+  });
+
+  it('different folders run in parallel', () => {
+    const a = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'a.zip' });
+    const b = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'b.zip' });
+    const startB = vi.fn();
+    jobs.claimTarget(a, 'D:\\One', vi.fn(), vi.fn());
+    jobs.claimTarget(b, 'D:\\Two', startB, vi.fn());
+    expect(startB).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancelling a queued job leaves the line and aborts without starting; the holder is untouched', () => {
+    const a = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'a.zip' });
+    const b = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'b.zip' });
+    const c = jobs.begin({ kind: 'extract', title: 'Unpack', subject: 'c.zip' });
+    const startB = vi.fn();
+    const abortB = vi.fn();
+    const startC = vi.fn();
+    jobs.claimTarget(a, 'D:\\Out', vi.fn(), vi.fn());
+    jobs.claimTarget(b, 'D:\\Out', startB, abortB);
+    jobs.claimTarget(c, 'D:\\Out', startC, vi.fn());
+    jobs.cancel(b);
+    expect(abortB).toHaveBeenCalledTimes(1);
+    expect(cancelMock).not.toHaveBeenCalled();
+    jobs.finish(b, 'canceled', { silent: true });
+    jobs.finish(a, 'done', { silent: true });
+    expect(startB).not.toHaveBeenCalled();
+    expect(startC).toHaveBeenCalledTimes(1);
   });
 });

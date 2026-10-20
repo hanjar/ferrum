@@ -413,6 +413,10 @@ class DialogStore {
     run: (requestId: string) => Promise<T>,
     flow?: Job,
   ): Promise<T> {
+    // A cancel that fell between two steps of a batch must not be lost: the next step never starts.
+    if (flow?.state === 'cancelling') {
+      throw new FsError({ code: 'cancelled', message: 'Dibatalkan', archiveCode: 'cancelled' });
+    }
     const requestId = freshRequestId();
     const job =
       flow ??
@@ -543,12 +547,28 @@ class DialogStore {
       const subject = 'archivePath' in d ? baseName(d.archivePath) : job.subject;
       jobStore.holdPrompt(
         job,
-        { label, open: () => this.open(d) },
+        { label, open: () => this.open(d), dismiss: () => this.dropDialog(d) },
         `${label} diperlukan: ${subject}`,
       );
       return;
     }
     this.open(d);
+  }
+
+  /** Remove `d` wherever it is (on screen, queued, or never opened) and settle its caller as a
+   *  dismissed prompt (password: `cancel`). Used when its docked job is cancelled. */
+  private dropDialog(d: Dialog): void {
+    // $state wraps the stored dialog in a proxy, so `===` with the raw object never matches;
+    // a password dialog is identified by its own callback instead.
+    const same = (x: Dialog | null) =>
+      x?.kind === 'password' && d.kind === 'password' && x.retry === d.retry;
+    if (same(this._current)) {
+      this.close();
+      return;
+    }
+    const at = this.queue.findIndex(same);
+    if (at >= 0) this.queue.splice(at, 1);
+    if (d.kind === 'password') d.cancel?.();
   }
 
   /** FER-578: ends a flow. A docked job keeps `show` as its "Lihat hasil" and opens nothing; a
@@ -1024,7 +1044,17 @@ ${msg}`
       };
       void attempt(passwords[job.archivePath]);
     };
-    runFrom(0);
+    // Two extracts into the same folder could overwrite each other's results (rename/skip are
+    // not atomic): the second one waits in the dock until the first one ends.
+    jobStore.claimTarget(
+      flow,
+      target,
+      () => runFrom(0),
+      () =>
+        failBatch('canceled', 'Dibatalkan', () =>
+          this.open({ kind: 'error', title: errorTitle, message: EXTRACT_CANCELLED }),
+        ),
+    );
   }
 
   /** D21 decision for the extractConflicts dialog: ONE choice for the whole
@@ -1078,7 +1108,7 @@ ${msg}`
         break;
       }
     }
-    const cancelled = reports.some((r) => r.status === 'cancelled');
+    const cancelled = reports.some((r) => r.status === 'cancelled') || flow.state === 'cancelling';
     const problems = reports.filter((r) => r.status !== 'passed').length;
     const title = cancelled
       ? 'Test archive dibatalkan'
