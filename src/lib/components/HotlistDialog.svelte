@@ -132,8 +132,15 @@
     });
   });
 
+  let importInputEl = $state<HTMLInputElement>();
+  // The tree and the import view replace each other, so the control that had focus (the Import
+  // button, "Back") disappears. Without this focus would fall to <body>, outside the dialog, and
+  // Esc / Tab would stop reaching it. Entering the import view lands on the path field; leaving it
+  // (and opening the dialog) lands on the tree.
   $effect(() => {
-    if (hotlist.configureOpen) void tick().then(() => treeEl?.focus());
+    if (!hotlist.configureOpen) return;
+    const toImport = importOpen;
+    void tick().then(() => (toImport ? importInputEl : treeEl)?.focus());
   });
 
   function edit(next: HotItem[] | null, nextSel?: TreePath | null) {
@@ -488,6 +495,7 @@
         <div class="row">
           <input
             aria-label="wincmd.ini path"
+            bind:this={importInputEl}
             bind:value={importPath}
             spellcheck="false"
             placeholder="%APPDATA%\GHISLER\wincmd.ini"

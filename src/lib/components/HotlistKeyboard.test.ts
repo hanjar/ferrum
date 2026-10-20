@@ -98,9 +98,14 @@ describe('HotlistDialog keyboard (B3)', () => {
     await fireEvent.click(screen.getByRole('button', { name: /Import from Total Commander/ }));
     await tick();
     expect(screen.getByRole('region', { name: 'Import from Total Commander' })).toBeTruthy();
+    // The Import button vanished with the tree view: focus must have moved inside the dialog.
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText('wincmd.ini path')),
+    );
     await fireEvent.keyDown(modal, { key: 'Escape' });
     await tick();
     expect(screen.queryByRole('region', { name: 'Import from Total Commander' })).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tree')));
     expect(hotlist.configureOpen).toBe(true);
     await fireEvent.keyDown(modal, { key: 'Escape' });
     expect(hotlist.configureOpen).toBe(false);

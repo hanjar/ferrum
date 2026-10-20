@@ -55,7 +55,9 @@ test.describe('Settings → Appearance', () => {
     await violet.click();
     await violet.press('ArrowRight');
     await expect(page.locator('html')).toHaveAttribute('data-palette', 'electric');
-    await violet.press('ArrowLeft');
+    // Focus followed the selection to Electric; the next key goes to the focused radio.
+    await expect(dialog.getByRole('radio', { name: 'Electric' })).toBeFocused();
+    await dialog.getByRole('radio', { name: 'Electric' }).press('ArrowLeft');
     await expect(page.locator('html')).toHaveAttribute('data-palette', 'violet');
   });
 
