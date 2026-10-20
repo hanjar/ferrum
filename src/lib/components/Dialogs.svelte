@@ -433,12 +433,16 @@
       // Other dialogs keep closing on Escape as before.
       if (busy && d?.kind === 'delete' && d.onSettled) return;
       dialogs.close();
-    } else if (e.key === 'Enter' && !busy) {
-      // FER-460 (review L7): in the scan offer, Enter on a focused button
-      // activates THAT button; a bare Enter is the safe default (regular
-      // scan). The elevated fast scan always needs an explicit choice.
-      if (d?.kind === 'fastScanOffer' && e.target instanceof HTMLButtonElement) return;
+    } else if (e.key === 'Enter' && !busy && !e.isComposing) {
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      // FER-577 (X2): Enter on a focused button / link / select / textarea is that control's
+      // own business (native activation). It must NEVER run the dialog's primary action, e.g.
+      // Enter on "Cancel" in the Delete dialog used to delete.
+      if (t && t !== e.currentTarget && t.closest('button, a[href], select, textarea')) return;
       e.preventDefault();
+      // Delete is destructive: only a bare Enter on the dialog itself confirms. Enter on the
+      // "permanently" checkbox does nothing (Space toggles it).
+      if (d?.kind === 'delete' && t !== e.currentTarget) return;
       if (d?.kind === 'mkdir' && name.trim()) void submitMkdir(d.parent);
       else if (d?.kind === 'rename' && name.trim()) void submitRename(d.path);
       else if (d?.kind === 'delete') void submitDelete(d.paths);
@@ -453,6 +457,18 @@
         dialogs.confirmExtractConflicts(extractPolicy);
       else if (d?.kind === 'password' && password.trim()) submitPassword(d.retry);
       else if (d?.kind === 'fastScanOffer') d.choose('normal', fastDontAsk);
+      else if (d?.kind === 'error' || d?.kind === 'testReport' || d?.kind === 'extractSummary')
+        dialogs.close();
+      else if (
+        (d?.kind === 'copy' || d?.kind === 'move') &&
+        !(d.conflicts.length > 0 && policy === 'ask')
+      )
+        void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence);
+      else if (d?.kind === 'multipart') {
+        if (d.info.kind === 'notFirst' && d.info.firstExists) dialogs.openFirstPart();
+        else dialogs.close();
+      }
+      // quitConfirm / archiveProgress: a bare Enter does nothing (no accidental quit / cancel).
     }
   }
 </script>
