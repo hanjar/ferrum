@@ -14,12 +14,16 @@
  * pane and Move's opposite-pane destination. Exit (the single global Exit /
  * Escape) → back to the normal dual-pane Files: both FilePanes stay
  * mounted-hidden, so their tabs/scroll/selection survive, and the scan
- * state is kept — re-entering shows the previous results WITHOUT an
- * auto-rescan (states.md).
+ * state is kept — re-entering from the SAME folder shows the previous results
+ * WITHOUT an auto-rescan (states.md). Re-entering from a DIFFERENT entry
+ * folder than last time (FER-574, e.g. the other pane is active now) drops
+ * that result and starts like a first entry: the folder's cache, else idle +
+ * Scan. A root typed by hand survives while the entry folder is unchanged. A
+ * running scan is kept as is (Cancel first); only the suggestion changes.
  */
 import { activePane, paneById } from '../stores/panesRegistry.svelte';
 import { ui } from '../uiState.svelte';
-import { createDiskUsageStore, type DiskUsageStore } from './diskUsageStore.svelte';
+import { createDiskUsageStore, normalizePath, type DiskUsageStore } from './diskUsageStore.svelte';
 
 export class DuWorkspace {
   /** True while the Disk usage workspace replaces the Files grid. */
@@ -33,12 +37,30 @@ export class DuWorkspace {
    *  panes are hidden — nothing can re-focus them. */
   entryPane: 0 | 1 = $state(0);
 
-  /** Enter: the root suggestion is the entry pane's current folder. Previous
-   *  results stay visible until a new scan starts. */
+  /** The folder the previous entry started from (null before the first). */
+  lastEntryCwd: string | null = null;
+
+  /** Enter: the root suggestion is the entry pane's current folder. With an
+   *  unchanged entry folder the result stays visible (no rescan); with a
+   *  changed one, a result for another root is dropped in favour of the
+   *  entry folder's cache (or idle awaiting Scan, as on a first entry). */
   openFromPanes(): void {
     this.entryPane = ui.activePane === 1 ? 1 : 0;
     const cwd = activePane()?.path.trim() || paneById(this.entryPane === 0 ? 1 : 0)?.path.trim();
-    if (cwd) this.store.rootInput = cwd;
+    // FER-574: when the entry folder differs from the previous entry's (the
+    // other pane is active now, or the pane navigated), a result for another
+    // root must not linger under the new suggestion: drop it (idle, like a
+    // first entry; the cache is loaded below). A running scan is never
+    // cancelled silently (only the suggestion changes).
+    // Only when the ENTRY folder changed since the last entry: a root the user
+    // typed by hand (differs from the pane folder) must survive Exit/re-enter.
+    if (cwd) {
+      const changed =
+        this.lastEntryCwd !== null && normalizePath(this.lastEntryCwd) !== normalizePath(cwd);
+      if (changed) this.store.retarget(cwd);
+      else this.store.rootInput = cwd;
+      this.lastEntryCwd = cwd;
+    }
     void this.store.ensureListener();
     this.open = true;
     // FER-464: a root outside the index may have a cached scan: show it
