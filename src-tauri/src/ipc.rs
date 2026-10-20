@@ -514,11 +514,36 @@ pub async fn ai_recycle_check(paths: Vec<String>) -> Result<Vec<RecycleCheck>, F
     .map_err(blocking_failed)
 }
 
+/// FER-514 gate for every IPC that reads a path it was handed: the string gate (no device namespaces, pipes,
+/// streams, control characters), the reserved-name handling of `prepare_read_source`, and (this census only
+/// serves local files) a drive-letter path outside the folders the shell manages.
+pub(crate) fn census_sources(paths: &[String]) -> Result<Vec<String>, FsError> {
+    paths
+        .iter()
+        .map(|path| {
+            let plain = crate::path_guard::strip_verbatim(path);
+            let bytes = plain.as_bytes();
+            let local = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'\\' | b'/');
+            if !local || crate::recycle_gate::in_system_area(&plain) {
+                return Err(FsError::new(
+                    crate::domain::ErrorCode::InvalidPath,
+                    "Only local drive paths can be measured here",
+                ));
+            }
+            prepare_read_source(path)
+        })
+        .collect()
+}
+
 /// FER-576: read-only size and entry counts of a set of paths (no link is followed). The archive step of a
 /// chain uses it to know how many entries the archive MUST hold before the original may be deleted.
 #[tauri::command]
 pub async fn ai_tree_census(paths: Vec<String>) -> Result<TreeCensus, FsError> {
     ai_batch_check(&paths)?;
+    let paths = census_sources(&paths)?;
     spawn_blocking(move || {
         let mut total = TreeCensus {
             bytes: 0,

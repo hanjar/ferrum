@@ -358,6 +358,7 @@ fn an_item_the_shell_left_in_place_is_a_failure_not_a_success_and_not_a_bypass()
 fn a_shell_error_or_an_unopenable_item_is_a_failure_and_the_batch_goes_on() {
     let mut io = FakeIo::default();
     io.trash_error.insert(r"D:\Work\a".into(), "locked".into());
+    io.landing.insert(r"D:\Work\a".into(), Landing::Same);
     io.open_error
         .insert(r"D:\Work\b".into(), "cannot open".into());
     let report = delete_verified(&paths(&["a", "b", "c"]), &io);
@@ -476,6 +477,108 @@ fn the_real_volume_of_a_temp_item_is_a_fixed_drive_letter_root_or_is_refused_nev
             .is_err()
     );
     assert!(SystemRecycleEnv.volume_of("x.txt").is_err());
+}
+
+// ── review R2 ──
+
+#[test]
+fn items_inside_shell_managed_folders_are_refused() {
+    let env = FakeEnv::default();
+    for path in [
+        r"D:\$Recycle.Bin\S-1-5-21\$R1234.csv",
+        r"D:\$RECYCLE.BIN\x",
+        r"D:\Work\System Volume Information\x.dat",
+        r"D:\$Extend\$Deleted\x",
+        r"D:\RECYCLER\x",
+        r"D:\Work\$recycle.bin.\x",
+    ] {
+        assert_eq!(one(path, &env).reason, Some(reason::SYSTEM_AREA), "{path}");
+    }
+    assert!(in_system_area(r"D:/work/system volume information/a"));
+    assert!(!in_system_area(r"D:\Work\Recycle Bin notes\a.txt"));
+    assert!(one(r"D:\Work\a.csv", &env).ok);
+}
+
+#[test]
+fn the_real_place_of_the_parent_decides_too() {
+    // The volume resolver reports a parent that is really inside the bin (reached through a junction).
+    let mut env = FakeEnv::default();
+    env.volumes.insert(ITEM.into(), Err(reason::SYSTEM_AREA));
+    assert_eq!(one(ITEM, &env).reason, Some(reason::SYSTEM_AREA));
+}
+
+#[test]
+fn delete_verified_never_counts_an_item_that_was_already_in_the_bin() {
+    let io = FakeIo::default();
+    let in_bin = r"D:\$Recycle.Bin\S-1\$R1.csv".to_owned();
+    let report = delete_verified(std::slice::from_ref(&in_bin), &io);
+    assert_eq!(report.deleted, 0);
+    assert_eq!(report.failed.len(), 1);
+    assert!(
+        io.calls
+            .borrow()
+            .iter()
+            .all(|c| !c.starts_with("trash:") && !c.starts_with("open:"))
+    );
+}
+
+#[test]
+fn a_shell_error_does_not_hide_what_happened_to_the_item() {
+    // Error, but the item is in the bin: it is recycled.
+    let mut io = FakeIo::default();
+    io.trash_error.insert(r"D:\Work\a".into(), "aborted".into());
+    let report = delete_verified(&paths(&["a"]), &io);
+    assert_eq!(
+        (report.deleted, report.failed.len(), report.bypassed.len()),
+        (1, 0, 0)
+    );
+
+    // Error and the item is gone without being in the bin: a permanent delete, the batch stops.
+    for landing in [Landing::Gone, Landing::Pending, Landing::Elsewhere] {
+        let mut io = FakeIo::default();
+        io.trash_error.insert(
+            r"D:\Work\a".into(),
+            "answered yes to the nuke dialog".into(),
+        );
+        io.landing.insert(r"D:\Work\a".into(), landing);
+        let report = delete_verified(&paths(&["a", "b", "c"]), &io);
+        assert_eq!(report.bypassed, vec![r"D:\Work\a".to_owned()]);
+        assert_eq!(report.skipped, 2);
+        assert!(!io.calls.borrow().iter().any(|c| c == r"trash:D:\Work\b"));
+    }
+
+    // Error and the item is still where it was: a plain failure with the shell's message.
+    let mut io = FakeIo::default();
+    io.trash_error.insert(r"D:\Work\a".into(), "locked".into());
+    io.landing.insert(r"D:\Work\a".into(), Landing::Same);
+    let report = delete_verified(&paths(&["a", "b"]), &io);
+    assert_eq!(
+        (report.deleted, report.failed.len(), report.bypassed.len()),
+        (1, 1, 0)
+    );
+    assert_eq!(report.failed[0].message, "locked");
+}
+
+#[test]
+fn the_census_gate_refuses_what_a_read_may_not_open() {
+    use crate::ipc::census_sources;
+    for bad in [
+        r"\\.\pipe\x",
+        r"\\?\GLOBALROOT\Device\x",
+        r"\\server\share\x",
+        "relative.txt",
+        r"C:\a\b.txt:ads",
+        r"D:\$Recycle.Bin\x",
+        r"D:\System Volume Information",
+        "",
+        "C:\\a\u{0}b",
+    ] {
+        assert!(census_sources(&[bad.to_owned()]).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        census_sources(&[r"D:\Work\a.csv".to_owned()]).unwrap(),
+        vec![r"D:\Work\a.csv".to_owned()]
+    );
 }
 
 /// The count of entries the census predicts is the count Test Archive reports for a real archive, so

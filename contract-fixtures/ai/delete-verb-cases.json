@@ -19,5 +19,9 @@
   { "name": "hilang alone is not delete", "text": "filenya hilang", "asked": false },
   { "name": "a longer word that contains remove", "text": "remover tool", "asked": false },
   { "name": "undeleted is not delete", "text": "undeleted", "asked": false },
-  { "name": "delicious", "text": "delicious files", "asked": false }
+  { "name": "delicious", "text": "delicious files", "asked": false },
+  { "name": "a file name that contains the word is not a request", "text": "buka laporan-hapus.csv", "asked": false },
+  { "name": "the word next to a file name still counts", "text": "hapus laporan-hapus.csv", "asked": true },
+  { "name": "a sentence-ending dot", "text": "tolong hapus.", "asked": true },
+  { "name": "a dotted name that is only a name", "text": "arsipkan remove.me.txt", "asked": false }
 ]

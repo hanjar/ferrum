@@ -1046,6 +1046,12 @@ export function parseChain(
     (!userAskedToDelete(userText) || drivePathCount(userText) > 1)
   )
     fail('invalid_payload', 'A delete needs an explicit request and a single path');
+  // Review R2: a chain that deletes works on ONE typed file, so it starts by opening it.
+  if (
+    steps.some((step) => step?.capability === ITEMS_DELETE_CAPABILITY) &&
+    steps[0]?.capability !== PANE_NAVIGATE_CAPABILITY
+  )
+    fail('invalid_payload', 'A delete chain starts with the typed file');
   const archive = steps.find((step) => step?.capability === 'archive.create');
   let lastRank = 0;
   let pane: unknown;

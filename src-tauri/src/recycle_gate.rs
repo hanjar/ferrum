@@ -48,6 +48,7 @@ pub mod reason {
     pub const SIZE_UNKNOWN: &str = "size_unknown";
     pub const CAPACITY_UNKNOWN: &str = "capacity_unknown";
     pub const TOO_BIG: &str = "too_big";
+    pub const SYSTEM_AREA: &str = "system_area";
 }
 
 /// What one tree holds, counted without following links.
@@ -118,7 +119,26 @@ fn lexical_blocker(path: &str) -> Option<&'static str> {
     if crate::path_guard::has_reserved_device_component(&plain) {
         return Some(reason::RESERVED_NAME);
     }
+    if in_system_area(&plain) {
+        return Some(reason::SYSTEM_AREA);
+    }
     None
+}
+
+/// Folders the shell manages itself: an item inside them is never "sent" to the bin, it is deleted in place (or,
+/// inside the bin, already is where it would go). Case-insensitive, any component of the path.
+pub fn in_system_area(path: &str) -> bool {
+    path.split(['\\', '/']).any(|component| {
+        let component = component.trim_end_matches([' ', '.']);
+        [
+            "$recycle.bin",
+            "recycler",
+            "system volume information",
+            "$extend",
+        ]
+        .iter()
+        .any(|area| component.eq_ignore_ascii_case(area))
+    })
 }
 
 /// Decide, for every path, whether the shell is guaranteed to move it into the Recycle Bin.
@@ -267,6 +287,16 @@ pub fn delete_verified(paths: &[String], io: &dyn RecycleIo) -> RecycleReport {
             report.skipped = paths.len() - index - 1;
             return report;
         }
+        // An item already inside a shell-managed folder (the bin itself) is never "recycled" by the shell, and
+        // `in_bin` below must not count it as a success.
+        if in_system_area(path) {
+            report.failed.push(failed(
+                path,
+                ErrorCode::InvalidPath,
+                "The item is inside a folder the system manages; nothing was done",
+            ));
+            continue;
+        }
         let probe = match io.open_probe(path) {
             Ok(probe) => probe,
             Err(message) => {
@@ -274,10 +304,9 @@ pub fn delete_verified(paths: &[String], io: &dyn RecycleIo) -> RecycleReport {
                 continue;
             }
         };
-        if let Err(message) = io.trash(path) {
-            report.failed.push(failed(path, ErrorCode::Io, &message));
-            continue;
-        }
+        // The shell can report an error after it already did part of the work (a dialog answered, a folder
+        // processed child by child): the object itself decides, not the error.
+        let trash_error = io.trash(path).err();
         let original = crate::path_guard::strip_verbatim(path).to_lowercase();
         let landed = if probe.delete_pending() {
             None
@@ -296,11 +325,11 @@ pub fn delete_verified(paths: &[String], io: &dyn RecycleIo) -> RecycleReport {
         };
         match landed {
             Some(true) => report.deleted += 1,
-            Some(false) => {
-                report
-                    .failed
-                    .push(failed(path, ErrorCode::Io, "The item was not moved"))
-            }
+            Some(false) => report.failed.push(failed(
+                path,
+                ErrorCode::Io,
+                trash_error.as_deref().unwrap_or("The item was not moved"),
+            )),
             None => {
                 report.bypassed.push(path.clone());
                 report.skipped = paths.len() - index - 1;
@@ -390,6 +419,9 @@ impl RecycleEnv for SystemRecycleEnv {
         let canonical = crate::path_guard::strip_verbatim(&canonical.to_string_lossy());
         if canonical.starts_with(r"\\") {
             return Err(reason::NETWORK_OR_UNC);
+        }
+        if in_system_area(&canonical) {
+            return Err(reason::SYSTEM_AREA);
         }
         let same_letter = |a: &str, b: &str| {
             matches!(

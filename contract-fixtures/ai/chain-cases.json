@@ -78,11 +78,11 @@
     }
   },
   {
-    "name": "archive the selection then delete it",
+    "name": "archive then delete without opening a typed file first",
     "kind": "chain",
     "offered": ["archive.create", "items.delete"],
     "userText": "arsipkan yang kupilih ke 7z lalu hapus",
-    "valid": true,
+    "valid": false,
     "value": {
       "schemaVersion": 1,
       "requestId": "req_1",

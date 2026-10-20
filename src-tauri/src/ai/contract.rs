@@ -1307,7 +1307,7 @@ pub fn user_asked_to_delete(user_text: &str) -> bool {
     const PREFIXES: [&str; 6] = ["meng", "men", "mem", "me", "di", "pe"];
     user_text
         .split_whitespace()
-        .filter(|chunk| !chunk.contains(['\\', '/', ':']))
+        .filter(|chunk| !chunk.contains(['\\', '/', ':']) && !looks_like_file_name(chunk))
         .flat_map(|chunk| chunk.split(|c: char| !c.is_alphanumeric()))
         .filter(|token| !token.is_empty())
         .any(|token| {
@@ -1323,6 +1323,14 @@ pub fn user_asked_to_delete(user_text: &str) -> bool {
                 .iter()
                 .any(|stem| core.starts_with(stem) || token.starts_with(stem))
         })
+}
+
+/// A word with a dot between two letters or digits (`laporan-hapus.csv`) is a file name, not a request.
+fn looks_like_file_name(chunk: &str) -> bool {
+    let chars: Vec<char> = chunk.chars().collect();
+    (1..chars.len().saturating_sub(1)).any(|i| {
+        chars[i] == '.' && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric()
+    })
 }
 
 /// FER-576 (review R1, S6): how many absolute drive paths the user wrote (`D:\`, `d:/`). A chain that deletes
@@ -1378,13 +1386,16 @@ pub fn parse_chain_offered(
         .steps
         .iter()
         .any(|step| matches!(step, Intent::ArchiveCreate(_)));
-    if chain
+    let has_delete = chain
         .steps
         .iter()
-        .any(|step| matches!(step, Intent::ItemsDelete(_)))
-        && (!user_asked_to_delete(user_text) || drive_path_count(user_text) > 1)
-    {
+        .any(|step| matches!(step, Intent::ItemsDelete(_)));
+    if has_delete && (!user_asked_to_delete(user_text) || drive_path_count(user_text) > 1) {
         return bad("A delete needs an explicit request and a single path");
+    }
+    // Review R2: a chain that deletes works on ONE typed file, so it must start by opening it.
+    if has_delete && !matches!(chain.steps.first(), Some(Intent::PaneNavigate(_))) {
+        return bad("A delete chain starts with the typed file");
     }
     let mut last_rank = 0u8;
     let mut pane: Option<SourcePane> = None;

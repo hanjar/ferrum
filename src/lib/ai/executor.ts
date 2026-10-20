@@ -1156,7 +1156,7 @@ export class AiExecutor implements ChatExecutor {
     }
     const prepared = await this.deps.facade.prepare(
       envelope,
-      { snapshot },
+      { snapshot, ...(run.chain?.hasDelete ? { needCensus: true } : {}) },
       run.entity ? { allowEntitySelector: true } : {},
     );
     if (!this.alive(run, epoch)) {
@@ -1784,6 +1784,13 @@ export class AiExecutor implements ChatExecutor {
       return;
     }
     const hasDelete = steps.some((step) => step.capability === 'items.delete');
+    if (hasDelete && steps[0].capability !== PANE_NAVIGATE_CAPABILITY) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Penghapusan setelah arsip hanya berlaku untuk satu file yang path-nya Anda ketik; tidak ada yang dijalankan.',
+      });
+      return;
+    }
     if (hasDelete && (!userAskedToDelete(run.userText) || drivePathCount(run.userText) > 1)) {
       this.emit(run, 'blockedCapability', {
         blockedReason:
@@ -1902,8 +1909,12 @@ export class AiExecutor implements ChatExecutor {
   ): string | undefined {
     const chain = run.chain;
     if (!chain) return undefined;
+    // Review R2 S1: the card of a step is that step's operation, whatever a follow-up asked for.
+    if (capability !== chain.capability) {
+      return 'Jenis operasi langkah ini tidak boleh diganti; tidak ada yang dijalankan.';
+    }
     // Review R1 S6: a chain that navigated to a file and deletes works on exactly that file.
-    if (chain.requireFile && chain.navTarget && capability !== 'directories.sync') {
+    if (chain.requireFile && chain.navTarget) {
       if (!preview.selectionIsOnly?.(chain.navTarget.target.path)) {
         return 'Seleksi bukan persis file yang Anda ketik; tidak ada yang diarsipkan atau dihapus.';
       }
@@ -1950,7 +1961,13 @@ export class AiExecutor implements ChatExecutor {
   ): string | undefined {
     const chain = run.chain;
     const guard = this.deps.guard;
-    if (!chain || !guard?.scopeDigestOf) return undefined;
+    if (!chain) return undefined;
+    if (!guard?.scopeDigestOf) {
+      // Without the backend's own fingerprint the delete cannot be tied to what was archived: fail closed.
+      return capability === 'items.delete' && chain.afterArchive
+        ? 'Sidik jari backend tidak tersedia, jadi isi yang dihapus tidak bisa dipastikan sama dengan yang diarsipkan; tidak ada yang dihapus.'
+        : undefined;
+    }
     const digest = guard.scopeDigestOf(ticket);
     if (capability === 'archive.create') {
       chain.archiveScopeDigest = digest;

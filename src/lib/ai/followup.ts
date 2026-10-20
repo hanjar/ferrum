@@ -393,6 +393,13 @@ export function composeProviderText(prev: IntentEnvelope, text: string): string 
  */
 export function mergeProviderIntent(prev: IntentEnvelope, next: IntentEnvelope): ApplyResult {
   const p = prev.intent;
+  // Review R2 S1: a change never swaps the KIND of operation (an archive card must not become a delete card).
+  if (next.intent.capability !== p.capability) {
+    return {
+      ok: false,
+      message: 'Perubahan tidak boleh mengganti jenis operasi. Rencana tidak diubah.',
+    };
+  }
   const n = structuredClone(next.intent) as ProposedIntent;
   if (
     p.capability === 'archive.create' &&

@@ -138,7 +138,7 @@ const DELETE_PREFIXES = ['meng', 'men', 'mem', 'me', 'di', 'pe'];
  */
 export function userAskedToDelete(userText: string): boolean {
   for (const chunk of userText.split(/\s+/u)) {
-    if (/[\\/:]/u.test(chunk)) continue;
+    if (/[\\/:]/u.test(chunk) || /[\p{L}\p{N}]\.[\p{L}\p{N}]/u.test(chunk)) continue;
     for (const raw of chunk.split(/[^\p{L}\p{N}]+/u)) {
       if (!raw) continue;
       const token = raw.toLowerCase();

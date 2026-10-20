@@ -63,6 +63,7 @@ export function buildKit(options: KitOptions) {
     [FOLDER]: { kind: 'dir', path: FOLDER },
   };
   const order: string[] = [];
+  let censusCalls = 0;
   const navigate = {
     available: () => true,
     resolve: vi.fn(async (path: string): Promise<NavigateTarget> => {
@@ -133,6 +134,7 @@ export function buildKit(options: KitOptions) {
         ? {}
         : {
             census: async () => {
+              censusCalls++;
               const census = options.census;
               return census && census !== 'absent' ? census : { archiveMembers: 1, links: 0 };
             },
@@ -167,7 +169,12 @@ export function buildKit(options: KitOptions) {
     ledger: new MemoryExecutionLedger(),
     queue: new PollingQueuePort({ read: () => [], cancel: async () => undefined }),
     prefs: () => ({ autoCreate: options.autoCreate === true }),
-    ...(options.guard ? { guard: options.guard } : {}),
+    // A guard with a stable backend fingerprint by default (a chain that deletes needs one).
+    guard: options.guard ?? {
+      register: async () => ({ ok: true as const }),
+      authorize: async () => ({ ok: true as const }),
+      scopeDigestOf: () => 'kit-digest',
+    },
     listItems: async (plan, offset, limit) => {
       if (plan.operation.kind !== 'archive.create' && plan.operation.kind !== 'items.delete')
         return { rows: [], total: 0 };
@@ -200,6 +207,7 @@ export function buildKit(options: KitOptions) {
     verify,
     registry,
     stateOf,
+    censusCalls: () => censusCalls,
     runIds,
     last,
     submit(runId = 'run-1', text = options.userText ?? USER_TEXT) {

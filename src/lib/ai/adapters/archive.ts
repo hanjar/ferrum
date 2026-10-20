@@ -220,7 +220,7 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
         () => undefined,
       );
       const facts = measureFacts(measured, label);
-      const census = await deps.census?.(paths).catch(() => undefined);
+      const census = ctx.needCensus ? await deps.census?.(paths).catch(() => undefined) : undefined;
       const warnings = [...target.warnings, ...facts.warnings];
       if (census && census.links > 0) {
         warnings.push(

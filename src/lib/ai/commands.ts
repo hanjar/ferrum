@@ -67,6 +67,11 @@ export const err = (code: CommandErrorCode, message: string, cause?: string): Re
 /** Local context for one request: the immutable snapshot taken at submit. */
 export interface ResolvedContext {
   snapshot: PaneSnapshot;
+  /**
+   * FER-576 (review R2): this step belongs to a chain that deletes, so the archive adapter must measure the
+   * sources (member count, links) before offering the card. Plain archives skip the measurement (no latency).
+   */
+  needCensus?: boolean;
 }
 
 export type Availability =

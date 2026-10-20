@@ -50,7 +50,8 @@ fn the_owner_example_is_a_valid_three_step_chain() {
 fn navigate_then_delete_and_archive_then_delete_are_valid() {
     assert!(parse_chain(vec![nav(FILE), delete()]).is_ok());
     assert!(parse_chain(vec![nav(FILE), archive()]).is_ok());
-    assert!(parse_chain(vec![archive(), delete()]).is_ok());
+    // Review R2: a chain that deletes starts with the typed file.
+    assert!(parse_chain(vec![archive(), delete()]).is_err());
 }
 
 #[test]

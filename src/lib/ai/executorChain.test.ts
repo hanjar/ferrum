@@ -11,7 +11,7 @@ vi.mock('../ipc/archive', () => ({ archiveCreate: ipc.archiveCreate }));
 
 const { entry } = await import('./contextTestKit');
 const { buildKit, ownerChain, CSV, FOLDER, OTHER, USER_TEXT } = await import('./chainTestKit');
-import type { Kit, KitOptions } from './chainTestKit';
+import type { Kit } from './chainTestKit';
 import type { ExecutionGuard } from './executor';
 import type { ProviderEvent } from './provider';
 
@@ -181,79 +181,41 @@ describe('the delete step is gated by a verified archive of exactly the same sel
   });
 });
 
-describe('archive then delete of the marked selection (no navigation)', () => {
-  const chain = (): ProviderEvent => ({
-    kind: 'chain',
-    requestId: 'req_1',
-    steps: [
-      {
-        capability: 'archive.create',
-        sourcePane: 'left',
-        selector: { kind: 'selected' },
-        format: '7z',
-        target: { kind: 'sourceDirectory' },
-      },
-      { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
-    ],
-  });
-  const TEXT = 'arsipkan yang kupilih ke 7z lalu hapus';
-  function setup(over: Partial<KitOptions> = {}) {
-    const kit = buildKit({
-      events: [chain()],
-      userText: TEXT,
-      keepSelectionOnRefresh: true,
-      ...over,
-    });
-    kit.host.left.path = FOLDER;
-    kit.host.left.all = [
-      entry('pc_202508014.csv', { path: CSV }),
-      entry('keep-me.txt', { path: OTHER }),
-    ];
-    kit.host.left.selected = [CSV];
+describe('gates between the archive and the delete of the typed file', () => {
+  /** Nav (run-1), archive card (run-1-c1), delete card (run-1-c2). */
+  async function archived(kit: Kit): Promise<void> {
     start(kit);
-    return kit;
+    await awaiting(kit, 'run-1-c1');
+    kit.executor.approve('run-1-c1');
   }
 
-  it('deletes what was archived when nothing changed', async () => {
-    const kit = setup();
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await awaiting(kit, 'run-1-c1');
-    expect(kit.last('run-1-c1')?.plan?.operation.kind).toBe('items.delete');
-    kit.executor.approve('run-1-c1');
-    await settled(kit, 'run-1-c1', 'succeeded');
-    expect(kit.recycle.deleteToRecycle).toHaveBeenCalledWith([CSV]);
-  });
-
-  it('refuses the delete when the selection changed after the archive (it must be exactly what was archived)', async () => {
-    const holder: { kit?: Kit } = {};
-    const kit = setup({
-      verify: async () => {
-        holder.kit!.host.left.selected = [CSV, OTHER];
-        return { ok: true, message: 'ok' };
-      },
+  function reopenWith(kit: Kit, marks: (target: string) => string[]): void {
+    let opens = 0;
+    kit.navigate.open.mockImplementation(async (side, target) => {
+      opens++;
+      const pane = side === 'left' ? kit.host.left : kit.host.right;
+      pane.path = target.kind === 'dir' ? target.path : target.folder;
+      pane.all = [entry('pc_202508014.csv', { path: CSV }), entry('keep-me.txt', { path: OTHER })];
+      pane.selected = opens === 1 ? [CSV] : marks(CSV);
+      pane.listing = {};
+      return true;
     });
-    holder.kit = kit;
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await settled(kit, 'run-1-c1', 'stale');
-    expect(kit.last('run-1-c1')?.errorMessage).toContain('persis yang diarsipkan');
+  }
+
+  it('refuses the delete when the typed file is not the only mark when the delete card is built', async () => {
+    const kit = buildKit({ events: [ownerChain()] });
+    reopenWith(kit, (file) => [file, OTHER]);
+    await archived(kit);
+    await settled(kit, 'run-1-c2', 'stale');
+    expect(kit.last('run-1-c2')?.errorMessage).toContain('bukan persis file');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
-  it('a selection cleared after the archive gives a question, not a delete', async () => {
-    const holder: { kit?: Kit } = {};
-    const kit = setup({
-      verify: async () => {
-        holder.kit!.host.left.selected = [];
-        return { ok: true, message: 'ok' };
-      },
-    });
-    holder.kit = kit;
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await settled(kit, 'run-1-c1', 'needsInput');
-    expect(kit.last('run-1-c1')?.errorMessage).toContain('Belum ada item');
+  it('a mark that is gone when the delete card is built never produces a delete', async () => {
+    const kit = buildKit({ events: [ownerChain()] });
+    reopenWith(kit, () => []);
+    await archived(kit);
+    await vi.waitFor(() => expect(['stale', 'needsInput']).toContain(kit.stateOf('run-1-c2')));
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
@@ -268,11 +230,10 @@ describe('archive then delete of the marked selection (no navigation)', () => {
       authorize: async () => ({ ok: true }),
       scopeDigestOf: (ticket) => digests.get(ticket.handleId),
     };
-    const kit = setup({ guard });
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await settled(kit, 'run-1-c1', 'stale');
-    expect(kit.last('run-1-c1')?.errorMessage).toContain('Isi item berubah');
+    const kit = buildKit({ events: [ownerChain()], guard });
+    await archived(kit);
+    await settled(kit, 'run-1-c2', 'stale');
+    expect(kit.last('run-1-c2')?.errorMessage).toContain('Isi item berubah');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
@@ -286,10 +247,9 @@ describe('archive then delete of the marked selection (no navigation)', () => {
       authorize: async () => ({ ok: true }),
       scopeDigestOf: (ticket) => digests.get(ticket.handleId),
     };
-    const kit = setup({ guard });
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await awaiting(kit, 'run-1-c1');
+    const kit = buildKit({ events: [ownerChain()], guard });
+    await archived(kit);
+    await awaiting(kit, 'run-1-c2');
   });
 
   it('S1: a guard that cannot tell the digest fails closed for the delete', async () => {
@@ -298,35 +258,75 @@ describe('archive then delete of the marked selection (no navigation)', () => {
       authorize: async () => ({ ok: true }),
       scopeDigestOf: () => undefined,
     };
-    const kit = setup({ guard });
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await settled(kit, 'run-1-c1', 'stale');
+    const kit = buildKit({ events: [ownerChain()], guard });
+    await archived(kit);
+    await settled(kit, 'run-1-c2', 'stale');
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('S1: a guard without scopeDigestOf at all also fails closed (review R2)', async () => {
+    const guard: ExecutionGuard = {
+      register: async () => ({ ok: true }),
+      authorize: async () => ({ ok: true }),
+    };
+    const kit = buildKit({ events: [ownerChain()], guard });
+    await archived(kit);
+    await settled(kit, 'run-1-c2', 'stale');
+    expect(kit.last('run-1-c2')?.errorMessage).toContain('Sidik jari backend');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
   it('S2: symlinks or junctions inside the sources stop the chain before the archive is written', async () => {
-    const kit = setup({ census: { archiveMembers: 1, links: 2 } });
-    await settled(kit, 'run-1', 'stale');
-    expect(kit.last('run-1')?.errorMessage).toContain('tidak bisa dipastikan lengkap');
+    const kit = buildKit({ events: [ownerChain()], census: { archiveMembers: 1, links: 2 } });
+    start(kit);
+    await settled(kit, 'run-1-c1', 'stale');
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('tidak bisa dipastikan lengkap');
     expect(ipc.archiveCreate).not.toHaveBeenCalled();
   });
 
   it('S2: an unknown member count stops the chain too (fail closed)', async () => {
-    const kit = setup({ census: 'absent' });
-    await settled(kit, 'run-1', 'stale');
+    const kit = buildKit({ events: [ownerChain()], census: 'absent' });
+    start(kit);
+    await settled(kit, 'run-1-c1', 'stale');
     expect(ipc.archiveCreate).not.toHaveBeenCalled();
   });
 
   it('S2: the number of members the archive must hold goes to Test Archive', async () => {
-    const kit = setup({ census: { archiveMembers: 7, links: 0 } });
-    await awaiting(kit, 'run-1');
-    kit.executor.approve('run-1');
-    await awaiting(kit, 'run-1-c1');
+    const kit = buildKit({ events: [ownerChain()], census: { archiveMembers: 7, links: 0 } });
+    await archived(kit);
+    await awaiting(kit, 'run-1-c2');
     expect(kit.verify).toHaveBeenCalledWith(ARCHIVE, { members: 7 });
   });
 
-  it('S3: an archive written inside the folder that will be deleted stops the chain', async () => {
+  it('a plain archive is never measured: no census latency when no delete is involved (review R2)', async () => {
+    const plain = buildKit({
+      events: [
+        {
+          kind: 'intent',
+          intent: {
+            schemaVersion: 1,
+            requestId: 'req_1',
+            intent: {
+              capability: 'archive.create',
+              sourcePane: 'left',
+              selector: { kind: 'allVisible', entries: 'all' },
+              format: 'zip',
+              target: { kind: 'sourceDirectory' },
+            },
+          },
+        },
+      ],
+      userText: 'arsipkan folder kiri',
+      census: { archiveMembers: 9, links: 9 },
+    });
+    plain.submit();
+    await awaiting(plain, 'run-1');
+    // The census said "9 links": had it been used, a warning about links would be on the card.
+    expect(JSON.stringify(plain.last('run-1'))).not.toContain('symlink');
+    expect(plain.censusCalls()).toBe(0);
+  });
+
+  it('a chain that deletes without opening the typed file first is refused', async () => {
     const kit = buildKit({
       events: [
         {
@@ -338,24 +338,43 @@ describe('archive then delete of the marked selection (no navigation)', () => {
               sourcePane: 'left',
               selector: { kind: 'selected' },
               format: '7z',
-              target: { kind: 'pane', pane: 'right' },
+              target: { kind: 'sourceDirectory' },
             },
             { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
           ],
         },
       ],
-      userText: TEXT,
-      keepSelectionOnRefresh: true,
+      userText: 'arsipkan yang kupilih ke 7z lalu hapus',
     });
-    kit.host.left.path = FOLDER;
-    const sep = String.fromCharCode(92);
-    kit.host.left.all = [entry('sub', { path: `${FOLDER}${sep}sub`, isDir: true })];
-    kit.host.left.selected = [`${FOLDER}${sep}sub`];
-    kit.host.right.path = `${FOLDER}${sep}sub${sep}out`;
-    start(kit);
-    await settled(kit, 'run-1', 'stale');
-    expect(kit.last('run-1')?.errorMessage).toContain('di dalam item yang akan dihapus');
+    kit.submit();
+    await settled(kit, 'run-1', 'blockedCapability');
     expect(ipc.archiveCreate).not.toHaveBeenCalled();
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('R2-S1: a follow-up cannot turn the archive card into a delete card', async () => {
+    const swap: ProviderEvent = {
+      kind: 'intent',
+      intent: {
+        schemaVersion: 1,
+        requestId: 'req_1',
+        intent: { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
+      },
+    };
+    const kit = buildKit({ events: [ownerChain(), swap] });
+    start(kit);
+    await awaiting(kit, 'run-1-c1');
+    const card = kit.last('run-1-c1')!;
+    const result = kit.executor.followUp(
+      'run-1-c1',
+      { planId: card.plan!.planId, revision: card.revision ?? 1 },
+      'jangan hapus dulu, tolong pakai zip saja ya',
+    );
+    expect(result.accepted).toBe(true);
+    await vi.waitFor(() => expect(kit.stateOf('run-1-c1')).toBe('needsInput'));
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('tidak valid');
+    expect(kit.recycle.check).not.toHaveBeenCalled();
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 });
 
