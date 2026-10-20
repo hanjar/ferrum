@@ -43,7 +43,8 @@
 
   // FER-577: Esc closes; Enter in a field runs the dialog's primary action.
   const dialogOpts = {
-    onEscape: () => fileTools.close(),
+    // FER-578: Esc on a running verification moves it to the background (Cancel stops it).
+    onEscape: () => (fileTools.canBackground ? fileTools.sendToBackground() : fileTools.close()),
     onEnter: () => {
       if (!d) return;
       if (d.kind === 'archiveChecksum') {
@@ -142,6 +143,13 @@
       <div class="actions">
         {#if fileTools.verifying}
           <button class="ghost" onclick={() => void fileTools.cancelVerify()}>Cancel</button>
+          <button
+            class="primary"
+            data-testid="job-background"
+            onclick={() => fileTools.sendToBackground()}
+          >
+            <Mnemonic label="Back&ground" />
+          </button>
         {/if}
         <button class="ghost" onclick={() => fileTools.close()} disabled={fileTools.verifying}>
           Close
@@ -195,6 +203,13 @@
       <div class="actions">
         {#if fileTools.hashing}
           <button class="ghost" onclick={() => void fileTools.cancelVerify()}>Cancel</button>
+          <button
+            class="ghost"
+            data-testid="job-background"
+            onclick={() => fileTools.sendToBackground()}
+          >
+            <Mnemonic label="Back&ground" />
+          </button>
         {/if}
         <button class="ghost" onclick={() => fileTools.close()} disabled={fileTools.hashing}>
           Close
