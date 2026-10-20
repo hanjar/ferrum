@@ -95,6 +95,23 @@ export function createBackendGuard(deps: BackendGuardDeps): ExecutionGuard {
           absentPaths: [...scope.absentPaths],
         });
       }
+      if (op.kind === 'items.delete') {
+        // FER-576: the root is the folder the selection lives in; no output name. The backend re-checks every
+        // item (fingerprint) right before the delete command runs.
+        const items = deps.sourcePaths(plan);
+        if (!items || items.length === 0) {
+          return {
+            ok: false as const,
+            message:
+              'Item yang akan dihapus tidak tersedia untuk divalidasi; tidak ada yang disetujui.',
+          };
+        }
+        return registerRequest(ticket, {
+          root: op.sourceDirectory,
+          sourcePaths: [...items],
+          outputName: null,
+        });
+      }
       const paths = deps.sourcePaths(plan);
       if (!paths || paths.length === 0) {
         return {
@@ -135,6 +152,10 @@ export function createBackendGuard(deps: BackendGuardDeps): ExecutionGuard {
       } catch (error) {
         return { ok: false as const, message: messageOf(error) };
       }
+    },
+
+    scopeDigestOf(ticket: ApprovalTicket) {
+      return scopes.get(ticket.handleId);
     },
 
     revoke(ticket: ApprovalTicket) {

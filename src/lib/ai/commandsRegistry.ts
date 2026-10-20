@@ -124,6 +124,28 @@ export const INTENT_SCHEMAS: Record<MutatingCapabilityId, IntentSchema> = {
       },
     ],
   },
+  'items.delete': {
+    type: 'object',
+    additionalProperties: false,
+    required: ['capability', 'sourcePane', 'selector'],
+    properties: {
+      capability: { const: 'items.delete' },
+      sourcePane: PANE_REF,
+      selector: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind'],
+        properties: { kind: { const: 'selected' } },
+      },
+    },
+    examples: [
+      {
+        capability: 'items.delete',
+        sourcePane: 'activeAtSubmit',
+        selector: { kind: 'selected' },
+      },
+    ],
+  },
   'directories.sync': {
     type: 'object',
     additionalProperties: false,

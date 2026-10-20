@@ -4,14 +4,21 @@ import {
   DISK_USAGE_QUERY_CAPABILITY,
   INDEXER_SET_MODE_CAPABILITY,
   INDEXER_STATUS_CAPABILITY,
+  ITEMS_DELETE_CAPABILITY,
+  PANE_NAVIGATE_CAPABILITY,
+  parseChain,
+  ContractError,
   parseIntent,
   parseOfferedIntent,
   type ActivityQuery,
+  type ChainEnvelope,
+  type PaneRef,
   type CopyAdjustRequest,
   type DiskUsageQueryKind,
   type IndexerSetModeRequest,
   type IntentEnvelope,
 } from './contracts';
+import { userAskedToDelete } from './paneNavigate';
 
 export interface ProviderPlanRequest {
   requestId: string;
@@ -42,7 +49,11 @@ export type ProviderEvent =
   /** FER-476: switch the indexer privacy mode. Never planned; the user confirms on a card first. */
   | { kind: 'indexerSetMode'; request: IndexerSetModeRequest }
   /** FER-466: read-only Disk Usage question. Answered locally on the snapshot; no scan data leaves. */
-  | { kind: 'diskUsageQuery'; query: DiskUsageQueryKind };
+  | { kind: 'diskUsageQuery'; query: DiskUsageQueryKind }
+  /** FER-576: open a path the user typed (validated against the request text and the disk locally). */
+  | { kind: 'paneNavigate'; pane: PaneRef; path: string }
+  /** FER-576: an ordered multi-step plan (navigate? -> archive? -> delete?), run one step at a time. */
+  | { kind: 'chain'; requestId: string; steps: ChainEnvelope['steps'] };
 
 type OfferedEvent = Extract<
   ProviderEvent,
@@ -53,7 +64,9 @@ type OfferedEvent = Extract<
       | 'copyAdjust'
       | 'indexerStatus'
       | 'indexerSetMode'
-      | 'diskUsageQuery';
+      | 'diskUsageQuery'
+      | 'paneNavigate'
+      | 'chain';
   }
 >;
 
@@ -65,8 +78,26 @@ export function parseModelReply(
   value: unknown,
   requestId: string,
   offered: readonly string[] | undefined,
+  userText = '',
 ): OfferedEvent {
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'steps' in value) {
+    const chain = parseChain(value, requestId, offered ?? [], userText);
+    return { kind: 'chain', requestId: chain.requestId, steps: chain.steps };
+  }
   const capability = (value as { intent?: { capability?: unknown } } | null)?.intent?.capability;
+  if (capability === PANE_NAVIGATE_CAPABILITY && offered?.includes(PANE_NAVIGATE_CAPABILITY)) {
+    const envelope = parseOfferedIntent(value, requestId, offered);
+    if (envelope.intent.capability === PANE_NAVIGATE_CAPABILITY) {
+      return { kind: 'paneNavigate', pane: envelope.intent.pane, path: envelope.intent.path };
+    }
+  }
+  if (capability === ITEMS_DELETE_CAPABILITY && !offered?.includes(ITEMS_DELETE_CAPABILITY)) {
+    throw new ContractError('invalid_payload', 'Capability not offered');
+  }
+  // FER-576 (review R1, S5): a delete is only accepted when the user asked to delete.
+  if (capability === ITEMS_DELETE_CAPABILITY && !userAskedToDelete(userText)) {
+    throw new ContractError('invalid_payload', 'The request does not ask to delete');
+  }
   if (
     (capability === INDEXER_STATUS_CAPABILITY || capability === INDEXER_SET_MODE_CAPABILITY) &&
     offered?.includes(capability)
@@ -184,7 +215,12 @@ export class FakeIntentProvider implements IntentProvider {
       yield { kind: 'question', text: question.text };
       return;
     }
-    const event = parseModelReply(response, request.requestId, request.capabilities);
+    const event = parseModelReply(
+      response,
+      request.requestId,
+      request.capabilities,
+      request.userText,
+    );
     ensureActive(request.signal);
     yield structuredClone(event);
   }

@@ -161,7 +161,7 @@ export class RemoteIntentProvider implements IntentProvider {
     if (
       request.capabilities !== undefined &&
       (!Array.isArray(request.capabilities) ||
-        request.capabilities.length > 8 ||
+        request.capabilities.length > 12 ||
         new Set(request.capabilities).size !== request.capabilities.length ||
         request.capabilities.some(
           (id) => typeof id !== 'string' || !/^[a-zA-Z]+\.[a-zA-Z]+$/.test(id),
@@ -222,10 +222,20 @@ export class RemoteIntentProvider implements IntentProvider {
       const result = await Promise.race([this.transport(input, controller.signal), cancelled]);
       if (request.signal.aborted) throw new RemoteProviderError('cancelled', 'Request cancelled');
       if (timedOut) throw new RemoteProviderError('timeout', 'Provider timed out');
-      const question = parseQuestion(result);
+      // FER-576: the backend sends a validated multi-step plan as `{kind:'chain', chain:{...}}`.
+      const chainResult =
+        result && typeof result === 'object' && (result as { kind?: unknown }).kind === 'chain'
+          ? (result as { chain?: unknown }).chain
+          : undefined;
+      const question = chainResult === undefined ? parseQuestion(result) : undefined;
       const reply =
         question === undefined
-          ? parseModelReply(result, request.requestId, request.capabilities)
+          ? parseModelReply(
+              chainResult ?? result,
+              request.requestId,
+              request.capabilities,
+              request.userText,
+            )
           : undefined;
       if (request.signal.aborted) throw new RemoteProviderError('cancelled', 'Request cancelled');
       if (question !== undefined) yield { kind: 'question', text: question };

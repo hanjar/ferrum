@@ -1,0 +1,435 @@
+[
+  {
+    "name": "owner example: navigate to the typed file, 7z ultra, delete the original",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "d:\\Downloads\\Telegram Desktop\\pc_20250814\\pc_202508014.csv -> tolong arsipkan ke paling kecil gunakan 7zip lalu hapus ya",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "D:\\Downloads\\Telegram Desktop\\pc_20250814\\pc_202508014.csv" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "level": "ultra", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "english variant",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "archive C:\\Data\\report.xlsx with 7zip at the smallest size, then delete it",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "left", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "left", "selector": { "kind": "selected" }, "format": "7z", "level": "ultra", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "left", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "indonesian variant typed with forward slashes, plain zip",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan d:/kerja/laporan.docx jadi zip lalu hapus aslinya",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "right", "path": "D:\\kerja\\laporan.docx" },
+        { "capability": "archive.create", "sourcePane": "right", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "right", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "navigate then archive",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate"],
+    "userText": "buka C:\\Data\\report.xlsx lalu arsipkan",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } }
+      ]
+    }
+  },
+  {
+    "name": "navigate then delete",
+    "kind": "chain",
+    "offered": ["pane.navigate", "items.delete"],
+    "userText": "hapus file C:\\tmp\\old.log",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\tmp\\old.log" },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "archive then delete without opening a typed file first",
+    "kind": "chain",
+    "offered": ["archive.create", "items.delete"],
+    "userText": "arsipkan yang kupilih ke 7z lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "path the user never typed",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan file itu lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Windows\\System32" },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "path cut in the middle of a file name",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "hapus C:\\Data\\report.xlsx",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\rep" },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "delete before archive",
+    "kind": "chain",
+    "offered": ["archive.create", "items.delete"],
+    "userText": "arsipkan lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } }
+      ]
+    }
+  },
+  {
+    "name": "more than four steps",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "buka C:\\a lalu arsipkan lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\a" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain of one step",
+    "kind": "chain",
+    "offered": ["items.delete"],
+    "userText": "hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [{ "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }]
+    }
+  },
+  {
+    "name": "two panes in one chain",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\a\\x.txt lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "left", "path": "C:\\a\\x.txt" },
+        { "capability": "archive.create", "sourcePane": "left", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "right", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "archive of everything visible cannot feed a delete",
+    "kind": "chain",
+    "offered": ["archive.create", "items.delete"],
+    "userText": "arsipkan semua lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "allVisible", "entries": "all" }, "format": "zip", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a step that was not offered",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate"],
+    "userText": "arsipkan C:\\a\\x.txt lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\a\\x.txt" },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain cannot carry approval or extra fields",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\a\\x.txt lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "approved": true,
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\a\\x.txt" },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "sync cannot be chained",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "directories.sync"],
+    "userText": "buka C:\\a\\x.txt lalu sinkron",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\a\\x.txt" },
+        { "capability": "directories.sync", "leftPane": "left", "rightPane": "right", "mode": "bidirectional" }
+      ]
+    }
+  },
+  {
+    "name": "navigate must be the first step",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate"],
+    "userText": "arsipkan lalu buka C:\\a\\x.txt",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "zip", "target": { "kind": "sourceDirectory" } },
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\a\\x.txt" }
+      ]
+    }
+  },
+  {
+    "name": "single navigate intent",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": true,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "D:\\Downloads" } }
+  },
+  {
+    "name": "navigate to a drive root",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": true,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "right", "path": "E:\\" } }
+  },
+  {
+    "name": "navigate not offered",
+    "kind": "intent",
+    "offered": ["archive.create"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "D:\\Downloads" } }
+  },
+  {
+    "name": "navigate to a relative path",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "Downloads\\x" } }
+  },
+  {
+    "name": "navigate to a UNC path",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "\\\\server\\share\\x" } }
+  },
+  {
+    "name": "navigate with traversal",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "C:\\a\\..\\Windows" } }
+  },
+  {
+    "name": "navigate into a device namespace",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "\\\\?\\C:\\x" } }
+  },
+  {
+    "name": "navigate to a stream",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "C:\\a\\b.txt:ads" } }
+  },
+  {
+    "name": "navigate with a reserved device name",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "C:\\a\\nul" } }
+  },
+  {
+    "name": "navigate cannot also open or select a name",
+    "kind": "intent",
+    "offered": ["pane.navigate"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "pane.navigate", "pane": "left", "path": "C:\\a", "select": "x.txt", "open": true } }
+  },
+  {
+    "name": "single delete of the selection",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": true,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } } }
+  },
+  {
+    "name": "delete not offered",
+    "kind": "intent",
+    "offered": ["archive.create"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } } }
+  },
+  {
+    "name": "delete cannot be permanent",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "permanent": true } }
+  },
+  {
+    "name": "delete cannot name paths",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "paths": ["C:\\a\\x.txt"] } }
+  },
+  {
+    "name": "delete cannot name items in the selector",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected", "names": ["x.txt"] } } }
+  },
+  {
+    "name": "delete cannot target everything visible",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "allVisible", "entries": "all" } } }
+  },
+  {
+    "name": "delete cannot filter by extension",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected", "extensions": ["csv"] } } }
+  },
+  {
+    "name": "delete needs a selector",
+    "kind": "intent",
+    "offered": ["items.delete"],
+    "valid": false,
+    "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit" } }
+  },
+  {
+    "name": "a chain with a delete step but a request that never asks to delete",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke 7z",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain that deletes while the request names two paths",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke D:\\backup lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain without a delete step is not limited by the delete rules",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke D:\\backup",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } }
+      ]
+    }
+  }
+]

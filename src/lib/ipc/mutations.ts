@@ -100,3 +100,55 @@ export async function enqueueMove(
     throw FsError.fromIPC(e);
   }
 }
+
+export interface RecycleCheckRow {
+  path: string;
+  ok: boolean;
+  /** Stable backend code (see `recycle_gate::reason`): `no_recycle_bin`, `recycle_disabled`, `too_big`, ... */
+  reason?: string | null;
+  /** The REAL recursive size of the item (links are not followed). */
+  bytes?: number;
+  entries?: number;
+  links?: number;
+}
+
+export interface TreeCensus {
+  bytes: number;
+  /** Members a 7z / ZIP of the paths lists: every file plus every empty folder. */
+  archiveMembers: number;
+  /** Symlinks / junctions inside the paths (the Pack engine skips them). */
+  links: number;
+}
+
+/** FER-576 (review R1, S2): read-only size and archive-member counts of a set of paths. */
+export async function aiTreeCensus(paths: string[]): Promise<TreeCensus> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<TreeCensus>('ai_tree_census', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
+}
+
+/** FER-576: can each path go to the Recycle Bin? Read-only. */
+export async function aiRecycleCheck(paths: string[]): Promise<RecycleCheckRow[]> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<RecycleCheckRow[]>('ai_recycle_check', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
+}
+
+/**
+ * FER-576: the ONLY delete the AI chat can reach. Recycle Bin only: the command has no `permanent` argument and
+ * refuses the whole batch when any item cannot go to the Recycle Bin.
+ */
+export async function aiDeleteToRecycle(paths: string[]): Promise<DeleteReport> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<DeleteReport>('ai_delete_to_recycle', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
+}

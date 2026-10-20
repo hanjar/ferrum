@@ -73,3 +73,20 @@ describe('policy: risk and availability are computed locally', () => {
     expect(d.kind).toBe('needsApproval');
   });
 });
+
+describe('policy: items.delete (FER-576)', () => {
+  const deletePlan = () =>
+    samplePlan({
+      capability: 'items.delete',
+      operation: { kind: 'items.delete', sourceManifest: 'm1', sourceDirectory: 'D:\\Work' },
+      steps: [{ id: 's1', capability: 'items.delete', dependsOn: [] }],
+    });
+
+  it('is mutating and always needs approval, whatever the preferences say', () => {
+    expect(classifyRisk(deletePlan())).toBe('mutating');
+    for (const autoCreate of [false, true]) {
+      const d = evaluatePolicy({ plan: deletePlan(), availability: READY, prefs: { autoCreate } });
+      expect(d.kind).toBe('needsApproval');
+    }
+  });
+});

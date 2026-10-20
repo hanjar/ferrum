@@ -64,6 +64,17 @@ pub enum Intent {
     /// data (path, name, size, count) is ever sent to the provider and nothing is mutated.
     #[serde(rename = "diskUsage.query")]
     DiskUsageQuery(DiskUsageQuery),
+    /// FER-576: open a folder the user TYPED in the request (or the folder of a typed file, with
+    /// that file selected) in a pane. Read-only navigation: it executes nothing. The path is
+    /// validated against the user's own request text and the disk locally (see
+    /// `path_typed_by_user`). Accepted only by the offered parsers.
+    #[serde(rename = "pane.navigate")]
+    PaneNavigate(PaneNavigate),
+    /// FER-576: move the items SELECTED in a pane to the Recycle Bin. Never permanent, never a path
+    /// or a name from the model; the user confirms on a warning card. Accepted only by the
+    /// offered parsers.
+    #[serde(rename = "items.delete")]
+    ItemsDelete(ItemsDelete),
 }
 
 impl Intent {
@@ -76,6 +87,8 @@ impl Intent {
             Intent::IndexerStatus(_) => INDEXER_STATUS_CAPABILITY,
             Intent::IndexerSetMode(_) => INDEXER_SET_MODE_CAPABILITY,
             Intent::DiskUsageQuery(_) => DISK_USAGE_QUERY_CAPABILITY,
+            Intent::PaneNavigate(_) => PANE_NAVIGATE_CAPABILITY,
+            Intent::ItemsDelete(_) => ITEMS_DELETE_CAPABILITY,
         }
     }
 }
@@ -85,6 +98,12 @@ pub const COPY_ADJUST_CAPABILITY: &str = "copy.adjust";
 pub const INDEXER_STATUS_CAPABILITY: &str = "indexer.status";
 pub const INDEXER_SET_MODE_CAPABILITY: &str = "indexer.setMode";
 pub const DISK_USAGE_QUERY_CAPABILITY: &str = "diskUsage.query";
+pub const PANE_NAVIGATE_CAPABILITY: &str = "pane.navigate";
+pub const ITEMS_DELETE_CAPABILITY: &str = "items.delete";
+/// Longest chain of steps one request may plan (navigate, archive, delete, plus one spare).
+pub const MAX_CHAIN_STEPS: usize = 4;
+/// Longest path a `pane.navigate` may carry.
+pub const MAX_NAVIGATE_PATH: usize = 1024;
 /// Largest list a `diskUsage.query` may ask for (same as the Disk Usage "Top 20").
 pub const MAX_DISK_USAGE_LIMIT: u8 = 20;
 /// Largest +/- step one request may ask for.
@@ -494,6 +513,29 @@ pub struct PaneTarget {
 #[serde(deny_unknown_fields)]
 pub struct SourceDirectoryTarget {}
 
+/// Wire form of a navigation (the intent minus `capability`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PaneNavigate {
+    pub pane: SourcePane,
+    pub path: String,
+}
+
+/// Wire form of a Recycle Bin delete (the intent minus `capability`). Only the pane selection can
+/// be the target: there is no way to name an item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ItemsDelete {
+    pub source_pane: SourcePane,
+    pub selector: DeleteSelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum DeleteSelector {
+    Selected {},
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DirectoriesSync {
@@ -522,6 +564,8 @@ pub fn parse_intent(
             | Intent::IndexerStatus(_)
             | Intent::IndexerSetMode(_)
             | Intent::DiskUsageQuery(_)
+            | Intent::PaneNavigate(_)
+            | Intent::ItemsDelete(_)
     ) {
         return Err(ContractError::InvalidEnvelope(
             "Capability not offered".into(),
@@ -584,6 +628,14 @@ fn parse_envelope(value: Value, active_request_id: &str) -> Result<IntentEnvelop
         Intent::ActivityQuery(query) => validate_activity_query(query)?,
         Intent::CopyAdjust(request) => validate_copy_adjust(request)?,
         Intent::DiskUsageQuery(request) => validate_disk_usage_query(request)?,
+        Intent::PaneNavigate(navigate) => {
+            if !safe_navigate_path(&navigate.path) {
+                return Err(ContractError::InvalidEnvelope(
+                    "Invalid navigation path".into(),
+                ));
+            }
+        }
+        Intent::ItemsDelete(_) => {}
         // serde already enforces the closed shapes (empty object / one `mode`).
         Intent::IndexerStatus(_) | Intent::IndexerSetMode(_) => {}
     }
@@ -729,6 +781,15 @@ pub enum ResolvedOperation {
         #[serde(rename = "outputName")]
         output_name: String,
     },
+    /// FER-576: the manifest is the frozen pane selection; the target is always the Recycle Bin.
+    #[serde(rename = "items.delete")]
+    ItemsDelete {
+        #[serde(rename = "sourceManifest")]
+        source_manifest: String,
+        /// The folder the selection lives in (the guard's root).
+        #[serde(rename = "sourceDirectory")]
+        source_directory: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -753,6 +814,8 @@ pub enum Capability {
     ArchiveCreate,
     #[serde(rename = "directories.sync")]
     DirectoriesSync,
+    #[serde(rename = "items.delete")]
+    ItemsDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -956,6 +1019,20 @@ pub fn parse_resolved_plan(value: Value) -> Result<ResolvedPlan, ContractError> 
             }
             check_ref(source_manifest)?;
         }
+        ResolvedOperation::ItemsDelete {
+            source_manifest,
+            source_directory,
+        } => {
+            if plan.capability != Capability::ItemsDelete
+                || plan.preview.conflict_count != 0
+                || !safe_windows_path(source_directory)
+            {
+                return Err(ContractError::InvalidEnvelope(
+                    "Invalid delete operation".into(),
+                ));
+            }
+            check_ref(source_manifest)?;
+        }
     }
     Ok(plan)
 }
@@ -1154,6 +1231,214 @@ fn safe_output_name(name: &str) -> bool {
     true
 }
 
+/// FER-576: a navigation path must be absolute, local (drive letter), free of traversal, device
+/// names and stream syntax. A trailing separator and a bare drive root (`D:`) are fine.
+pub fn safe_navigate_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > MAX_NAVIGATE_PATH || path.contains('\0') {
+        return false;
+    }
+    let flat = path.replace('/', "\\");
+    let trimmed = flat.trim_end_matches('\\');
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return false;
+    }
+    if bytes.len() == 2 {
+        return true;
+    }
+    bytes[2] == b'\\' && safe_windows_path(trimmed)
+}
+
+/// FER-576: did the user type this path? `path` must occur in `user_text` (case-insensitive, `/`
+/// and `\` equal, quotes ignored), starting at a token start and ending at the end of the text, at
+/// whitespace, at a separator or at punctuation. A path the model made up never occurs, so it
+/// cannot be navigated to.
+pub fn path_typed_by_user(path: &str, user_text: &str) -> bool {
+    fn norm(text: &str) -> Vec<char> {
+        text.chars()
+            .map(|c| if c == '/' { '\\' } else { c })
+            .filter(|c| {
+                !matches!(
+                    c,
+                    '"' | '`' | '\u{2018}' | '\u{2019}' | '\u{201c}' | '\u{201d}'
+                )
+            })
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let mut needle = norm(path);
+    while needle.last() == Some(&'\\') && needle.len() > 3 {
+        needle.pop();
+    }
+    if needle.len() < 2 {
+        return false;
+    }
+    let hay = norm(user_text);
+    if hay.len() < needle.len() {
+        return false;
+    }
+    (0..=hay.len() - needle.len()).any(|start| {
+        if hay[start..start + needle.len()] != needle[..] {
+            return false;
+        }
+        let before_ok = start == 0 || !hay[start - 1].is_alphanumeric();
+        let end = start + needle.len();
+        let after_ok = match hay.get(end) {
+            None => true,
+            // A sentence-ending dot is fine; a dot inside a name (`a.csv`) is not a boundary.
+            Some('.') => hay.get(end + 1).is_none_or(|next| next.is_whitespace()),
+            Some(c) => {
+                c.is_whitespace() || matches!(c, '\\' | ',' | ';' | ')' | '!' | '?' | ':' | '\'')
+            }
+        };
+        before_ok && after_ok
+    })
+}
+
+/// FER-576 (review R1, S5): did the user ask to delete something? A model that hallucinates or is steered by
+/// injected text must not be able to turn "jelaskan file ini" into a delete card. Tokens that look like a path
+/// (a backslash, slash or colon) are ignored, so a folder called `Remove` does not count as a request.
+pub fn user_asked_to_delete(user_text: &str) -> bool {
+    const EXACT: [&str; 11] = [
+        "delete", "deleted", "deleting", "del", "remove", "removed", "removing", "erase", "erased",
+        "trash", "rm",
+    ];
+    const STEMS: [&str; 4] = ["hapus", "buang", "singkirkan", "hilangkan"];
+    const PREFIXES: [&str; 6] = ["meng", "men", "mem", "me", "di", "pe"];
+    user_text
+        .split_whitespace()
+        .filter(|chunk| !chunk.contains(['\\', '/', ':']) && !looks_like_file_name(chunk))
+        .flat_map(|chunk| chunk.split(|c: char| !c.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            let token = token.to_lowercase();
+            if EXACT.contains(&token.as_str()) {
+                return true;
+            }
+            let core = PREFIXES
+                .iter()
+                .find_map(|prefix| token.strip_prefix(prefix))
+                .unwrap_or(&token);
+            STEMS
+                .iter()
+                .any(|stem| core.starts_with(stem) || token.starts_with(stem))
+        })
+}
+
+/// A word with a dot between two letters or digits (`laporan-hapus.csv`) is a file name, not a request.
+fn looks_like_file_name(chunk: &str) -> bool {
+    let chars: Vec<char> = chunk.chars().collect();
+    (1..chars.len().saturating_sub(1)).any(|i| {
+        chars[i] == '.' && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric()
+    })
+}
+
+/// FER-576 (review R1, S6): how many absolute drive paths the user wrote (`D:\`, `d:/`). A chain that deletes
+/// is only accepted for ONE path: with two, the model would be choosing which one to open and delete.
+pub fn drive_path_count(user_text: &str) -> usize {
+    let chars: Vec<char> = user_text.chars().collect();
+    (0..chars.len().saturating_sub(2))
+        .filter(|&i| {
+            chars[i].is_ascii_alphabetic()
+                && chars[i + 1] == ':'
+                && matches!(chars[i + 2], '\\' | '/')
+                && (i == 0 || !chars[i - 1].is_alphanumeric())
+        })
+        .count()
+}
+
+/// A multi-step plan: an ordered, closed grammar of at most [`MAX_CHAIN_STEPS`] steps. Each step is
+/// an ordinary intent; the app runs them one at a time, one approval card per mutating step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChainEnvelope {
+    pub schema_version: u8,
+    pub request_id: String,
+    pub steps: Vec<Intent>,
+}
+
+/// Parse a chain reply. Every step goes through the same validation as a single intent, the
+/// capability of each must be offered, and the sequence must follow the grammar:
+/// `pane.navigate`? then `archive.create`? then `items.delete`?, at least two steps in total, one
+/// pane reference throughout, an archive that feeds a delete must archive the pane selection, and a
+/// navigation path must be one the user typed (`user_text`).
+pub fn parse_chain_offered(
+    value: Value,
+    active_request_id: &str,
+    offered: &[&str],
+    user_text: &str,
+) -> Result<ChainEnvelope, ContractError> {
+    let chain: ChainEnvelope = decode(value)?;
+    if chain.schema_version != 1 {
+        return Err(ContractError::UnsupportedVersion);
+    }
+    if !safe_request_id(&chain.request_id) || !safe_request_id(active_request_id) {
+        return Err(ContractError::InvalidRequestId);
+    }
+    if chain.request_id != active_request_id {
+        return Err(ContractError::RequestMismatch);
+    }
+    let bad = |text: &str| Err(ContractError::InvalidEnvelope(text.into()));
+    if chain.steps.len() < 2 || chain.steps.len() > MAX_CHAIN_STEPS {
+        return bad("A chain has 2 to 4 steps");
+    }
+    let has_archive = chain
+        .steps
+        .iter()
+        .any(|step| matches!(step, Intent::ArchiveCreate(_)));
+    let has_delete = chain
+        .steps
+        .iter()
+        .any(|step| matches!(step, Intent::ItemsDelete(_)));
+    if has_delete && (!user_asked_to_delete(user_text) || drive_path_count(user_text) > 1) {
+        return bad("A delete needs an explicit request and a single path");
+    }
+    // Review R2: a chain that deletes works on ONE typed file, so it must start by opening it.
+    if has_delete && !matches!(chain.steps.first(), Some(Intent::PaneNavigate(_))) {
+        return bad("A delete chain starts with the typed file");
+    }
+    let mut last_rank = 0u8;
+    let mut pane: Option<SourcePane> = None;
+    for (index, step) in chain.steps.iter().enumerate() {
+        // Re-validate the step exactly like a single intent.
+        let envelope = serde_json::to_value(IntentEnvelope {
+            schema_version: 1,
+            request_id: chain.request_id.clone(),
+            intent: step.clone(),
+        })
+        .map_err(|error| ContractError::InvalidEnvelope(error.to_string()))?;
+        parse_intent_offered(envelope, active_request_id, offered)?;
+        let (rank, step_pane) = match step {
+            Intent::PaneNavigate(navigate) => {
+                if !path_typed_by_user(&navigate.path, user_text) {
+                    return bad("Navigation path was not typed in the request");
+                }
+                (1u8, navigate.pane)
+            }
+            Intent::ArchiveCreate(archive) => (2, archive.source_pane),
+            Intent::ItemsDelete(delete) => {
+                if has_archive
+                    && !chain.steps.iter().any(|other| {
+                        matches!(other, Intent::ArchiveCreate(a) if matches!(a.selector, Selector::Selected(_)))
+                    })
+                {
+                    return bad("Archive-then-delete must archive the pane selection");
+                }
+                (3, delete.source_pane)
+            }
+            _ => return bad("Capability not allowed in a chain"),
+        };
+        if rank <= last_rank || (rank == 1 && index != 0) {
+            return bad("Chain steps are out of order");
+        }
+        last_rank = rank;
+        if *pane.get_or_insert(step_pane) != step_pane {
+            return bad("A chain works on one pane");
+        }
+    }
+    Ok(chain)
+}
+
 #[cfg(test)]
 #[path = "contract_activity_tests.rs"]
 mod activity_query_tests;
@@ -1181,3 +1466,7 @@ mod ipc_gate_tests;
 #[cfg(test)]
 #[path = "contract_archive_tests.rs"]
 mod archive_tests;
+
+#[cfg(test)]
+#[path = "contract_chain_tests.rs"]
+mod chain_tests;
