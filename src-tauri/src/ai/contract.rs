@@ -358,6 +358,13 @@ pub struct ArchiveCreate {
     pub source_pane: SourcePane,
     pub selector: Selector,
     pub format: ArchiveFormat,
+    /// FER-576: optional compression level; absent = the engine default (normal).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_optional_archive_level"
+    )]
+    pub level: Option<ArchiveLevel>,
     pub target: ArchiveTarget,
     #[serde(
         default,
@@ -453,6 +460,21 @@ pub enum EntryScope {
 #[serde(rename_all = "camelCase")]
 pub enum ArchiveFormat {
     Zip,
+    /// FER-576: 7z (LZMA2) through the same Pack service as the manual 7Z dialog.
+    #[serde(rename = "7z")]
+    Sevenz,
+}
+
+/// FER-576: closed set of compression levels the model may name. `maximum` and `ultra` both map to
+/// the engine's strongest level; the model never sees or sets engine flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArchiveLevel {
+    Store,
+    Fast,
+    Normal,
+    Maximum,
+    Ultra,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,6 +1095,12 @@ fn non_null_optional_priority<'de, D: serde::Deserializer<'de>>(
     CopyPriorityChoice::deserialize(deserializer).map(Some)
 }
 
+fn non_null_optional_archive_level<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ArchiveLevel>, D::Error> {
+    ArchiveLevel::deserialize(deserializer).map(Some)
+}
+
 fn non_null_optional_scope<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<DiskUsageScope>, D::Error> {
@@ -1149,3 +1177,7 @@ mod rar_boundary_tests;
 #[cfg(test)]
 #[path = "contract_ipc_gate_tests.rs"]
 mod ipc_gate_tests;
+
+#[cfg(test)]
+#[path = "contract_archive_tests.rs"]
+mod archive_tests;

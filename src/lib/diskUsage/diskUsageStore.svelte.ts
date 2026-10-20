@@ -332,6 +332,28 @@ export class DiskUsageStore {
     return true;
   }
 
+  /** FER-574: the entry folder differs from the root of the result on screen.
+   *  Drop that result and go back to the fresh-entry state (idle, `root` as
+   *  the suggestion) so the caller can offer its cache — exactly the state a
+   *  first entry starts from. Never touches a RUNNING scan (Cancel is the
+   *  only action then; only the suggestion changes). Returns true when the
+   *  result was dropped. */
+  retarget(root: string): boolean {
+    const target = root.trim();
+    if (!target) return false;
+    this.rootInput = target;
+    if (this.scanRunning || this.phase === 'idle') return false;
+    if (normalizePath(this.root) === normalizePath(target)) return false;
+    this.startSeq++; // a pending cache open / start for the old root is void
+    if (this.scanId) void diskUsageCancel(this.scanId);
+    this.scanId = null;
+    this.awaitingStart = false;
+    this.earlyEvents = [];
+    this.beginResult('');
+    this.phase = 'idle';
+    return true;
+  }
+
   /** "Hapus cache": drop this root's file from disk. The result on screen
    *  stays (it is only memory) but is no longer labelled as cached. */
   async deleteCache(): Promise<void> {

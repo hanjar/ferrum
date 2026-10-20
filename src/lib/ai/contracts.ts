@@ -21,12 +21,19 @@ export interface EntitySelector {
   entityId: string;
 }
 export type ArchiveSelector = Selector | EntitySelector;
+/** FER-576: formats the model may ask `archive.create` for. RAR is never creatable from chat. */
+export const ARCHIVE_INTENT_FORMATS = ['zip', '7z'] as const;
+export type ArchiveIntentFormat = (typeof ARCHIVE_INTENT_FORMATS)[number];
+/** FER-576: closed set of compression levels; `maximum` and `ultra` both map to the engine's strongest. */
+export const ARCHIVE_INTENT_LEVELS = ['store', 'fast', 'normal', 'maximum', 'ultra'] as const;
+export type ArchiveIntentLevel = (typeof ARCHIVE_INTENT_LEVELS)[number];
 export type ProposedIntent =
   | {
       capability: 'archive.create';
       sourcePane: PaneRef;
       selector: ArchiveSelector;
-      format: 'zip';
+      format: ArchiveIntentFormat;
+      level?: ArchiveIntentLevel;
       target: { kind: 'sourceDirectory' } | { kind: 'pane'; pane: PaneRef };
       outputName?: string;
     }
@@ -443,6 +450,7 @@ export function parseIntent(
       'sourcePane',
       'selector',
       'format',
+      'level',
       'target',
       'outputName',
       'leftPane',
@@ -454,12 +462,20 @@ export function parseIntent(
   if (intent.capability === 'archive.create') {
     obj(
       intent,
-      ['capability', 'sourcePane', 'selector', 'format', 'target', 'outputName'],
+      ['capability', 'sourcePane', 'selector', 'format', 'level', 'target', 'outputName'],
       ['capability', 'sourcePane', 'selector', 'format', 'target'],
     );
     paneRef(intent.sourcePane);
     selector(intent.selector, options.allowEntitySelector === true);
-    literal(intent.format, 'zip');
+    if (!ARCHIVE_INTENT_FORMATS.includes(intent.format as ArchiveIntentFormat)) {
+      fail('invalid_payload', 'Archive format must be zip or 7z');
+    }
+    if (
+      intent.level !== undefined &&
+      !ARCHIVE_INTENT_LEVELS.includes(intent.level as ArchiveIntentLevel)
+    ) {
+      fail('invalid_payload', 'Archive level is not allowed');
+    }
     target(intent.target);
     if (intent.outputName !== undefined && !isSafeOutputName(intent.outputName)) {
       fail('invalid_payload', 'Output name must be safe basename');

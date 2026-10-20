@@ -1,14 +1,21 @@
 // AI-02 / FER-179: `archive.create` adapter. Resolution is the context lane's
 // (ContextFlow); the work itself is the SAME Pack service the manual dialog uses
 // (`runPack` -> existing `archive_create`). No ZIP engine lives here.
-import type { IntentEnvelope } from '../contracts';
+import type { ArchiveIntentFormat, ArchiveIntentLevel, IntentEnvelope } from '../contracts';
 import type { CheckResult, ContextService, PaneName } from '../context';
 import type { ContextFlow } from '../contextFlow';
 import type { ScopeOk, ScopeResolver } from '../contextResolver';
 import type { TargetOk } from '../contextTarget';
 import { parseActivityLocation, type ActivityLocation } from '../activityQuery';
 import { FsError } from '../../ipc/types';
-import { measurePack, packFailureCause, runPack, type PackMeasure } from '../../packService';
+import type { ArchiveCompressionLevel } from '../../ipc/archive';
+import {
+  measurePack,
+  packFailureCause,
+  runPack,
+  type PackFormat,
+  type PackMeasure,
+} from '../../packService';
 import { SelectionHandleStore, type SelectionHandle } from '../commandsSelection';
 import {
   err,
@@ -68,19 +75,22 @@ function formatBytes(bytes: number): string {
 }
 
 /** Preview facts derived from the size walk; the card shows `0` as "size unknown". */
-function measureFacts(m: PackMeasure | undefined): { totalBytes: number; warnings: string[] } {
+function measureFacts(
+  m: PackMeasure | undefined,
+  label: string,
+): { totalBytes: number; warnings: string[] } {
   if (!m) return { totalBytes: 0, warnings: [] };
   const warnings: string[] = [];
   if (m.unreadable.length > 0) {
     const first = baseName(m.unreadable[0]);
     const more = m.unreadable.length > 1 ? ` dan ${m.unreadable.length - 1} lainnya` : '';
     warnings.push(
-      `${first}${more} tidak dapat dibaca; ZIP akan gagal tanpa menulis apa pun bila item itu tetap tidak terbaca.`,
+      `${first}${more} tidak dapat dibaca; ${label} akan gagal tanpa menulis apa pun bila item itu tetap tidak terbaca.`,
     );
   }
   if (m.freeBytes !== undefined && m.bytes > m.freeBytes) {
     warnings.push(
-      `Ruang kosong di drive tujuan (${formatBytes(m.freeBytes)}) lebih kecil dari ukuran sumber (${formatBytes(m.bytes)}); ZIP bisa gagal karena disk penuh.`,
+      `Ruang kosong di drive tujuan (${formatBytes(m.freeBytes)}) lebih kecil dari ukuran sumber (${formatBytes(m.bytes)}); ${label} bisa gagal karena disk penuh.`,
     );
   }
   return { totalBytes: m.complete ? m.bytes : 0, warnings };
@@ -112,8 +122,30 @@ export function engineCause(error: FsError): string {
   return error.code;
 }
 
+/** FER-576: the model's format name -> the Pack service's. */
+export function packFormatOf(format: ArchiveIntentFormat): PackFormat {
+  return format === '7z' ? 'sevenz' : 'zip';
+}
+
+/** FER-576: chat level names -> engine levels. `maximum` and `ultra` are both the engine's strongest. */
+export function packLevelOf(
+  level: ArchiveIntentLevel | undefined,
+): ArchiveCompressionLevel | undefined {
+  switch (level) {
+    case undefined:
+      return undefined;
+    case 'maximum':
+    case 'ultra':
+      return 'max';
+    default:
+      return level;
+  }
+}
+
 /** Frozen, adapter-private state of one prepared archive. */
 export interface ArchiveState {
+  format: ArchiveIntentFormat;
+  level?: ArchiveIntentLevel;
   scope: ScopeOk;
   target: TargetOk;
   /** Frozen manifest (FER-182); live selection changes cannot alter it. */
@@ -167,18 +199,23 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
       }
       if (!flow.ok) return err('resolve_failed', flow.error.message, flow.error.code);
       const { scope, target } = flow;
+      const intent = envelope.intent;
+      const format: ArchiveIntentFormat =
+        intent.capability === 'archive.create' ? intent.format : 'zip';
+      const level = intent.capability === 'archive.create' ? intent.level : undefined;
+      const label = format === '7z' ? '7z' : 'ZIP';
       const selection = selections.create(scope, deps.resolver.entries(scope.handle));
       const paths = selection.paths();
       // Read-only: the occupied-space walk never writes. A failed estimate only means "size unknown".
       const measured = await (deps.measure ?? measurePack)(paths, target.targetDirectory).catch(
         () => undefined,
       );
-      const facts = measureFacts(measured);
+      const facts = measureFacts(measured, label);
       const warnings = [...target.warnings, ...facts.warnings];
       if (paths.some((p) => isInside(target.outputPath, p))) {
         // The engine drops its own output from the input (FER-205); say so instead of surprising the user.
         warnings.push(
-          `${target.finalName} disimpan di dalam folder yang diarsipkan; ZIP itu sendiri tidak ikut dimasukkan.`,
+          `${target.finalName} disimpan di dalam folder yang diarsipkan; ${label} itu sendiri tidak ikut dimasukkan.`,
         );
       }
       return ok({
@@ -199,12 +236,14 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
         digestParts: [
           scope.handle,
           target.outputPath,
+          format,
+          level ?? '',
           String(scope.contextRevision),
           String(scope.selectionRevision),
           selection.digest,
           ...paths,
         ],
-        state: { scope, target, selection },
+        state: { format, level, scope, target, selection },
       });
     },
 
@@ -212,7 +251,7 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
       prepared: AdapterPrepared<ArchiveState>,
       ctx: ResolvedContext,
     ): Promise<Result<AdapterRun>> {
-      const { scope, target, selection } = prepared.state;
+      const { format, level, scope, target, selection } = prepared.state;
       const stale = revalidate(ctx, prepared.state);
       if (!stale.ok) {
         return err(
@@ -235,8 +274,9 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
         result = await runPack({
           paths: selection.paths(),
           target: target.outputPath,
-          format: 'zip',
+          format: packFormatOf(format),
           conflict: 'skip',
+          level: packLevelOf(level),
         });
       } catch (error) {
         if (error instanceof FsError && error.code === 'alreadyExists') {

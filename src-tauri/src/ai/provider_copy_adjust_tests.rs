@@ -113,3 +113,18 @@ fn the_control_capability_is_withdrawn_while_no_copy_job_runs() {
         "nothing offered: no provider call"
     );
 }
+
+#[test]
+fn archive_prompt_offers_7z_levels_and_still_forbids_rar_and_paths() {
+    let prompt = system_prompt(&[ARCHIVE]);
+    for needle in [
+        "\"format\":\"zip\"|\"7z\"",
+        "\"level\":optional \"store\"|\"fast\"|\"normal\"|\"maximum\"|\"ultra\"",
+        "\"paling kecil\"",
+        "-> \"ultra\"",
+        "RAR and other formats are not available",
+        "Never name a path or file in the intent",
+    ] {
+        assert!(prompt.contains(needle), "{needle}");
+    }
+}

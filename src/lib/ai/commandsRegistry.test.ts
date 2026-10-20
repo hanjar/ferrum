@@ -178,7 +178,8 @@ describe('intent schemas stay in lockstep with parseIntent', () => {
 
   it('archive schema lists exactly the contract enums', () => {
     const p = INTENT_SCHEMAS['archive.create'].properties as Record<string, { enum?: string[] }>;
-    expect(p.format).toEqual({ enum: ['zip'] });
+    expect(p.format).toEqual({ enum: ['zip', '7z'] });
+    expect(p.level).toEqual({ enum: ['store', 'fast', 'normal', 'maximum', 'ultra'] });
     expect(p.sourcePane!.enum).toEqual(['left', 'right', 'activeAtSubmit']);
   });
 });

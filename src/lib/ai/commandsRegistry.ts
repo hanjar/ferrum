@@ -78,7 +78,8 @@ export const INTENT_SCHEMAS: Record<MutatingCapabilityId, IntentSchema> = {
           },
         ],
       },
-      format: { enum: ['zip'] },
+      format: { enum: ['zip', '7z'] },
+      level: { enum: ['store', 'fast', 'normal', 'maximum', 'ultra'] },
       target: {
         oneOf: [
           {
@@ -112,6 +113,14 @@ export const INTENT_SCHEMAS: Record<MutatingCapabilityId, IntentSchema> = {
         format: 'zip',
         target: { kind: 'pane', pane: 'right' },
         outputName: 'invoice-september.zip',
+      },
+      {
+        capability: 'archive.create',
+        sourcePane: 'activeAtSubmit',
+        selector: { kind: 'selected' },
+        format: '7z',
+        level: 'ultra',
+        target: { kind: 'sourceDirectory' },
       },
     ],
   },

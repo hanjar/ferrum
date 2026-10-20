@@ -589,6 +589,13 @@ function injectTauriMock(page: Page) {
             },
           ]);
         }
+        if (cmd === 'path_resolve') {
+          const { input } = args as { input: string };
+          return Promise.resolve({ path: input.replace(/\$/, ''), kind: 'dir' });
+        }
+        if (cmd === 'path_suggest') {
+          return Promise.resolve({ items: [], truncated: false, timedOut: false });
+        }
         if (cmd === 'list_drives') {
           return Promise.resolve([
             { label: 'Data', path: 'D:\\', freeBytes: 1e9, totalBytes: 5e11 },
@@ -909,6 +916,49 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
     await expect(counts()).toHaveText(`${EXPECTED_FILES} files · ${EXPECTED_DIRS} folders`);
     const startsAfter = await startsLog();
     expect(startsAfter.length).toBe(starts.length); // no new scan anywhere
+  });
+
+  const RIGHT_FOLDER = 'E:\\work';
+  test('FER-574 entering from the RIGHT pane uses its folder, not the left pane result', async () => {
+    // Left pane: scan its own folder (no typed root) and finish.
+    await page.locator('[data-pane="0"] button[title="Disk usage (Alt+Shift+D)"]').click();
+    await expect(workspace()).toBeVisible();
+    const leftRoot = await rootInput().inputValue();
+    await workspace().getByRole('button', { name: 'Scan', exact: true }).click();
+    await expect(chip()).toHaveText('Complete', { timeout: 5_000 });
+    const starts = await startsLog();
+    expect(starts.length).toBe(1);
+    await workspace()
+      .getByRole('button', { name: /Exit ke Files/ })
+      .click();
+    await expect(workspace()).toBeHidden();
+
+    // Right pane: move it to its own folder (the fixture scan root is D:\,
+    // so avoid a pane already sitting there), then enter from it.
+    const rightPane = page.locator('[data-pane="1"]');
+    await rightPane.getByLabel('Edit path').click();
+    const addr = rightPane.getByRole('combobox', { name: 'Address' });
+    await addr.fill(RIGHT_FOLDER);
+    await addr.press('Enter');
+    await expect(rightPane.getByRole('navigation', { name: 'Path' })).toContainText('work');
+    await page.locator('[data-pane="1"] button[title="Disk usage (Alt+Shift+D)"]').click();
+    await expect(workspace()).toBeVisible();
+    const rightRoot = await rootInput().inputValue();
+    expect(rightRoot).toBe(RIGHT_FOLDER);
+    expect(rightRoot).not.toBe(leftRoot);
+    // The left result is gone; no scan was started on its own.
+    await expect(chip()).toHaveText('Idle — belum ada scan');
+    expect((await startsLog()).length).toBe(1);
+
+    // Scan the right folder, exit, re-enter from the right pane: kept, no rescan.
+    await workspace().getByRole('button', { name: 'Scan', exact: true }).click();
+    await expect(chip()).toHaveText('Complete', { timeout: 5_000 });
+    await workspace()
+      .getByRole('button', { name: /Exit ke Files/ })
+      .click();
+    await page.locator('[data-pane="1"] button[title="Disk usage (Alt+Shift+D)"]').click();
+    await expect(chip()).toHaveText('Complete');
+    expect((await startsLog()).length).toBe(2);
   });
 
   test('Reveal leaves the workspace and selects the file in the entry pane', async () => {
