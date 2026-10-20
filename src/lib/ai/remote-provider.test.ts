@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import hintCases from '../../../contract-fixtures/ai/hint-cases.json';
 import { ContractError } from './contracts';
+import { parseHint } from './provider';
 import type { ProviderPlanRequest } from './provider';
 import {
   RemoteIntentProvider,
   RemoteProviderError,
+  backendErrorDetail,
+  sanitizeProviderDetail,
   type BackendIntentTransport,
 } from './remote-provider';
 
@@ -285,5 +289,76 @@ describe('capability offering', () => {
       });
     }
     expect(transport).not.toHaveBeenCalled();
+  });
+});
+
+describe('FER-573: provider message summary and UI hint', () => {
+  it('carries only the sanitized detail string next to a known kind', async () => {
+    const transport: BackendIntentTransport = vi.fn(async () => {
+      throw {
+        kind: 'model_unavailable',
+        attempts: 1,
+        detail: 'Requested entity was not found. key sk-abcdef0123456789 \u001b[31mred\u001b[0m',
+        headers: { authorization: 'Bearer x' },
+      };
+    });
+    const error = await read(new RemoteIntentProvider(config, transport)).catch((e) => e);
+    expect(error.code).toBe('model_unavailable');
+    expect(error.detail).toContain('Requested entity was not found.');
+    expect(error.detail).not.toContain('sk-abcdef');
+    expect(error.detail).not.toContain('\u001b');
+    expect(error.message).toBe('Provider request failed');
+  });
+
+  it('bounds the detail, hides token-like runs and drops non-strings and unknown kinds', () => {
+    expect(sanitizeProviderDetail('word '.repeat(300))?.length).toBe(300);
+    expect(sanitizeProviderDetail('id ' + 'Ab1'.repeat(20) + ' ok')).toBe('id [redacted] ok');
+    expect(sanitizeProviderDetail('Bearer abc.def.ghi failed')).toBe('Bearer [redacted] failed');
+    expect(sanitizeProviderDetail('  \n\t ')).toBeUndefined();
+    expect(sanitizeProviderDetail({ message: 'x' })).toBeUndefined();
+    expect(backendErrorDetail(new Error('boom'))).toBeUndefined();
+    expect(backendErrorDetail({ kind: 'auth', detail: 42 })).toBeUndefined();
+  });
+
+  it('removes bidi/format characters so they cannot reorder the text', () => {
+    const out = sanitizeProviderDetail('\u202Etxt.exe \u2066x\u2069 \u200B\u200F\u061C\uFEFFok');
+    expect(out).toBe('txt.exe x ok');
+    expect(/[\p{Cf}\p{Cc}]/u.test(out ?? '')).toBe(false);
+  });
+
+  it('never attaches a detail to an unknown kind', async () => {
+    const transport: BackendIntentTransport = vi.fn(async () => {
+      throw { kind: 'shell_exec', detail: 'rm -rf' };
+    });
+    const error = await read(new RemoteIntentProvider(config, transport)).catch((e) => e);
+    expect(error.code).toBe('backend_failure');
+    expect(error.detail).toBeUndefined();
+  });
+
+  const hintRequest = (capabilities: string[]) => ({ ...request(), capabilities });
+  const hint = { kind: 'hint', hint: 'openDiskUsage' };
+
+  it('accepts the exact hint only when ui.hint is offered and diskUsage.query is not', async () => {
+    const transport: BackendIntentTransport = vi.fn(async () => hint);
+    expect(
+      await read(
+        new RemoteIntentProvider(config, transport),
+        hintRequest(['archive.create', 'ui.hint']),
+      ),
+    ).toEqual([{ kind: 'hint', hint: 'openDiskUsage' }]);
+    for (const offered of [['archive.create'], ['archive.create', 'ui.hint', 'diskUsage.query']]) {
+      await expect(
+        read(new RemoteIntentProvider(config, transport), hintRequest(offered)),
+      ).rejects.toBeInstanceOf(ContractError);
+    }
+  });
+
+  it('shared hint cases: accepted exactly when Rust accepts them', () => {
+    expect(hintCases.length).toBeGreaterThanOrEqual(10);
+    for (const c of hintCases) {
+      const run = () => parseHint(c.value, c.offered);
+      if (c.valid) expect(run(), c.name).toBe('openDiskUsage');
+      else expect(run, c.name).toThrow(ContractError);
+    }
   });
 });

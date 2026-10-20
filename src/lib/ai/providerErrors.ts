@@ -2,7 +2,11 @@
 // mengirim kode aman (ProviderErrorKind); pemetaan pesan ada di sini. Tidak pernah memuat key,
 // isi respons mentah, atau stack trace; endpoint hanya host:port.
 import { ContractError } from './contracts';
-import { RemoteProviderError, type RemoteProviderErrorCode } from './remote-provider';
+import {
+  RemoteProviderError,
+  sanitizeProviderDetail,
+  type RemoteProviderErrorCode,
+} from './remote-provider';
 
 export type ProviderUiCode =
   | 'unreachable'
@@ -25,6 +29,11 @@ export interface ProviderErrorView {
   code: ProviderUiCode;
   message: string;
   actions: readonly ProviderAction[];
+  /**
+   * FER-573: "Provider said: ..." (sanitized summary of the provider's own message, plus the model).
+   * Display only, as text; never used for logic. Absent when the provider sent no usable message.
+   */
+  detail?: string;
 }
 
 /** Capability yang BISA dilakukan sekarang (id -> kalimat singkat). Id lain diabaikan. */
@@ -92,6 +101,17 @@ export interface DescribeOptions {
   hostPort?: string;
   /** Id capability yang ditawarkan sekarang (untuk `not_supported`). */
   capabilities?: readonly string[];
+  /** FER-573: ringkasan pesan asli provider (sudah disanitasi backend) dan nama model. */
+  detail?: string;
+  model?: string;
+}
+
+/** FER-573: one display line, e.g. "Provider said: 404 Requested entity was not found (model ag/x)". */
+export function providerSaid(detail: string | undefined, model?: string): string | undefined {
+  const text = sanitizeProviderDetail(detail);
+  if (!text) return undefined;
+  const modelName = model && /^[A-Za-z0-9._:/-]{1,128}$/.test(model) ? model : undefined;
+  return `Provider said: ${text}${modelName ? ` (model ${modelName})` : ''}`;
 }
 
 const SUFFIX = 'Tidak ada yang dijalankan.';
@@ -100,6 +120,12 @@ export function describeProviderError(
   code: ProviderUiCode,
   options: DescribeOptions = {},
 ): ProviderErrorView {
+  const view = describeBase(code, options);
+  const said = providerSaid(options.detail, options.model);
+  return said ? { ...view, detail: said } : view;
+}
+
+function describeBase(code: ProviderUiCode, options: DescribeOptions): ProviderErrorView {
   const at = options.hostPort ? ` (${options.hostPort})` : '';
   switch (code) {
     case 'unreachable':

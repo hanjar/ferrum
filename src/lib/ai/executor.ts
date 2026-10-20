@@ -98,6 +98,7 @@ import {
   ACTIVITY_QUERY_CAPABILITY,
   DISK_USAGE_QUERY_CAPABILITY,
   PANE_NAVIGATE_CAPABILITY,
+  UI_HINT_CAPABILITY,
   isSafeNavigatePath,
   type ChainEnvelope,
   type PaneRef,
@@ -241,6 +242,8 @@ export interface ExecutorDeps {
   ) => Promise<{ ok: boolean; message: string }>;
   /** FER-465: endpoint provider (hanya host:port yang dipakai di pesan galat). */
   providerEndpoint?: () => string | undefined;
+  /** FER-573: model yang dipakai (nama model bukan rahasia); hanya untuk ringkasan galat. */
+  providerModel?: () => string | undefined;
   /** FER-465: dipanggil dengan kode aman saat provider gagal (mis. untuk indikator status header). */
   onProviderFailure?: (code: ProviderUiCode, kind: string) => void;
 }
@@ -328,6 +331,11 @@ interface ChainState {
   note?: string;
 }
 
+/** FER-573: fixed text (never model text) shown when a size question arrives while Disk Usage is closed. */
+export const DISK_USAGE_HINT_TEXT =
+  'Ukuran file dan folder dihitung lewat Disk Usage. Buka Disk Usage (Alt+Shift+D) di panel itu, lalu tanya lagi.';
+export const DISK_USAGE_ALREADY_OPEN_TEXT =
+  'Disk Usage sudah terbuka. Tanyakan lagi tentang ukurannya.';
 const FOLLOWUP_PROVIDER_ERROR =
   'Provider tidak dapat memproses perubahan; rencana sebelumnya tidak berlaku lagi. Ulangi perubahan atau ketik "batal".';
 const RUNNING_MESSAGE =
@@ -775,8 +783,15 @@ export class AiExecutor implements ChatExecutor {
       this.deps.navigate && safeNavigateAvailable(this.deps.navigate)
         ? [PANE_NAVIGATE_CAPABILITY]
         : [];
-    return read.length || control.length || indexer.length || diskUsage.length || nav.length
-      ? [...base, ...read, ...control, ...indexer, ...diskUsage, ...nav]
+    // FER-573: while Disk Usage is NOT open the model may only point the user to it (never read sizes).
+    const hint = duPort && !safeDiskUsageAvailable(duPort) ? [UI_HINT_CAPABILITY] : [];
+    return read.length ||
+      control.length ||
+      indexer.length ||
+      diskUsage.length ||
+      nav.length ||
+      hint.length
+      ? [...base, ...read, ...control, ...indexer, ...diskUsage, ...nav, ...hint]
       : base;
   }
 
@@ -1106,6 +1121,10 @@ export class AiExecutor implements ChatExecutor {
       await this.answerDiskUsage(run, epoch, event.query);
       return;
     }
+    if (event.kind === 'hint') {
+      this.showHint(run, epoch);
+      return;
+    }
     if (event.kind === 'copyAdjust') {
       await this.proposeCopyAdjust(run, epoch, event.request);
       return;
@@ -1280,6 +1299,7 @@ export class AiExecutor implements ChatExecutor {
       event.kind === 'indexerStatus' ||
       event.kind === 'indexerSetMode' ||
       event.kind === 'diskUsageQuery' ||
+      event.kind === 'hint' ||
       event.kind === 'paneNavigate' ||
       event.kind === 'chain'
     ) {
@@ -2046,12 +2066,33 @@ export class AiExecutor implements ChatExecutor {
     }
   }
 
+  /**
+   * FER-573: the model said it cannot read sizes. Fail closed: the fixed text + button appear only
+   * when `ui.hint` is offered now AND Disk Usage is still not open; otherwise the reply is invalid.
+   * The text is written here, never taken from the model.
+   */
+  private showHint(run: Run, epoch: number): void {
+    const duPort = this.deps.diskUsage;
+    // Race: Disk Usage was opened after the question was sent. Say so calmly; no button, no error.
+    if (duPort && safeDiskUsageAvailable(duPort)) {
+      this.emit(run, 'needsInput', { modelText: DISK_USAGE_ALREADY_OPEN_TEXT });
+      return;
+    }
+    if (!duPort || !this.offered().includes(UI_HINT_CAPABILITY)) {
+      this.failProvider(run, epoch, new RemoteProviderError('malformed', 'Unexpected hint'));
+      return;
+    }
+    this.emit(run, 'needsInput', { modelText: DISK_USAGE_HINT_TEXT, uiHint: 'openDiskUsage' });
+  }
+
   /** FER-465: galat provider -> kode aman + pesan Indonesia + tombol aksi (tanpa isi respons mentah). */
   private providerView(error: unknown): ProviderErrorView {
     const code = classifyProviderFailure(error);
     const view = describeProviderError(code, {
       hostPort: endpointHostPort(this.deps.providerEndpoint?.()),
       capabilities: this.offered(),
+      detail: error instanceof RemoteProviderError ? error.detail : undefined,
+      model: this.deps.providerModel?.(),
     });
     const raw = error instanceof RemoteProviderError ? error.code : 'backend_failure';
     this.deps.onProviderFailure?.(code, raw);

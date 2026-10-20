@@ -5,7 +5,13 @@ import type { RunState, RunUpdate } from './chatStore.svelte';
 import { ok } from './commands';
 import type { DiskUsageQueryKind, IntentEnvelope, PaneSnapshot } from './contracts';
 import type { DiskUsageActiveScan, DiskUsageQueryPort } from './diskUsageQuery';
-import { AiExecutor, type ExecutorDeps } from './executor';
+import {
+  AiExecutor,
+  DISK_USAGE_ALREADY_OPEN_TEXT,
+  DISK_USAGE_HINT_TEXT,
+  type ExecutorDeps,
+} from './executor';
+import { RemoteProviderError } from './remote-provider';
 import type { ExecutionLedgerPort } from './executorLedger';
 import type { QueuePort } from './executorQueue';
 import type { IntentProvider, ProviderEvent, ProviderPlanRequest } from './provider';
@@ -217,7 +223,12 @@ describe('offer of diskUsage.query', () => {
     t.provider.next = () => ({ kind: 'question', text: 'Apa?' });
     t.submit();
     await vi.waitFor(() => expect(t.provider.requests).toHaveLength(2));
-    expect(t.provider.requests[1].capabilities).toEqual(['archive.create', 'directories.sync']);
+    // FER-573: with Disk Usage closed the model may only point the user to it ('ui.hint').
+    expect(t.provider.requests[1].capabilities).toEqual([
+      'archive.create',
+      'directories.sync',
+      'ui.hint',
+    ]);
   });
 
   it('a throwing availability check fails closed (not offered)', async () => {
@@ -231,6 +242,80 @@ describe('offer of diskUsage.query', () => {
     t.submit();
     await vi.waitFor(() => expect(t.provider.requests).toHaveLength(1));
     expect(t.provider.requests[0].capabilities).not.toContain('diskUsage.query');
+  });
+});
+
+describe('FER-573: size question while Disk Usage is closed', () => {
+  it('ui.hint and diskUsage.query are never offered together', async () => {
+    const t = setup(fakePort());
+    t.submit();
+    await vi.waitFor(() => expect(t.provider.requests).toHaveLength(1));
+    expect(t.provider.requests[0].capabilities).not.toContain('ui.hint');
+    const closed = setup(fakePort({ available: vi.fn(() => false) }));
+    closed.provider.next = () => ({ kind: 'question', text: 'Apa?' });
+    closed.submit();
+    await vi.waitFor(() => expect(closed.provider.requests).toHaveLength(1));
+    expect(closed.provider.requests[0].capabilities).toContain('ui.hint');
+    expect(closed.provider.requests[0].capabilities).not.toContain('diskUsage.query');
+    // Callers without a Disk Usage port never offer it.
+    const none = setup(undefined);
+    none.provider.next = () => ({ kind: 'question', text: 'Apa?' });
+    none.submit();
+    await vi.waitFor(() => expect(none.provider.requests).toHaveLength(1));
+    expect(none.provider.requests[0].capabilities).not.toContain('ui.hint');
+  });
+
+  it('a hint becomes a fixed Indonesian note plus the openDiskUsage action, nothing is planned', async () => {
+    const port = fakePort({ available: vi.fn(() => false) });
+    const t = setup(port);
+    t.provider.next = () => ({ kind: 'hint', hint: 'openDiskUsage' });
+    const runId = t.submit('berapa ukuran size semua folder dan file di panel kanan?');
+    await vi.waitFor(() => expect(t.stateOf(runId)).toBe('needsInput'));
+    const u = t.last(runId);
+    expect(u.uiHint).toBe('openDiskUsage');
+    expect(u.modelText).toBe(DISK_USAGE_HINT_TEXT);
+    expect(u.modelText).toContain('Buka Disk Usage (Alt+Shift+D)');
+    expect(t.facade.prepare).not.toHaveBeenCalled();
+    expect(t.facade.approve).not.toHaveBeenCalled();
+    expect(port.topFiles).not.toHaveBeenCalled();
+    // The provider request carries no pane path or size.
+    expect(JSON.stringify(t.provider.requests[0])).not.toContain('D:');
+  });
+
+  it('a hint that arrives after Disk Usage was opened shows a calm note without a button', async () => {
+    const open = setup(fakePort());
+    open.provider.next = () => ({ kind: 'hint', hint: 'openDiskUsage' });
+    const runId = open.submit();
+    await vi.waitFor(() => expect(open.stateOf(runId)).toBe('needsInput'));
+    expect(open.last(runId).uiHint).toBeUndefined();
+    expect(open.last(runId).modelText).toBe(DISK_USAGE_ALREADY_OPEN_TEXT);
+    expect(open.last(runId).providerError).toBeUndefined();
+  });
+
+  it('fails closed: a hint without a Disk Usage port is an invalid reply', async () => {
+    const noPort = setup(undefined);
+    noPort.provider.next = () => ({ kind: 'hint', hint: 'openDiskUsage' });
+    const id2 = noPort.submit();
+    await vi.waitFor(() => expect(noPort.stateOf(id2)).toBe('failed'));
+  });
+
+  it('shows the provider message and model on a failed run, without the raw error', async () => {
+    const t = setup(undefined, { providerModel: () => 'ag/gemini-4-argon-high' });
+    t.provider.next = () => {
+      throw new RemoteProviderError(
+        'model_unavailable',
+        'Provider request failed',
+        '[antigravity/gemini-4-argon-high] [404]: Requested entity was not found.',
+      );
+    };
+    const runId = t.submit();
+    await vi.waitFor(() => expect(t.stateOf(runId)).toBe('failed'));
+    const view = t.last(runId).providerError!;
+    expect(view.code).toBe('model_not_found');
+    expect(view.detail).toBe(
+      'Provider said: [antigravity/gemini-4-argon-high] [404]: Requested entity was not found. (model ag/gemini-4-argon-high)',
+    );
+    expect(view.message).not.toContain('Requested entity');
   });
 });
 

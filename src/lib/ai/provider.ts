@@ -6,6 +6,7 @@ import {
   INDEXER_STATUS_CAPABILITY,
   ITEMS_DELETE_CAPABILITY,
   PANE_NAVIGATE_CAPABILITY,
+  UI_HINT_CAPABILITY,
   parseChain,
   ContractError,
   parseIntent,
@@ -13,6 +14,7 @@ import {
   type ActivityQuery,
   type ChainEnvelope,
   type PaneRef,
+  type UiHintId,
   type CopyAdjustRequest,
   type DiskUsageQueryKind,
   type IndexerSetModeRequest,
@@ -40,6 +42,8 @@ export interface ProviderPlanRequest {
 export type ProviderEvent =
   | { kind: 'intent'; intent: IntentEnvelope }
   | { kind: 'question'; text: string }
+  /** FER-573: the model cannot answer a size question; the app tells the user to open Disk Usage. */
+  | { kind: 'hint'; hint: UiHintId }
   /** ACT-08: read intent (only when `activity.query` was offered). Answered locally, never planned. */
   | { kind: 'activityQuery'; request: ActivityQuery }
   /** FER-471: tune the running copy job. Never planned; the user confirms on a card first. */
@@ -135,6 +139,28 @@ export function parseModelReply(
   return { kind: 'intent', intent: parseIntent(value, requestId) };
 }
 
+/**
+ * FER-573: `{kind:'hint',hint:'openDiskUsage'}`. Accepted only when the request offered `ui.hint` and
+ * did NOT offer `diskUsage.query` (the two are mutually exclusive); anything else is a bad reply.
+ */
+export function parseHint(
+  value: unknown,
+  offered: readonly string[] | undefined,
+): UiHintId | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.kind !== 'hint') return undefined;
+  if (
+    Object.keys(record).length !== 2 ||
+    record.hint !== 'openDiskUsage' ||
+    !offered?.includes(UI_HINT_CAPABILITY) ||
+    offered.includes(DISK_USAGE_QUERY_CAPABILITY)
+  ) {
+    throw new ContractError('invalid_payload', 'Invalid provider hint');
+  }
+  return 'openDiskUsage';
+}
+
 export interface IntentProvider {
   plan(request: ProviderPlanRequest): AsyncIterable<ProviderEvent>;
 }
@@ -202,6 +228,12 @@ export class FakeIntentProvider implements IntentProvider {
       Object.hasOwn(response, 'kind')
     ) {
       const question = response as Record<string, unknown>;
+      if (question.kind === 'hint') {
+        const hint = parseHint(question, request.capabilities);
+        ensureActive(request.signal);
+        if (hint) yield { kind: 'hint', hint };
+        return;
+      }
       if (
         question.kind !== 'question' ||
         Object.keys(question).length !== 2 ||

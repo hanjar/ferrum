@@ -101,6 +101,8 @@ export interface RunUpdate {
   providerError?: ProviderErrorView;
   /** Pertanyaan klarifikasi / narasi model: ditampilkan terpisah, tidak pernah menentukan status. */
   modelText?: string;
+  /** FER-573: petunjuk UI tetap (tombol "Buka Disk Usage"); id dari daftar putih, bukan teks model. */
+  uiHint?: 'openDiskUsage';
   /** Ringkasan scope yang disusun lokal (mis. "hanya file"); bukan dari model. */
   scopeNote?: string;
   /** Peringatan lokal untuk preview (mis. nama diganti karena bentrok). */
@@ -213,6 +215,7 @@ export interface RunView {
   errorMessage?: string;
   providerError?: ProviderErrorView;
   modelText?: string;
+  uiHint?: 'openDiskUsage';
   scopeNote?: string;
   warnings?: string[];
   approvalSent: boolean;
@@ -926,6 +929,7 @@ export class ChatStore {
       r.canApprove = false;
       r.errorMessage = undefined;
       r.providerError = undefined;
+      r.uiHint = undefined;
     } else if (res.code !== 'no_plan') {
       this.notice(res.message);
       if (res.code !== 'invalid_edit' && res.code !== 'busy') this.draft = '';
@@ -1220,6 +1224,7 @@ export class ChatStore {
     if (u.errorMessage !== undefined) r.errorMessage = u.errorMessage;
     if (u.providerError !== undefined) r.providerError = u.providerError;
     if (u.modelText !== undefined) r.modelText = u.modelText;
+    if (u.uiHint !== undefined) r.uiHint = u.uiHint;
     if (u.scopeNote !== undefined) r.scopeNote = u.scopeNote;
     if (u.warnings) r.warnings = u.warnings;
     if (u.revision !== undefined) r.revision = u.revision;

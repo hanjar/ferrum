@@ -10,6 +10,8 @@
   } from '../../ai/chatStore.svelte';
   import { compareStore } from '../../stores/compareStore.svelte';
   import { aiChatHost } from '../../ai/aiChatHost.svelte';
+  import { getAction, runAction } from '../../actions';
+  import { duWorkspace } from '../../diskUsage/duWorkspace.svelte';
   import { describeConnection } from '../../ai/providerErrors';
   import { providerStatus, type ProviderStatus } from '../../ai/providerStatus.svelte';
   import MarkdownText from './MarkdownText.svelte';
@@ -24,6 +26,13 @@
   const providerActions = $derived(
     (run.providerError?.actions ?? []).filter((a) => a !== 'retry' || run.state === 'failed'),
   );
+  // FER-573: fixed UI hint from the executor (never model text). The button only OPENS Disk Usage
+  // (read-only); once it is open the hint is moot, so the button disappears.
+  const showOpenDiskUsage = $derived(run.uiHint === 'openDiskUsage' && !duWorkspace.open);
+  function openDiskUsage() {
+    const action = getAction('commands.diskUsage');
+    if (action && !duWorkspace.open) runAction(action);
+  }
   const testNote = $derived(
     status.state === 'ok'
       ? 'Koneksi ke server AI berhasil.'
@@ -141,6 +150,14 @@
   {/if}
   {#if run.errorMessage}
     <p class="error" role="alert" data-testid="provider-error-message">{run.errorMessage}</p>
+  {/if}
+  {#if run.providerError?.detail}
+    <p class="muted" data-testid="provider-error-detail">{run.providerError.detail}</p>
+  {/if}
+  {#if showOpenDiskUsage}
+    <div class="actions" data-testid="disk-usage-hint-actions">
+      <button type="button" onclick={openDiskUsage}>Buka Disk Usage (Alt+Shift+D)</button>
+    </div>
   {/if}
   {#if providerActions.length}
     <div class="actions" data-testid="provider-error-actions">

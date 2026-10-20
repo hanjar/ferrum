@@ -15,6 +15,7 @@
   // sama untuk build dev dan exe; form diisi dari sana begitu pemuatan backend selesai.
   import { onDestroy, onMount } from 'svelte';
   import { backendConnectionTransport } from '../../ai/backendBridge';
+  import { providerSaid } from '../../ai/providerErrors';
   import {
     OUTBOUND_DISCLOSURE,
     testConnection,
@@ -68,7 +69,7 @@
   let dirty = $derived(keyFilled || savedSnapshot !== snapshot(form()));
   let canTest = $derived(setupSaved && keyConfigured === true && !dirty && !busy);
 
-  type Note = { tone: 'ok' | 'bad' | 'info'; text: string } | undefined;
+  type Note = { tone: 'ok' | 'bad' | 'info'; text: string; said?: string } | undefined;
   let saveNote = $state<Note>();
   let testNote = $state<Note>();
   let testing = $state(false);
@@ -216,7 +217,12 @@
     else if (result.kind === 'cancelled') testNote = { tone: 'info', text: 'Test cancelled' };
     else {
       const text = TEST_ERRORS[result.kind] ?? SETUP_ERRORS[result.kind] ?? 'Connection failed';
-      testNote = { tone: 'bad', text: `Connection failed: ${text} (${result.kind})` };
+      const said = providerSaid(result.detail, saved.model);
+      testNote = {
+        tone: 'bad',
+        text: `Connection failed: ${text} (${result.kind})`,
+        said,
+      };
     }
   }
 
@@ -340,6 +346,8 @@
         aria-label="Connection status"
       >
         {testNote.text}
+        {#if testNote.said}<span class="said" data-testid="provider-said">{testNote.said}</span
+          >{/if}
       </p>
     {/if}
   </div>
@@ -466,6 +474,11 @@
     gap: 6px;
     padding-top: 10px;
     border-top: 1px solid var(--line2);
+  }
+  p.result .said {
+    display: block;
+    margin-top: 4px;
+    opacity: 0.85;
   }
   p.result {
     padding: 6px 8px;

@@ -236,6 +236,7 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
     queue,
     // FER-465: host:port for the error text; a failed plan also turns the header indicator red.
     providerEndpoint: () => setup?.endpoint,
+    providerModel: () => setup?.model,
     onProviderFailure: (_code, kind) => {
       if (['unreachable', 'network', 'timeout', 'auth', 'server_error'].includes(kind))
         providerStatus.noteFailure(kind as RemoteProviderErrorCode);
