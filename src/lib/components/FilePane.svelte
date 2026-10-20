@@ -27,7 +27,7 @@
   import { activity } from '../stores/activityStore.svelte';
   import { shellOpen } from '../ipc/activity';
   import { handleShellError } from '../ipc/shellOpen';
-  import { openArchiveMemberAt } from '../stores/openArchiveMember';
+  import { archiveMemberOf, openArchiveMemberAt } from '../stores/openArchiveMember';
   import { toast } from '../stores/toastStore.svelte';
   import { formatSize, parentOf } from '../format';
   import { homeDir } from '@tauri-apps/api/path';
@@ -491,18 +491,20 @@
     try {
       // FER-575: a file inside an archive is not a disk path. The backend extracts that member
       // to its temp folder and opens it through the confirmed shell path; no receipt (temp file).
-      const inArchiveResult = await openArchiveMemberAt(path, {
-        passwordFor: archiveFetcher?.passwordFor,
-        rememberPassword: archiveFetcher?.rememberPassword,
-        askPassword: (p, wrong) => dialogs.askArchivePassword(p, wrong),
-        showWorking: (name) => {
-          toast.show(`Membuka ${name} dari arsip…`, 600_000);
-          return () => toast.show('', 0);
-        },
-        onError: (message) =>
-          dialogs.open({ kind: 'error', title: 'Open from archive', message }),
-      });
-      if (inArchiveResult !== 'notMember') return;
+      if (archiveMemberOf(path)) {
+        await openArchiveMemberAt(path, {
+          passwordFor: archiveFetcher?.passwordFor,
+          rememberPassword: archiveFetcher?.rememberPassword,
+          askPassword: (p, wrong) => dialogs.askArchivePassword(p, wrong),
+          showWorking: (name) => {
+            toast.show(`Membuka ${name} dari arsip…`, 600_000);
+            return () => toast.show('', 0);
+          },
+          onError: (message) =>
+            dialogs.open({ kind: 'error', title: 'Open from archive', message }),
+        });
+        return;
+      }
       await shellOpen(path, activity.recordingActive);
     } catch (err) {
       handleShellError('Open', err);

@@ -32,7 +32,7 @@ export type OpenArchiveMemberResult = 'notMember' | 'opened' | 'declined' | 'fai
 export function archiveMemberOf(path: string): { archivePath: string; memberPath: string } | null {
   const loc = splitArchiveLocation(path);
   if (!loc || loc.memberPath === '') return null;
-  const memberPath = loc.memberPath.replace(/\/g, '/').replace(/\/+$/, '');
+  const memberPath = loc.memberPath.replace(/\\/g, '/').replace(/\/+$/, '');
   if (memberPath === '') return null;
   return { archivePath: loc.archivePath, memberPath };
 }

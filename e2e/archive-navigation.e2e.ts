@@ -208,6 +208,34 @@ function injectTauriMock(page: Page) {
           }
           return Promise.resolve({ totalFiles: 3, totalBytes: 2148, conflicts: [] });
         }
+        if (cmd === 'archive_open_member') {
+          // FER-575: a file INSIDE an archive is opened by the backend (extract to temp + shell),
+          // never through shell_open with the virtual path.
+          const a = args as {
+            archivePath: string;
+            memberPath: string;
+            password?: string | null;
+          };
+          (window as unknown as { __archiveInvocations: unknown[] }).__archiveInvocations.push({
+            cmd: 'archive_open_member',
+            request: a,
+          });
+          if (a.archivePath.endsWith('encrypted.zip') && !a.password) {
+            return Promise.reject({
+              code: 'io',
+              archiveCode: 'passwordRequired',
+              message: 'Encrypted member requires a password',
+            });
+          }
+          return Promise.resolve(true);
+        }
+        if (cmd === 'shell_open') {
+          (window as unknown as { __archiveInvocations: unknown[] }).__archiveInvocations.push({
+            cmd: 'shell_open',
+            request: args,
+          });
+          return Promise.resolve(true);
+        }
         if (cmd === 'archive_test') {
           const req = args?.request as { archivePath: string };
           (window as unknown as { __archiveInvocations: unknown[] }).__archiveInvocations.push({
@@ -312,6 +340,42 @@ test.describe('F2-12 archive navigation E2E', () => {
     await expect(docsRow).toBeVisible();
     await expect(docsRow).toContainText('docs');
     await expect(left().locator('.status')).toContainText('read-only');
+  });
+
+  test('FER-575: opening a file inside an archive uses archive_open_member, not shell_open', async () => {
+    await zipRow().dblclick();
+    await left().locator('[data-path$="docs"]').waitFor({ state: 'attached', timeout: 5000 });
+    await left().locator('[data-path$="docs"]').dblclick();
+    const member = left().locator('[data-path*="readme.md"]');
+    await member.waitFor({ state: 'attached', timeout: 5000 });
+    await member.dblclick();
+    await expect.poll(() => countInvocations(page, 'archive_open_member')).toBe(1);
+    const call = (await invocations(page)).find((i) => i.cmd === 'archive_open_member');
+    expect(call?.request['archivePath']).toBe('C:\\fixtures\\sample.zip');
+    expect(call?.request['memberPath']).toBe('docs/readme.md');
+    expect(await countInvocations(page, 'shell_open')).toBe(0);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+  });
+
+  test('FER-575: a plain disk file still goes through shell_open', async () => {
+    await left().locator('[data-path$="other.txt"]').dblclick();
+    await expect.poll(() => countInvocations(page, 'shell_open')).toBe(1);
+    expect(await countInvocations(page, 'archive_open_member')).toBe(0);
+  });
+
+  test('FER-575: an encrypted member asks for the password, then opens with it', async () => {
+    await left().locator('[data-path$="encrypted.zip"]').dblclick();
+    await left().locator('[data-path$="docs"]').waitFor({ state: 'attached', timeout: 5000 });
+    await left().locator('[data-path$="img.png"]').dblclick();
+    const pwDialog = page.getByRole('dialog', { name: 'password' });
+    await expect(pwDialog).toBeVisible();
+    await page.keyboard.type('secret');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => countInvocations(page, 'archive_open_member')).toBe(2);
+    const calls = (await invocations(page)).filter((i) => i.cmd === 'archive_open_member');
+    expect(calls[0]?.request['password'] ?? null).toBeNull();
+    expect(calls[1]?.request['password']).toBe('secret');
+    expect(calls[1]?.request['memberPath']).toBe('img.png');
   });
 
   test('Alt+F5 packs the selection via keyboard (Enter submits)', async () => {
