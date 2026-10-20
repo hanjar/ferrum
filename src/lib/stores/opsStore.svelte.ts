@@ -28,6 +28,9 @@ class OpsStore {
   /** FER-471: live copy-thread state of the jobs that are copying (backend-owned). */
   copyControls = new SvelteMap<OperationId, CopyControlState>();
 
+  /** FER-572: one-shot callbacks fired when a specific operation reaches a terminal state. */
+  private terminalWatchers = new Map<OperationId, (p: OperationProgress) => void>();
+
   private started = false;
   private unlisten: UnlistenFn | null = null;
   private unlistenControl: UnlistenFn | null = null;
@@ -52,6 +55,13 @@ class OpsStore {
       !this.ops.has(p.operationId);
     this.ops.set(p.operationId, p);
     this.rev++;
+    if (p.state === 'completed' || p.state === 'cancelled' || p.state === 'failed') {
+      const watcher = this.terminalWatchers.get(p.operationId);
+      if (watcher) {
+        this.terminalWatchers.delete(p.operationId);
+        watcher(p);
+      }
+    }
     // A finished filesystem operation may have changed what panes show.
     if (
       wasPending &&
@@ -63,6 +73,19 @@ class OpsStore {
         activity.noteFsChange();
       }
     }
+  }
+
+  /** FER-572: run `cb` once when operation `id` completes, fails or is cancelled. */
+  watchTerminal(id: OperationId, cb: (p: OperationProgress) => void): void {
+    const known = this.ops.get(id);
+    if (
+      known &&
+      (known.state === 'completed' || known.state === 'cancelled' || known.state === 'failed')
+    ) {
+      cb(known);
+      return;
+    }
+    this.terminalWatchers.set(id, cb);
   }
 
   /** Idempotent: starts the event subscription and pulls a snapshot. */

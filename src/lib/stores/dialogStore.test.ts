@@ -42,6 +42,33 @@ beforeEach(() => {
   planCopyMock.mockReset();
 });
 
+describe('FER-572 S1: archive detection only for real archive segments', () => {
+  const sources = ['C:\\Downloads\\foo.zip_extracted\\a.txt'];
+  const plan = { totalFiles: 1, totalBytes: 1, conflicts: [] };
+
+  it('a folder merely named like foo.zip_extracted is a normal source and target', async () => {
+    planCopyMock.mockResolvedValue(plan);
+    await dialogs.beginTransferTo('move', sources, 'D:\\backup.zip.old');
+    expect(planCopyMock).toHaveBeenCalledWith(sources, 'D:\\backup.zip.old');
+    expect(dialogs.current?.kind).toBe('move');
+  });
+
+  it('a clipboard paste (fromDisk) never routes disk sources to the archive flow', async () => {
+    planCopyMock.mockResolvedValue(plan);
+    await dialogs.beginTransferTo('copy', ['C:\\x\\real.zip\\odd.txt'], 'D:\\Backup', {
+      fromDisk: true,
+    });
+    expect(planCopyMock).toHaveBeenCalled();
+    expect(dialogs.current?.kind).toBe('copy');
+  });
+
+  it('a real member path inside an archive is still refused as a move source', async () => {
+    await dialogs.beginTransferTo('move', ['C:\\x\\real.zip\\inner.txt'], 'D:\\Backup');
+    expect(planCopyMock).not.toHaveBeenCalled();
+    expect(dialogs.current?.kind).toBe('error');
+  });
+});
+
 describe('beginTransferTo (drop flow, explicit target)', () => {
   it('plans the copy for the explicit target without touching the pane registry', async () => {
     planCopyMock.mockResolvedValue({ totalFiles: 2, totalBytes: 4096, conflicts: [] });

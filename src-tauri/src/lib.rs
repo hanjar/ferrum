@@ -17,6 +17,7 @@ pub mod archive_sevenz;
 pub mod archive_zip;
 pub mod automation;
 pub mod branch_view;
+pub mod clipboard_files;
 pub mod codecs;
 pub mod comments;
 pub mod compare;
@@ -116,6 +117,9 @@ pub fn run() {
             ipc::plan_copy,
             ipc::enqueue_copy,
             ipc::enqueue_move,
+            ipc::clipboard_copy_files,
+            ipc::clipboard_read_files,
+            ipc::clipboard_finish_cut,
             ipc::archive_list,
             ipc::archive_read,
             ipc::archive_extract,

@@ -6,6 +6,7 @@ import Dialogs from './Dialogs.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
 import { ui } from '../uiState.svelte';
 import { prefs } from '../stores/prefsStore.svelte';
+import { ops } from '../stores/opsStore.svelte';
 import { activity } from '../stores/activityStore.svelte';
 
 // FER-368: the archive IPC is mocked so the extractConflicts component flow
@@ -34,6 +35,10 @@ const mutMocks = vi.hoisted(() => ({
   renameEntry: vi.fn().mockRejectedValue(new Error('unsupported')),
 }));
 vi.mock('../ipc/mutations', () => mutMocks);
+
+// FER-572: the file-clipboard IPC (a cut paste empties the clipboard when its move completes).
+const clipMocks = vi.hoisted(() => ({ clipboardFinishCut: vi.fn().mockResolvedValue(true) }));
+vi.mock('../ipc/clipboardFiles', () => clipMocks);
 
 // DSK-06.3: the invalidation module is SPIED (not the real one — its markStale
 // behavior is proven in diskUsage/invalidation.test.ts); here we assert the
@@ -409,6 +414,65 @@ describe('DSK-06.3: completed mutations invalidate a touching scan', () => {
       ['C:\\Projects\\README.md'],
       'D:\\Backup',
     );
+  });
+
+  it('FER-572: a pasted cut empties the clipboard only after the move completed', async () => {
+    render(Dialogs);
+    mutMocks.enqueueMove.mockResolvedValueOnce('op-clip');
+    clipMocks.clipboardFinishCut.mockClear();
+    dialogs.open({
+      kind: 'move',
+      paths: ['E:\\x\\f.txt'],
+      target: 'D:\\Backup',
+      totalFiles: 1,
+      totalBytes: 10,
+      conflicts: [],
+      clipboardSequence: 77,
+    });
+    await tick();
+    fireEvent.click(primaryButton('Move'));
+    await vi.waitFor(() => expect(mutMocks.enqueueMove).toHaveBeenCalled());
+    await vi.waitFor(() => expect(invMocks.recordQueuedMove).toHaveBeenCalled());
+    const progress = (state: 'running' | 'completed' | 'failed') =>
+      ops.applyProgress({
+        operationId: 'op-clip',
+        kind: 'move',
+        state,
+        processedBytes: 0,
+        processedFiles: 0,
+        failures: [],
+      } as never);
+    progress('running');
+    expect(clipMocks.clipboardFinishCut).not.toHaveBeenCalled();
+    progress('completed');
+    expect(clipMocks.clipboardFinishCut).toHaveBeenCalledWith(77);
+  });
+
+  it('FER-572: a failed pasted cut leaves the clipboard alone', async () => {
+    render(Dialogs);
+    mutMocks.enqueueMove.mockResolvedValueOnce('op-clip-fail');
+    clipMocks.clipboardFinishCut.mockClear();
+    dialogs.open({
+      kind: 'move',
+      paths: ['E:\\x\\f.txt'],
+      target: 'D:\\Backup',
+      totalFiles: 1,
+      totalBytes: 10,
+      conflicts: [],
+      clipboardSequence: 78,
+    });
+    await tick();
+    fireEvent.click(primaryButton('Move'));
+    await vi.waitFor(() => expect(invMocks.recordQueuedMove).toHaveBeenCalled());
+    ops.applyProgress({
+      operationId: 'op-clip-fail',
+      kind: 'move',
+      state: 'failed',
+      processedBytes: 0,
+      processedFiles: 0,
+      failures: [],
+    } as never);
+    expect(clipMocks.clipboardFinishCut).not.toHaveBeenCalled();
   });
 });
 

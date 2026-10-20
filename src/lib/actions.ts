@@ -11,6 +11,7 @@ import { activity } from './stores/activityStore.svelte';
 import { previewStore } from './stores/previewStore.svelte';
 import { compareStore } from './stores/compareStore.svelte';
 import { copyText } from './clipboard';
+import { copySelectionToClipboard, pasteFromClipboard } from './stores/fileClipboard';
 import { rootOf } from './format';
 import { toast } from './stores/toastStore.svelte';
 import { folderCopyText, namesText, pathsText, pickCopyEntries, type CopyEntry } from './copyPath';
@@ -104,6 +105,15 @@ export interface Action {
 }
 
 const ctrl = (key: string): Shortcut => ({ key, ctrlOrCmd: true });
+
+/** FER-572: Ctrl+C must still copy highlighted text (preview, status bar) instead of files. */
+function textIsSelected(): boolean {
+  try {
+    return (globalThis.getSelection?.()?.toString() ?? '') !== '';
+  } catch {
+    return false;
+  }
+}
 
 // ── F2-14 Mark helpers ────────────────────────────────────────────────────
 // All selection math runs on pane-reported plain data (visibleEntries), so
@@ -315,6 +325,34 @@ export const actions: Action[] = [
     available: () =>
       (activePane()?.selectedPaths().length ?? 0) > 0 && inactivePane() !== undefined,
     run: () => void dialogs.beginMoveFlow(),
+  },
+  {
+    // FER-572: Windows file clipboard, shared with Explorer. Ctrl+C / Ctrl+X / Ctrl+V.
+    id: 'file.clipCopy',
+    label: 'Copy files to clipboard',
+    group: 'File',
+    shortcut: ctrl('c'),
+    available: () => (activePane()?.selectedPaths().length ?? 0) > 0 && !textIsSelected(),
+    run: () => void copySelectionToClipboard(false),
+    keywords: ['copy', 'salin', 'clipboard', 'explorer'],
+  },
+  {
+    id: 'file.clipCut',
+    label: 'Cut files to clipboard',
+    group: 'File',
+    shortcut: ctrl('x'),
+    available: () => (activePane()?.selectedPaths().length ?? 0) > 0 && !textIsSelected(),
+    run: () => void copySelectionToClipboard(true),
+    keywords: ['cut', 'potong', 'clipboard', 'explorer'],
+  },
+  {
+    id: 'file.clipPaste',
+    label: 'Paste files from clipboard',
+    group: 'File',
+    shortcut: ctrl('v'),
+    available: () => activePane() !== undefined,
+    run: () => void pasteFromClipboard(),
+    keywords: ['paste', 'tempel', 'clipboard', 'explorer'],
   },
   {
     id: 'file.mkdir',
@@ -1317,6 +1355,10 @@ export const menuGroups: {
       'mark.restore',
       'mark.saveFile',
       'mark.loadFile',
+      // FER-572: the Files menu is full (768px rule), so the file clipboard sits beside Copy Names.
+      'file.clipCopy',
+      'file.clipCut',
+      'file.clipPaste',
       'mark.copyNames',
       'mark.copyPaths',
       'mark.copyDetails',

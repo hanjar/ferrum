@@ -28,9 +28,12 @@ const ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z']);
 function archiveRootOf(path: string): string | null {
   const lower = path.toLowerCase();
   for (const ext of ARCHIVE_EXTS) {
-    const idx = lower.lastIndexOf(ext);
-    if (idx >= 0 && idx + ext.length < path.length) {
-      return path.slice(0, idx + ext.length);
+    // The extension must END a path segment (`a.zip\inner`), not `a.zip_extracted\x`.
+    let idx = lower.lastIndexOf(ext);
+    while (idx >= 0) {
+      const next = path[idx + ext.length];
+      if (next === '\\' || next === '/') return path.slice(0, idx + ext.length);
+      idx = idx === 0 ? -1 : lower.lastIndexOf(ext, idx - 1);
     }
   }
   return null;
@@ -159,6 +162,8 @@ export type Dialog =
       totalFiles: number;
       totalBytes: number;
       conflicts: { source: string; dest: string }[];
+      /** FER-572: a move pasted from the Windows clipboard (cut); the clipboard is emptied once it completes. */
+      clipboardSequence?: number;
     }
   /** F2-14: Select/Unselect Group with a live match-count preview. */
   | { kind: 'selectGroup'; unselect: boolean; parent: string }
@@ -575,14 +580,21 @@ class DialogStore {
   /** Drop flow (cross-pane drag): explicit paths and explicit target dir —
    *  no active/inactive pane lookups. planCopy still runs to surface
    *  conflicts (D21) before the confirm dialog opens. */
-  async beginTransferTo(kind: 'copy' | 'move', paths: string[], target: string) {
-    await this.beginTransferFlow(kind, target, paths);
+  async beginTransferTo(
+    kind: 'copy' | 'move',
+    paths: string[],
+    target: string,
+    opts?: { clipboardSequence?: number; fromDisk?: boolean },
+  ) {
+    await this.beginTransferFlow(kind, target, paths, opts?.clipboardSequence, opts?.fromDisk);
   }
 
   private async beginTransferFlow(
     kind: 'copy' | 'move',
     explicitTarget?: string,
     explicitPaths?: string[],
+    clipboardSequence?: number,
+    sourcesOnDisk = false,
   ) {
     const src = activePane();
     const dst = inactivePane();
@@ -594,7 +606,9 @@ class DialogStore {
     }
 
     // Source inside archive → extract members to the target directory.
-    const srcArchiveRoot = paths.length > 0 ? archiveRootOf(paths[0]) : null;
+    // FER-572: sources pasted from the clipboard are proven to exist on disk, so a folder
+    // that merely has ".zip" in its name is not an archive.
+    const srcArchiveRoot = paths.length > 0 && !sourcesOnDisk ? archiveRootOf(paths[0]) : null;
     if (srcArchiveRoot) {
       if (kind === 'move') {
         this.open({
@@ -641,6 +655,7 @@ class DialogStore {
         totalFiles: plan.totalFiles,
         totalBytes: plan.totalBytes,
         conflicts: plan.conflicts,
+        ...(clipboardSequence !== undefined ? { clipboardSequence } : {}),
       });
     } catch (e) {
       this.open({

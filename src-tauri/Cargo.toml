@@ -77,6 +77,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security_Cryptography",
     # Automation P1.3 (OP-1): battery state for the run conditions (GetSystemPowerStatus).
     "Win32_System_Power",
+    # FER-572: file clipboard (CF_HDROP + Preferred DropEffect).
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
 ] }
 # Automation P1.4 (design 9.3): IANA zones and DST resolution. The zone database is BUNDLED
 # (`tzdb-bundle-always`, MIT/Unlicense), so a schedule means the same thing on every machine and in
