@@ -12,6 +12,7 @@ import { dialogs } from './dialogStore.svelte';
 import { registerPane, type PaneApi } from './panesRegistry.svelte';
 import { ui } from '../uiState.svelte';
 import { toast } from './toastStore.svelte';
+import { pasteFromClipboard } from './fileClipboard';
 import { FsError } from '../ipc/types';
 
 function pane(path: string, selected: string[]): PaneApi {
@@ -87,7 +88,7 @@ describe('FER-572 paste', () => {
     ui.activePane = 1;
     runAction(actionForEvent(key('v'))!);
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
-    expect(spy).toHaveBeenCalledWith('copy', ['E:\\x\\f.txt'], 'D:\\other', undefined);
+    expect(spy).toHaveBeenCalledWith('copy', ['E:\\x\\f.txt'], 'D:\\other', { fromDisk: true });
     spy.mockRestore();
   });
 
@@ -101,6 +102,7 @@ describe('FER-572 paste', () => {
     runAction(actionForEvent(key('v'))!);
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
     expect(spy).toHaveBeenCalledWith('move', ['E:\\x\\f.txt'], 'C:\\src', {
+      fromDisk: true,
       clipboardSequence: 9,
     });
     spy.mockRestore();
@@ -114,6 +116,19 @@ describe('FER-572 paste', () => {
     await vi.waitFor(() => expect(show).toHaveBeenCalled());
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  it('a quick second Ctrl+V while the first is in flight is ignored', async () => {
+    let release: (v: null) => void = () => {};
+    ipc.clipboardReadFiles.mockReturnValue(new Promise((r) => (release = r)));
+    const first = pasteFromClipboard();
+    await pasteFromClipboard();
+    expect(ipc.clipboardReadFiles).toHaveBeenCalledTimes(1);
+    release(null);
+    await first;
+    ipc.clipboardReadFiles.mockResolvedValue(null);
+    await pasteFromClipboard(); // the guard is released afterwards
+    expect(ipc.clipboardReadFiles).toHaveBeenCalledTimes(2);
   });
 
   it('a rejected clipboard list opens an error dialog and starts nothing', async () => {

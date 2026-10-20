@@ -29,22 +29,25 @@ export async function copySelectionToClipboard(cut: boolean): Promise<void> {
 }
 
 /** Ctrl+V: paste the clipboard's files into the active pane's folder. */
+let pasting = false;
+
 export async function pasteFromClipboard(): Promise<void> {
   const pane = activePane();
-  if (!pane) return;
+  if (!pane || pasting) return; // a quick second Ctrl+V must not open a second dialog
+  pasting = true;
   try {
     const found = await clipboardReadFiles();
     if (!found || found.paths.length === 0) {
       toast.show('Clipboard tidak berisi file');
       return;
     }
-    await dialogs.beginTransferTo(
-      found.cut ? 'move' : 'copy',
-      found.paths,
-      pane.path,
-      found.cut ? { clipboardSequence: found.sequence } : undefined,
-    );
+    await dialogs.beginTransferTo(found.cut ? 'move' : 'copy', found.paths, pane.path, {
+      fromDisk: true,
+      ...(found.cut ? { clipboardSequence: found.sequence } : {}),
+    });
   } catch (e) {
     fail('Paste', e);
+  } finally {
+    pasting = false;
   }
 }

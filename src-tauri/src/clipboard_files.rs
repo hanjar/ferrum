@@ -38,7 +38,6 @@ pub enum DropFilesError {
     Truncated,
     BadOffset,
     Ansi,
-    Unaligned,
     NotTerminated,
     Empty,
     TooManyItems,
@@ -54,10 +53,9 @@ impl DropFilesError {
             Self::Truncated => "The clipboard file list is truncated",
             Self::BadOffset => "The clipboard file list has an invalid header",
             Self::Ansi => "The clipboard holds an ANSI file list, which is not supported",
-            Self::Unaligned => "The clipboard file list is not valid UTF-16",
             Self::NotTerminated => "The clipboard file list is not terminated",
             Self::Empty => "The clipboard file list is empty",
-            Self::TooManyItems => "The clipboard holds too many files",
+            Self::TooManyItems => "The clipboard holds too many files (the limit is 10,000)",
             Self::PathTooLong => "A path on the clipboard is too long",
             Self::TooMuchText => "The clipboard file list is too large",
             Self::BadText => "A path on the clipboard is not valid text",
@@ -134,10 +132,9 @@ pub fn parse_dropfiles(bytes: &[u8]) -> Result<Vec<String>, DropFilesError> {
     if f_wide == 0 {
         return Err(DropFilesError::Ansi);
     }
+    // A stray odd byte (padding from a sloppy writer) is dropped; the double NUL is still required.
     let body = &bytes[p_files..];
-    if !body.len().is_multiple_of(2) {
-        return Err(DropFilesError::Unaligned);
-    }
+    let body = &body[..body.len() & !1];
     let units: Vec<u16> = body
         .as_chunks::<2>()
         .0
@@ -229,7 +226,8 @@ mod win {
     }
 
     /// Open clipboard; closed on drop on every path.
-    struct Open;
+    /// `!Send` (raw-pointer marker): the clipboard must be closed on the thread that opened it.
+    struct Open(std::marker::PhantomData<*const ()>);
     impl Drop for Open {
         fn drop(&mut self) {
             // SAFETY: only constructed after a successful OpenClipboard on this thread.
@@ -243,7 +241,7 @@ mod win {
         for attempt in 0..OPEN_ATTEMPTS {
             // SAFETY: plain Win32 call; `hwnd` is a window handle (or 0) owned by this process.
             if unsafe { OpenClipboard(hwnd as HWND) } != 0 {
-                return Ok(Open);
+                return Ok(Open(std::marker::PhantomData));
             }
             if attempt + 1 < OPEN_ATTEMPTS {
                 std::thread::sleep(OPEN_PAUSE);
@@ -255,10 +253,17 @@ mod win {
         ))
     }
 
-    fn format_id(name: &str) -> u32 {
+    fn format_id(name: &str) -> Result<u32, FsError> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: `wide` is NUL terminated and outlives the call.
-        unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
+        let id = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+        if id == 0 {
+            return Err(err(
+                ErrorCode::Io,
+                "Could not register the clipboard format",
+            ));
+        }
+        Ok(id)
     }
 
     /// GlobalAlloc + copy. Ownership passes to the clipboard on a successful SetClipboardData.
@@ -331,7 +336,7 @@ mod win {
     pub fn write_files(hwnd: isize, paths: &[String], cut: bool) -> Result<u32, FsError> {
         let drop = encode_dropfiles(paths)?;
         let effect = encode_drop_effect(cut);
-        let effect_fmt = format_id("Preferred DropEffect");
+        let effect_fmt = format_id("Preferred DropEffect")?;
         let _open = open(hwnd)?;
         // SAFETY: clipboard open; EmptyClipboard makes this process the owner of what follows.
         if unsafe { EmptyClipboard() } == 0 {
@@ -352,12 +357,13 @@ mod win {
 
     /// Reads the file list and the drop effect. `Ok(None)` = the clipboard holds no files.
     pub fn read_files(hwnd: isize) -> Result<Option<ClipboardFiles>, FsError> {
-        let effect_fmt = format_id("Preferred DropEffect");
+        let effect_fmt = format_id("Preferred DropEffect")?;
         let _open = open(hwnd)?;
         let Some(block) = get_format(CF_HDROP, MAX_BLOCK_BYTES)? else {
             return Ok(None);
         };
-        let effect = get_format(effect_fmt, 64)?;
+        // A malformed (oversized) effect block only means "copy"; it must not fail the paste.
+        let effect = get_format(effect_fmt, 64).unwrap_or(None);
         // SAFETY: plain query.
         let sequence = unsafe { GetClipboardSequenceNumber() };
         let paths = parse_dropfiles(&block)?;

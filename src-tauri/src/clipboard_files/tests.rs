@@ -116,10 +116,14 @@ fn parser_refuses_missing_terminators() {
 }
 
 #[test]
-fn parser_refuses_odd_length_body() {
+fn parser_drops_a_stray_odd_byte_but_still_needs_the_double_nul() {
     let mut bytes = encode_dropfiles(&[s(r"C:\a")]).unwrap();
     bytes.push(0);
-    assert_eq!(parse_dropfiles(&bytes), Err(DropFilesError::Unaligned));
+    assert_eq!(parse_dropfiles(&bytes).unwrap(), vec![s(r"C:\a")]);
+    // An odd byte cannot stand in for a missing terminator.
+    let mut cut = raw(20, 1, &units(r"C:\a"));
+    cut.push(0);
+    assert_eq!(parse_dropfiles(&cut), Err(DropFilesError::NotTerminated));
 }
 
 #[test]
