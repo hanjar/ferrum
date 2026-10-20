@@ -8,7 +8,10 @@
   } from '../ipc/mutations';
   import { clipboardFinishCut } from '../ipc/clipboardFiles';
   import { ops } from '../stores/opsStore.svelte';
-  import { runPack, type PackFormat } from '../packService';
+  import { untrack } from 'svelte';
+  import { formatLabel, runPack, type PackFormat } from '../packService';
+  import { dialog, roving } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { loadSelectionFile, saveSelectionFile } from '../ipc/selectionFile';
   import { FsError } from '../ipc/types';
   import { isCancelledError } from '../ipc/archiveErrors';
@@ -36,6 +39,13 @@
   import { noteScopeMutation, recordQueuedMove } from '../diskUsage/invalidation';
   import { activity } from '../stores/activityStore.svelte';
 
+  /** Access letters of the Pack format radios: Alt+Z / Alt+7 / Alt+R. */
+  const PACK_FORMAT_MNEMONIC: Record<PackFormat, string> = {
+    zip: `&${formatLabel('zip')}`,
+    sevenz: `&${formatLabel('sevenz')}`,
+    rar: `&${formatLabel('rar')}`,
+  };
+
   let name = $state('');
   let permanent = $state(false);
   let password = $state('');
@@ -47,6 +57,9 @@
   let packFormat = $state<PackFormat>('zip');
   let packTarget = $state<string>('');
   let rarAvailable = $state(false);
+  const packFormats = $derived<PackFormat[]>(
+    rarAvailable ? ['zip', 'sevenz', 'rar'] : ['zip', 'sevenz'],
+  );
   // FER-510: true while the WinRAR probe is still running — the RAR option must never show
   // before the probe finished, even when the dialog opens directly with format 'rar'.
   let rarProbing = $state(false);
@@ -106,77 +119,88 @@
   // dialog is open and re-initializes on every new open.
   $effect(() => {
     const d = dialogs.current;
+    // FER-577: only a NEW dialog re-runs this. Writing d.format / d.target from the format
+    // radios must not re-open (re-probe WinRAR, unmount the focused radio).
     if (d) {
-      error = '';
-      busy = false;
-      permanent = d.kind === 'delete' ? d.permanent : false;
-      const preferred = prefs.fileOperations.conflictPolicy;
-      policy =
-        d.kind === 'copy' || d.kind === 'move'
-          ? preferred === 'keepBoth'
-            ? 'rename'
-            : preferred
-          : 'ask';
-      extractPolicy = 'skip';
-      packLevel = 'normal';
-      password = '';
-      fastDontAsk = false;
-      rarProbing = false;
-      rarAvailable = false;
-      name = d.kind === 'rename' ? d.original : '';
-      commentDraft = d.kind === 'comment' ? d.initial : '';
-      if (d.kind === 'pack') {
-        packFormat = d.format;
-        packTarget = d.target;
-        // FER-510: the RAR option only ever appears after the probe succeeded. A dialog
-        // opened directly with format 'rar' (e.g. reopened after a failed RAR pack) shows a
-        // checking note instead, cannot be submitted while checking, and falls back to ZIP
-        // with a message when the probe fails.
-        rarProbing = true;
-        archiveRarToolProbe()
-          .then((res) => {
-            if (dialogs.current !== d) return;
-            rarProbing = false;
-            if (res && res.ok) {
-              rarAvailable = true;
-            } else {
-              rarUnavailable(res?.reason);
-            }
-          })
-          .catch((e) => {
-            if (dialogs.current !== d) return;
-            rarProbing = false;
-            rarUnavailable(e instanceof FsError ? e.message : undefined);
-          });
-        if (d.initialError) {
-          error = d.initialError;
+      untrack(() => {
+        error = '';
+        busy = false;
+        permanent = d.kind === 'delete' ? d.permanent : false;
+        const preferred = prefs.fileOperations.conflictPolicy;
+        policy =
+          d.kind === 'copy' || d.kind === 'move'
+            ? preferred === 'keepBoth'
+              ? 'rename'
+              : preferred
+            : 'ask';
+        extractPolicy = 'skip';
+        packLevel = 'normal';
+        password = '';
+        fastDontAsk = false;
+        rarProbing = false;
+        rarAvailable = false;
+        name = d.kind === 'rename' ? d.original : '';
+        commentDraft = d.kind === 'comment' ? d.initial : '';
+        if (d.kind === 'pack') {
+          packFormat = d.format;
+          packTarget = d.target;
+          // FER-510: the RAR option only ever appears after the probe succeeded. A dialog
+          // opened directly with format 'rar' (e.g. reopened after a failed RAR pack) shows a
+          // checking note instead, cannot be submitted while checking, and falls back to ZIP
+          // with a message when the probe fails.
+          rarProbing = true;
+          archiveRarToolProbe()
+            .then((res) => {
+              if (dialogs.current !== d) return;
+              rarProbing = false;
+              if (res && res.ok) {
+                rarAvailable = true;
+              } else {
+                rarUnavailable(res?.reason);
+              }
+            })
+            .catch((e) => {
+              if (dialogs.current !== d) return;
+              rarProbing = false;
+              rarUnavailable(e instanceof FsError ? e.message : undefined);
+            });
+          if (d.initialError) {
+            error = d.initialError;
+          }
         }
-      }
-      if (d.kind === 'delete') {
-        deleteConfirmationBypassed = !requiresDeleteConfirmation(
-          d.permanent,
-          prefs.fileOperations.confirmBeforeDeleting,
-        );
-        if (deleteConfirmationBypassed) queueMicrotask(() => void submitDelete(d.paths));
-      } else {
-        deleteConfirmationBypassed = false;
-      }
-      queueMicrotask(() => {
-        if (inputEl) {
-          inputEl.focus();
-          inputEl.select();
-          return;
+        if (d.kind === 'delete') {
+          deleteConfirmationBypassed = !requiresDeleteConfirmation(
+            d.permanent,
+            prefs.fileOperations.confirmBeforeDeleting,
+          );
+          if (deleteConfirmationBypassed) queueMicrotask(() => void submitDelete(d.paths));
+        } else {
+          deleteConfirmationBypassed = false;
         }
-        if (dialogs.current?.kind === 'fastScanOffer' && safeScanBtn) {
-          safeScanBtn.focus();
-          return;
-        }
-        // Dialogs without an input (pack, test reports) opened by KEYBOARD
-        // still need Enter/Escape to work: focus the modal itself. Never
-        // steal focus when something inside the modal is already focused —
-        // the MenuBar moves focus into menu-opened dialogs itself.
-        const modal = modalEl;
-        if (modal && !modal.contains(document.activeElement)) modal.focus();
+        queueMicrotask(() => {
+          if (inputEl) {
+            inputEl.focus();
+            inputEl.select();
+            return;
+          }
+          if (dialogs.current?.kind === 'fastScanOffer' && safeScanBtn) {
+            safeScanBtn.focus();
+            return;
+          }
+          // FER-577: dialogs whose only dangerous button must never be reachable by a stray
+          // Enter (quit) start on the safe one.
+          const safe = modalEl?.querySelector<HTMLElement>('[data-autofocus]');
+          if (safe) {
+            safe.focus();
+            return;
+          }
+          // Dialogs without an input (pack, test reports) opened by KEYBOARD
+          // still need Enter/Escape to work: focus the modal itself. Never
+          // steal focus when something inside the modal is already focused —
+          // the MenuBar moves focus into menu-opened dialogs itself.
+          const modal = modalEl;
+          if (modal && !modal.contains(document.activeElement)) modal.focus();
+        });
       });
     }
   });
@@ -425,52 +449,52 @@
     }
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      // A sync-driven delete holds the folder lease through its dialog: closing the dialog
-      // settles it and releases the lease while the delete is still running (FER-549 R2-P3-3).
-      // Other dialogs keep closing on Escape as before.
-      if (busy && d?.kind === 'delete' && d.onSettled) return;
-      dialogs.close();
-    } else if (e.key === 'Enter' && !busy && !e.isComposing) {
-      const t = e.target instanceof HTMLElement ? e.target : null;
-      // FER-577 (X2): Enter on a focused button / link / select / textarea is that control's
-      // own business (native activation). It must NEVER run the dialog's primary action, e.g.
-      // Enter on "Cancel" in the Delete dialog used to delete.
-      if (t && t !== e.currentTarget && t.closest('button, a[href], select, textarea')) return;
-      e.preventDefault();
-      // Delete is destructive: only a bare Enter on the dialog itself confirms. Enter on the
-      // "permanently" checkbox does nothing (Space toggles it).
-      if (d?.kind === 'delete' && t !== e.currentTarget) return;
-      if (d?.kind === 'mkdir' && name.trim()) void submitMkdir(d.parent);
-      else if (d?.kind === 'rename' && name.trim()) void submitRename(d.path);
-      else if (d?.kind === 'delete') void submitDelete(d.paths);
-      else if (d?.kind === 'selectGroup' && name.trim()) submitSelectGroup(d.unselect);
-      else if (d?.kind === 'saveSelection') void submitSaveSelection(d.parent, d.names);
-      else if (d?.kind === 'loadSelection') void submitLoadSelection(d);
-      else if (d?.kind === 'showFilter') submitShowFilter();
-      else if (d?.kind === 'comment') void submitComment(d.path);
-      else if (d?.kind === 'pack' && !rarProbePending)
-        submitPack(d.paths, packTarget || d.target, packFormat);
-      else if (d?.kind === 'extractConflicts' && !busy)
-        dialogs.confirmExtractConflicts(extractPolicy);
-      else if (d?.kind === 'password' && password.trim()) submitPassword(d.retry);
-      else if (d?.kind === 'fastScanOffer') d.choose('normal', fastDontAsk);
-      else if (d?.kind === 'error' || d?.kind === 'testReport' || d?.kind === 'extractSummary')
-        dialogs.close();
-      else if (
-        (d?.kind === 'copy' || d?.kind === 'move') &&
-        !(d.conflicts.length > 0 && policy === 'ask')
-      )
-        void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence);
-      else if (d?.kind === 'multipart') {
-        if (d.info.kind === 'notFirst' && d.info.firstExists) dialogs.openFirstPart();
-        else dialogs.close();
-      }
-      // quitConfirm / archiveProgress: a bare Enter does nothing (no accidental quit / cancel).
-    }
+  /** Esc cancels. A sync-driven delete holds the folder lease through its dialog: closing the
+   *  dialog settles it and releases the lease while the delete is still running (FER-549
+   *  R2-P3-3), so Esc is ignored while it runs. Other dialogs close on Escape as before. */
+  function onEscape() {
+    if (busy && d?.kind === 'delete' && d.onSettled) return;
+    dialogs.close();
   }
+
+  /**
+   * FER-577 (X2): `use:dialog` calls this only for an Enter that is NOT on a button, link,
+   * select or textarea (those activate themselves), i.e. on the dialog itself or on a text
+   * field / radio / checkbox.
+   */
+  function onEnter(_e: KeyboardEvent, t: HTMLElement) {
+    if (busy) return;
+    // Delete is destructive: only a bare Enter on the dialog itself confirms. Enter on the
+    // "permanently" checkbox does nothing (Space toggles it).
+    if (d?.kind === 'delete' && t !== modalEl) return;
+    if (d?.kind === 'mkdir' && name.trim()) void submitMkdir(d.parent);
+    else if (d?.kind === 'rename' && name.trim()) void submitRename(d.path);
+    else if (d?.kind === 'delete') void submitDelete(d.paths);
+    else if (d?.kind === 'selectGroup' && name.trim()) submitSelectGroup(d.unselect);
+    else if (d?.kind === 'saveSelection') void submitSaveSelection(d.parent, d.names);
+    else if (d?.kind === 'loadSelection') void submitLoadSelection(d);
+    else if (d?.kind === 'showFilter') submitShowFilter();
+    else if (d?.kind === 'comment') void submitComment(d.path);
+    else if (d?.kind === 'pack' && !rarProbePending)
+      submitPack(d.paths, packTarget || d.target, packFormat);
+    else if (d?.kind === 'extractConflicts') dialogs.confirmExtractConflicts(extractPolicy);
+    else if (d?.kind === 'password' && password.trim()) submitPassword(d.retry);
+    else if (d?.kind === 'fastScanOffer') d.choose('normal', fastDontAsk);
+    else if (d?.kind === 'error' || d?.kind === 'testReport' || d?.kind === 'extractSummary')
+      dialogs.close();
+    else if (
+      (d?.kind === 'copy' || d?.kind === 'move') &&
+      !(d.conflicts.length > 0 && policy === 'ask')
+    )
+      void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence);
+    else if (d?.kind === 'multipart') {
+      if (d.info.kind === 'notFirst' && d.info.firstExists) dialogs.openFirstPart();
+      else dialogs.close();
+    }
+    // quitConfirm / archiveProgress: a bare Enter does nothing (no accidental quit / cancel).
+  }
+
+  const dialogOpts = { onEscape, onEnter };
 </script>
 
 {#if d}
@@ -483,13 +507,13 @@
     class="modal"
     role="dialog"
     aria-modal="true"
-    aria-label={d.kind}
+    aria-labelledby="dlg-title"
     tabindex="-1"
     bind:this={modalEl}
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     {#if d.kind === 'mkdir'}
-      <h2>New folder</h2>
+      <h2 id="dlg-title">New folder</h2>
       <p class="path mono">{d.parent}</p>
       <input
         bind:this={inputEl}
@@ -499,7 +523,7 @@
         disabled={busy}
       />
     {:else if d.kind === 'rename'}
-      <h2>Rename</h2>
+      <h2 id="dlg-title">Rename</h2>
       <p class="path mono">{d.original}</p>
       <input
         bind:this={inputEl}
@@ -509,7 +533,7 @@
         disabled={busy}
       />
     {:else if d.kind === 'copy' || d.kind === 'move'}
-      <h2>
+      <h2 id="dlg-title">
         {d.kind === 'copy' ? 'Copy' : 'Move'}
         {d.paths.length === 1 ? ' 1 item' : ` ${d.paths.length} items`}
       </h2>
@@ -527,17 +551,17 @@
             <li class="mono">{c.dest}</li>
           {/each}
         </ul>
-        <div class="policies" role="radiogroup" aria-label="Conflict policy">
-          {#each [['skip', 'Skip'], ['overwrite', 'Overwrite'], ['overwriteOlder', 'Overwrite older'], ['rename', 'Keep both']] as [val, label] (val)}
+        <div class="policies" role="radiogroup" aria-label="Conflict policy" use:roving>
+          {#each [['skip', '&Skip'], ['overwrite', '&Overwrite'], ['overwriteOlder', 'Overwrite o&lder'], ['rename', '&Keep both']] as [val, label] (val)}
             <label class="check">
               <input type="radio" name="policy" bind:group={policy} value={val} disabled={busy} />
-              {label}
+              <Mnemonic {label} />
             </label>
           {/each}
         </div>
       {/if}
     {:else if d.kind === 'delete'}
-      <h2>{permanent ? 'Delete permanently' : 'Delete'}</h2>
+      <h2 id="dlg-title">{permanent ? 'Delete permanently' : 'Delete'}</h2>
       <p>
         {d.paths.length === 1 ? 'Delete 1 item?' : `Delete ${d.paths.length} items?`}
         {#if !permanent}<span class="dim">to Recycle Bin</span>{/if}
@@ -554,10 +578,10 @@
           bind:checked={permanent}
           disabled={busy || deleteConfirmationBypassed}
         />
-        Delete permanently (skip Recycle Bin)
+        <Mnemonic label="&Permanently (skip Recycle Bin)" />
       </label>
     {:else if d.kind === 'password'}
-      <h2>Password required</h2>
+      <h2 id="dlg-title">Password required</h2>
       <p class="path mono">{d.archivePath}</p>
       {#if d.message}<p class="error" role="alert">{d.message}</p>{/if}
       <input
@@ -570,7 +594,7 @@
       />
     {:else if d.kind === 'extractConflicts'}
       <!-- FER-368 (D21): ONE ask for the whole extraction batch. -->
-      <h2>Extract conflicts</h2>
+      <h2 id="dlg-title">Extract conflicts</h2>
       <p>
         {d.conflicts.length}
         name conflict{d.conflicts.length === 1 ? '' : 's'} in
@@ -584,8 +608,8 @@
           <li class="dim">… and {d.conflicts.length - 20} more</li>
         {/if}
       </ul>
-      <div class="policies" role="radiogroup" aria-label="Conflict policy">
-        {#each [['skip', 'Skip'], ['overwrite', 'Overwrite'], ['rename', 'Rename automatically']] as [val, label] (val)}
+      <div class="policies" role="radiogroup" aria-label="Conflict policy" use:roving>
+        {#each [['skip', '&Skip'], ['overwrite', '&Overwrite'], ['rename', '&Rename automatically']] as [val, label] (val)}
           <label class="check">
             <input
               type="radio"
@@ -594,38 +618,38 @@
               value={val}
               disabled={busy}
             />
-            {label}
+            <Mnemonic {label} />
           </label>
         {/each}
       </div>
     {:else if d.kind === 'pack'}
-      <h2>Pack to archive</h2>
+      <h2 id="dlg-title">Pack to archive</h2>
       <p>
         {d.paths.length === 1 ? 'Pack 1 item' : `Pack ${d.paths.length} items`} →
         <span class="mono">{packTarget || d.target}</span>
       </p>
-      <p class="dim">Format: {packFormat === 'sevenz' ? 'SEVENZ' : packFormat.toUpperCase()}</p>
-      <div class="policies" role="radiogroup" aria-label="Format">
-        {#each rarAvailable ? [['zip', 'ZIP'], ['sevenz', '7Z'], ['rar', 'RAR']] : [['zip', 'ZIP'], ['sevenz', '7Z']] as [fmtVal, fmtLabel] (fmtVal)}
+      <p class="dim" id="pack-format-label">Format</p>
+      <div class="policies" role="radiogroup" aria-labelledby="pack-format-label" use:roving>
+        {#each packFormats as fmtVal (fmtVal)}
           <label class="check">
             <input
               type="radio"
               name="packFormat"
               bind:group={packFormat}
               value={fmtVal}
-              onchange={() => changePackFormat(fmtVal as PackFormat)}
+              onchange={() => changePackFormat(fmtVal)}
               disabled={busy}
             />
-            {fmtLabel}
+            <Mnemonic label={PACK_FORMAT_MNEMONIC[fmtVal]} />
           </label>
         {/each}
       </div>
       {#if rarProbing}
-        <p class="dim" data-testid="rar-probing">Memeriksa WinRAR…</p>
+        <p class="dim" data-testid="rar-probing">Checking WinRAR…</p>
       {/if}
-      <p class="dim">Kompresi:</p>
-      <div class="policies" role="radiogroup" aria-label="Kompresi">
-        {#each [['store', 'Simpan'], ['fast', 'Cepat'], ['normal', 'Normal'], ['max', 'Maksimal']] as [val, label] (val)}
+      <p class="dim" id="pack-level-label">Compression</p>
+      <div class="policies" role="radiogroup" aria-labelledby="pack-level-label" use:roving>
+        {#each [['store', '&Store'], ['fast', '&Fast'], ['normal', '&Normal'], ['max', '&Maximum']] as [val, label] (val)}
           <label class="check">
             <input
               type="radio"
@@ -637,12 +661,12 @@
               }}
               disabled={busy}
             />
-            {label}
+            <Mnemonic {label} />
           </label>
         {/each}
       </div>
     {:else if d.kind === 'selectGroup'}
-      <h2>{d.unselect ? 'Unselect Group' : 'Select Group'}</h2>
+      <h2 id="dlg-title">{d.unselect ? 'Unselect Group' : 'Select Group'}</h2>
       <p class="path mono">{d.parent}</p>
       <input
         bind:this={inputEl}
@@ -656,7 +680,7 @@
         {groupMatchCount === 1 ? 'match' : 'matches'} in this folder
       </p>
     {:else if d.kind === 'saveSelection'}
-      <h2>Save Selection To File</h2>
+      <h2 id="dlg-title">Save Selection To File</h2>
       <p class="path mono">{d.parent}</p>
       <p>
         Save {d.names.length}
@@ -670,7 +694,7 @@
         disabled={busy}
       />
     {:else if d.kind === 'loadSelection'}
-      <h2>Load Selection From File</h2>
+      <h2 id="dlg-title">Load Selection From File</h2>
       <p class="path mono">{d.parent}</p>
       <p>Name of the selection file in this folder.</p>
       <input
@@ -681,7 +705,7 @@
         disabled={busy}
       />
     {:else if d.kind === 'showFilter'}
-      <h2>Custom Filter</h2>
+      <h2 id="dlg-title">Custom Filter</h2>
       <p class="path mono">{d.parent}</p>
       <input
         bind:this={inputEl}
@@ -691,7 +715,7 @@
         disabled={busy}
       />
     {:else if d.kind === 'comment'}
-      <h2>Edit Comment</h2>
+      <h2 id="dlg-title">Edit Comment</h2>
       <p class="path mono">{d.name}</p>
       <input
         bind:this={inputEl}
@@ -701,14 +725,14 @@
         disabled={busy}
       />
     {:else if d.kind === 'quitConfirm'}
-      <h2>Quit Ferrum?</h2>
+      <h2 id="dlg-title">Quit Ferrum?</h2>
       <p>
         {d.operations}
         {d.operations === 1 ? 'operation is' : 'operations are'} still running. Quitting now cancels the
         pending work.
       </p>
     {:else if d.kind === 'fastScanOffer'}
-      <h2>Scan lebih cepat?</h2>
+      <h2 id="dlg-title">Scan lebih cepat?</h2>
       {#if d.purpose === 'sync'}
         <p>
           Drive {d.volume}: memakai NTFS. Scan cepat membaca tabel file (MFT) langsung lewat helper
@@ -737,11 +761,11 @@
       {/if}
       <label class="check">
         <input type="checkbox" bind:checked={fastDontAsk} />
-        Jangan tanya lagi (selalu scan biasa; aktifkan lagi di Settings)
+        <Mnemonic label="&Jangan tanya lagi (selalu scan biasa; aktifkan lagi di Settings)" />
       </label>
     {:else if d.kind === 'archiveProgress'}
       <!-- FER-79: running extract / Test Archive job. Batal and Esc cancel it. -->
-      <h2>{d.title}{d.position ? ` (${d.position})` : ''}</h2>
+      <h2 id="dlg-title">{d.title}{d.position ? ` (${d.position})` : ''}</h2>
       <p class="path mono">{d.archivePath}</p>
       {@const pct = progressPercent(d)}
       <div
@@ -772,7 +796,7 @@
       {#if d.cancelling}<p class="job-meta" role="status">Membatalkan...</p>{/if}
     {:else if d.kind === 'multipart'}
       <!-- FER-75: a volume that cannot be used alone. -->
-      <h2>Arsip multipart</h2>
+      <h2 id="dlg-title">Arsip multipart</h2>
       <p class="path mono">{d.archivePath}</p>
       {#if d.info.kind === 'notFirst'}
         <p>Ini bagian {d.info.part} dari arsip multipart.</p>
@@ -793,10 +817,10 @@
         </ul>
       {/if}
     {:else if d.kind === 'error'}
-      <h2>{d.title}</h2>
+      <h2 id="dlg-title">{d.title}</h2>
       <p style="white-space: pre-wrap;">{d.message}</p>
     {:else if d.kind === 'testReport'}
-      <h2>{d.title}</h2>
+      <h2 id="dlg-title">{d.title}</h2>
       <ul class="test-report" aria-label="Hasil tes arsip">
         {#each d.reports as r (r.archivePath)}
           <li class={`tr tr-${r.status}`}>
@@ -823,7 +847,7 @@
         {/each}
       </ul>
     {:else if d.kind === 'extractSummary'}
-      <h2>{d.title ?? 'Ekstrak selesai'}</h2>
+      <h2 id="dlg-title">{d.title ?? 'Ekstrak selesai'}</h2>
       {#if d.target}<p class="path mono">{d.target}</p>{/if}
       <div class="extract-summary">
         <p>Ditulis: {d.written} berkas</p>
@@ -857,14 +881,19 @@
       </div>
     {:else if d.kind !== 'error' && d.kind !== 'testReport'}
       <div class="actions">
-        <button class="ghost" onclick={() => dialogs.close()} disabled={busy}>Cancel</button>
+        <button
+          class="ghost"
+          data-autofocus={d.kind === 'quitConfirm' ? '' : undefined}
+          onclick={() => dialogs.close()}
+          disabled={busy}>Cancel</button
+        >
         {#if d.kind === 'mkdir'}
           <button
             class="primary"
             onclick={() => void submitMkdir(d.parent)}
             disabled={busy || !name.trim()}
           >
-            Create
+            <Mnemonic label="&Create" />
           </button>
         {:else if d.kind === 'rename'}
           <button
@@ -872,7 +901,7 @@
             onclick={() => void submitRename(d.path)}
             disabled={busy || !name.trim()}
           >
-            Rename
+            <Mnemonic label="&Rename" />
           </button>
         {:else if d.kind === 'password'}
           <button
@@ -880,7 +909,7 @@
             onclick={() => submitPassword(d.retry)}
             disabled={busy || !password}
           >
-            Unlock
+            <Mnemonic label="&Unlock" />
           </button>
         {:else if d.kind === 'pack'}
           <button
@@ -888,7 +917,7 @@
             onclick={() => void submitPack(d.paths, packTarget || d.target, packFormat)}
             disabled={busy || rarProbePending}
           >
-            Pack
+            <Mnemonic label="&Pack" />
           </button>
         {:else if d.kind === 'extractConflicts'}
           <!-- FER-368: the single whole-batch decision (apply-all inherent). -->
@@ -897,7 +926,7 @@
             onclick={() => dialogs.confirmExtractConflicts(extractPolicy)}
             disabled={busy}
           >
-            Extract
+            <Mnemonic label="&Extract" />
           </button>
         {:else if d.kind === 'copy' || d.kind === 'move'}
           <button
@@ -905,7 +934,7 @@
             onclick={() => void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence)}
             disabled={busy || (d.conflicts.length > 0 && policy === 'ask')}
           >
-            {d.kind === 'copy' ? 'Copy' : 'Move'}
+            <Mnemonic label={d.kind === 'copy' ? '&Copy' : '&Move'} />
           </button>
         {:else if d.kind === 'selectGroup'}
           <button
@@ -913,7 +942,7 @@
             onclick={() => submitSelectGroup(d.unselect)}
             disabled={busy || !name.trim()}
           >
-            {d.unselect ? 'Unselect' : 'Select'}
+            <Mnemonic label={d.unselect ? '&Unselect' : '&Select'} />
           </button>
         {:else if d.kind === 'saveSelection'}
           <button
@@ -921,17 +950,19 @@
             onclick={() => void submitSaveSelection(d.parent, d.names)}
             disabled={busy}
           >
-            Save
+            <Mnemonic label="&Save" />
           </button>
         {:else if d.kind === 'loadSelection'}
           <button class="primary" onclick={() => void submitLoadSelection(d)} disabled={busy}>
-            Load
+            <Mnemonic label="&Load" />
           </button>
         {:else if d.kind === 'showFilter'}
-          <button class="primary" onclick={submitShowFilter} disabled={busy}>Filter</button>
+          <button class="primary" onclick={submitShowFilter} disabled={busy}
+            ><Mnemonic label="&Filter" /></button
+          >
         {:else if d.kind === 'comment'}
           <button class="primary" onclick={() => void submitComment(d.path)} disabled={busy}>
-            Save
+            <Mnemonic label="&Save" />
           </button>
         {:else if d.kind === 'quitConfirm'}
           <button class="primary danger" onclick={confirmQuit}>Quit anyway</button>
@@ -939,19 +970,19 @@
           <button
             class="ghost"
             bind:this={safeScanBtn}
-            onclick={() => d.choose('normal', fastDontAsk)}>Scan biasa</button
+            onclick={() => d.choose('normal', fastDontAsk)}><Mnemonic label="Scan &biasa" /></button
           >
           {#if d.fastAvailable !== false}
             <button
               class={d.indexAvailable ? 'ghost' : 'primary'}
               onclick={() => d.choose('fast', fastDontAsk)}
             >
-              Scan cepat (admin)
+              <Mnemonic label="Scan &cepat (admin)" />
             </button>
           {/if}
           {#if d.indexAvailable}
             <button class="primary" onclick={() => d.choose('index', fastDontAsk)}>
-              Instan (indeks)
+              <Mnemonic label="&Instan (indeks)" />
             </button>
           {/if}
         {:else}

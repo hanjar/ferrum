@@ -26,7 +26,13 @@
   });
   import { prefs } from './lib/stores/prefsStore.svelte';
   import { applyStartupPreview } from './lib/stores/previewStartup';
-  import { actionForEvent, runAction, shortcutBlockedByFullPage } from './lib/actions';
+  import {
+    actionForEvent,
+    runAction,
+    shortcutBlockedByFullPage,
+    shortcutBlockedByModal,
+  } from './lib/actions';
+  import { modalDepth } from './lib/dialogKit';
   import { dialogs } from './lib/stores/dialogStore.svelte';
   import { ops } from './lib/stores/opsStore.svelte';
   import { watcher } from './lib/stores/watchStore.svelte';
@@ -113,6 +119,8 @@
     const inText =
       t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     if (e.defaultPrevented || dialogs.current || ui.paletteOpen || benchN) return;
+    // FER-577 (X1): a modal owns Tab as well (its own trap); nothing behind it may react.
+    if (e.key === 'Tab' && modalDepth() > 0) return;
     // FER-489: Tab / Shift+Tab only switch between the two file lists (see paneTab.ts).
     if (e.key === 'Tab' && handlePaneTab(e)) {
       e.preventDefault();
@@ -124,6 +132,8 @@
     if (action?.scope === 'app-keydown') return;
     // FER-561: a full page hides the panes; only global shortcuts may run.
     if (action && shortcutBlockedByFullPage(action)) return;
+    // FER-577 (X1): modals other than the dialog store (Settings, Properties, ...) too.
+    if (action && shortcutBlockedByModal(action)) return;
     if (action) {
       e.preventDefault();
       runAction(action);

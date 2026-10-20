@@ -135,9 +135,9 @@ describe('Pack: dialog and adapter share packService.runPack', () => {
     ipc.archiveCreate.mockResolvedValue(`${LEFT}.zip`);
     registerFake(0, LEFT, FILES);
     dialogs.beginPack('zip');
-    const { getByText } = render(Dialogs);
+    const { getByRole } = render(Dialogs);
     await tick();
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
     expect(spies.runPack).toHaveBeenCalledTimes(1);
     const manualCall = ipc.archiveCreate.mock.calls[0];

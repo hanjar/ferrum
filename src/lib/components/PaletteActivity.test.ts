@@ -437,14 +437,14 @@ describe('shortcut regression with activity enabled (FER-260)', () => {
     const box = document.querySelector('.palette input') as HTMLInputElement;
     fireEvent.keyDown(box, { key: 'F7' });
     await tick();
-    expect(document.querySelector('[role="dialog"][aria-label="mkdir"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"] #dlg-title')).toBeNull();
     fireEvent.keyDown(document.querySelector('.palette')!, { key: 'Escape' });
     await tick();
     expect(ui.paletteOpen).toBe(false);
     // outside the palette F7 still works
     fireEvent.keyDown(window, { key: 'F7' });
     await vi.waitFor(() =>
-      expect(document.querySelector('[role="dialog"][aria-label="mkdir"]')).toBeTruthy(),
+      expect(document.querySelector('[role="dialog"] #dlg-title')?.textContent).toBe('New folder'),
     );
   });
 });

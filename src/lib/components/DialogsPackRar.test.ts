@@ -107,7 +107,7 @@ describe('FER-505: Pack dialog RAR format conditional display and execution', ()
     register(0, DIR, [FILE_A]);
     dialogs.beginPack('zip');
 
-    const { container, getByText } = render(Dialogs);
+    const { container, getByRole } = render(Dialogs);
     await tick();
 
     await vi.waitFor(() => {
@@ -133,7 +133,7 @@ describe('FER-505: Pack dialog RAR format conditional display and execution', ()
     expect(mono?.textContent).toBe('C:\\Data\\ArchiveTests.rar');
 
     // Submit pack
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
 
     expect(archiveMocks.archiveCreate).toHaveBeenCalledTimes(1);
@@ -205,7 +205,7 @@ describe('FER-510: the RAR option waits for the probe, even when opened as rar',
 
     // Before the probe resolves: no RAR radio, a "memeriksa WinRAR" note, Pack disabled.
     expect(container.querySelector('input[name="packFormat"][value="rar"]')).toBeNull();
-    expect(container.textContent).toContain('Memeriksa WinRAR');
+    expect(container.textContent).toContain('Checking WinRAR');
     const packBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Pack');
     expect(packBtn).toBeDefined();
     expect(packBtn!.disabled).toBe(true);
@@ -215,7 +215,7 @@ describe('FER-510: the RAR option waits for the probe, even when opened as rar',
     await vi.waitFor(() => {
       expect(container.querySelector('input[name="packFormat"][value="rar"]')).not.toBeNull();
     });
-    expect(container.textContent).not.toContain('Memeriksa WinRAR');
+    expect(container.textContent).not.toContain('Checking WinRAR');
     expect(packBtn!.disabled).toBe(false);
   });
 
@@ -249,7 +249,7 @@ describe('FER-510: the RAR option waits for the probe, even when opened as rar',
     expect(zipRadio.checked).toBe(true);
     const mono = container.querySelector('span.mono');
     expect(mono?.textContent).toBe('C:\\Data\\ArchiveTests.zip');
-    expect(container.textContent).not.toContain('Memeriksa WinRAR');
+    expect(container.textContent).not.toContain('Checking WinRAR');
   });
 
   it('keeps the RAR option hidden when the probe throws for a zip-opened dialog', async () => {
@@ -260,7 +260,7 @@ describe('FER-510: the RAR option waits for the probe, even when opened as rar',
     const { container } = render(Dialogs);
     await tick();
     await vi.waitFor(() => {
-      expect(container.textContent).not.toContain('Memeriksa WinRAR');
+      expect(container.textContent).not.toContain('Checking WinRAR');
     });
     expect(container.querySelector('input[name="packFormat"][value="rar"]')).toBeNull();
     // No fallback message: the dialog was never opened as 'rar'.

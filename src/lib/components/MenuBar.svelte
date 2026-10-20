@@ -13,6 +13,19 @@
   } from '../actions';
   import type { Action } from '../actions';
   import { dialogs } from '../stores/dialogStore.svelte';
+  import { mnemonicKey, modalDepth } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
+
+  /** FER-577: Alt+letter opens a menu. D and B are Alt shortcuts of the app (Alt+D address bar,
+   *  Alt+B transfers), so none of the groups uses them. */
+  const GROUP_MNEMONIC: Record<string, string> = {
+    Files: '&Files',
+    Mark: '&Mark',
+    Commands: '&Commands',
+    View: '&View',
+    Sort: '&Sort',
+    Show: 'Sho&w',
+  };
 
   // FER-495: `compact` collapses the six groups into one hamburger button whose panel lists them.
   let { compact = false }: { compact?: boolean } = $props();
@@ -133,7 +146,7 @@
 
   /** F10 / lone Alt: focus the menu (the burger when collapsed) without opening it. */
   function focusMenu() {
-    if (dialogs.current || ui.paletteOpen) return;
+    if (dialogs.current || ui.paletteOpen || modalDepth() > 0) return;
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || !root.contains(active))
       restoreTo = active as HTMLElement;
@@ -148,12 +161,35 @@
   }
 
   let altAlone = false;
+  /** FER-577: Alt+F / M / C / V / S / W open that menu (never while a modal is open). */
+  function openByMnemonic(event: KeyboardEvent): boolean {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    if (event.key.length !== 1 || dialogs.current || ui.paletteOpen || modalDepth() > 0)
+      return false;
+    const key = event.key.toLowerCase();
+    const index = menuGroups.findIndex((g) => mnemonicKey(GROUP_MNEMONIC[g.label] ?? '') === key);
+    if (index < 0) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !root.contains(active))
+      restoreTo = active as HTMLElement;
+    if (compact && !burgerOpen) openBurger();
+    open(index);
+    return true;
+  }
+
   function onWindowKeydown(event: KeyboardEvent) {
+    if (modalDepth() > 0) {
+      altAlone = false;
+      return;
+    }
     if (event.key === 'Alt') {
       altAlone = !event.repeat || altAlone;
       return;
     }
     altAlone = false;
+    if (!event.defaultPrevented && openByMnemonic(event)) return;
     if (
       event.key === 'F10' &&
       !event.altKey &&
@@ -407,7 +443,8 @@
         tabindex={index === triggerIndex ? 0 : -1}
         onfocus={() => (triggerIndex = index)}
         onclick={() => (openGroup === index ? close() : open(index))}
-        onkeydown={(event) => onTriggerKeydown(event, index)}>{group.label}</button
+        onkeydown={(event) => onTriggerKeydown(event, index)}
+        ><Mnemonic label={GROUP_MNEMONIC[group.label] ?? group.label} /></button
       >
       {#if openGroup === index}
         <div

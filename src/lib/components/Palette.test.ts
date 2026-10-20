@@ -90,7 +90,7 @@ describe('command palette (task 13)', () => {
     // F7 inside the palette input must NOT open the mkdir dialog.
     fireEvent.keyDown(input, { key: 'F7' });
     await tick();
-    expect(document.querySelector('[role="dialog"][aria-label="mkdir"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"] #dlg-title')).toBeNull();
   });
 });
 

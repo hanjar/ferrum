@@ -7,6 +7,7 @@ import { paneById } from './stores/panesRegistry.svelte';
 import { contextMenu } from './stores/contextMenuStore.svelte';
 import { historyMenu } from './stores/historyMenuStore.svelte';
 import { hotlist } from './stores/hotlistStore.svelte';
+import { modalDepth } from './dialogKit';
 
 /** Containers whose own keyboard handling (focus traps, menus, panels) must keep Tab. */
 const OWN_TAB_SCOPES =
@@ -25,6 +26,7 @@ function paneIdOf(el: Element | null): PaneId | undefined {
  */
 export function handlePaneTab(e: KeyboardEvent): boolean {
   if (e.ctrlKey || e.metaKey || e.altKey || e.key !== 'Tab') return false;
+  if (modalDepth() > 0) return false; // FER-577: any open modal keeps its own Tab
   if (ui.settingsOpen || ui.activityOpen || ui.syncProfilesOpen || ui.automationOpen) return false;
   if (contextMenu.isOpen || historyMenu.isOpen || hotlist.menuOpen) return false;
   const t = e.target instanceof Element ? e.target : null;
