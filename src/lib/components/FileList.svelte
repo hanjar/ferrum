@@ -270,7 +270,25 @@
 
   let menuOpener: HTMLElement | undefined;
 
-  function rowContextmenu(r: Row, e: MouseEvent) {
+  /** Menu key / Shift+F10: open the row menu at the cursor row (FER-577). */
+  function onBodyKey(e: KeyboardEvent) {
+    const isMenuKey =
+      (e.key === 'ContextMenu' && !e.shiftKey) || (e.key === 'F10' && e.shiftKey && !e.altKey);
+    if (!isMenuKey || e.ctrlKey || e.metaKey || !cursor) {
+      onlistkey?.(e);
+      return;
+    }
+    const row = rows.find((r) => r.entry.path === cursor);
+    if (!row) return onlistkey?.(e);
+    e.preventDefault();
+    const el = Array.from(bodyEl?.querySelectorAll<HTMLElement>('.row[data-path]') ?? []).find(
+      (n) => n.dataset.path === cursor,
+    );
+    const box = (el ?? bodyEl)?.getBoundingClientRect();
+    rowContextmenu(row, e, el, box ? { x: box.left + 28, y: box.bottom } : undefined);
+  }
+
+  function rowContextmenu(r: Row, e: Event, opener?: HTMLElement, at?: { x: number; y: number }) {
     e.preventDefault();
     if (renamingPath) cancelRename(); // another action cancels inline rename
     // Right-clicking an unselected row behaves like a plain left-click first.
@@ -324,8 +342,20 @@
     add('file.delete.permanent');
     items.push({ separator: true });
     add('file.mkdir');
-    menuOpener = e.currentTarget instanceof HTMLElement ? e.currentTarget : undefined;
-    contextMenu.open(e.clientX, e.clientY, items, menuOwner);
+    menuOpener = opener ?? (e.currentTarget instanceof HTMLElement ? e.currentTarget : undefined);
+    // A keyboard-raised contextmenu event carries (0, 0): anchor it to the row instead.
+    const me = e as MouseEvent;
+    const x =
+      at?.x ??
+      (me.clientX === 0 && me.clientY === 0 && menuOpener
+        ? menuOpener.getBoundingClientRect().left + 28
+        : me.clientX);
+    const y =
+      at?.y ??
+      (me.clientX === 0 && me.clientY === 0 && menuOpener
+        ? menuOpener.getBoundingClientRect().bottom
+        : me.clientY);
+    contextMenu.open(x, y, items, menuOwner);
   }
 
   // Focus returns to the row that opened the menu when it closes — unless an
@@ -500,7 +530,7 @@
   bind:clientHeight={measuredH}
   data-pane-list
   tabindex="0"
-  onkeydown={(e) => onlistkey?.(e)}
+  onkeydown={onBodyKey}
   onfocus={() => onlistfocus?.()}
   onfocusin={(e) => {
     // FER-492: rows are virtualized, so a focused row element is unmounted once keys scroll it

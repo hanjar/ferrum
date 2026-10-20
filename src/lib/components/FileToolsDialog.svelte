@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { focusModal } from '../focusModal';
+  import { dialog, roving } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { fileTools, RAR_CHECKSUM_UNSUPPORTED } from '../stores/fileToolsStore.svelte';
   import { formatSize } from '../format';
   import type { Algorithm, OutputPolicy } from '../ipc/fileTools';
@@ -7,10 +8,10 @@
   const d = $derived(fileTools.current);
 
   const algorithms: { value: Algorithm; label: string }[] = [
-    { value: 'sha256', label: 'SHA-256' },
-    { value: 'sha1', label: 'SHA-1 (legacy verify)' },
-    { value: 'md5', label: 'MD5 (legacy verify)' },
-    { value: 'crc32', label: 'CRC32 (legacy verify)' },
+    { value: 'sha256', label: 'SHA-&256' },
+    { value: 'sha1', label: 'SHA-&1 (legacy verify)' },
+    { value: 'md5', label: 'MD&5 (legacy verify)' },
+    { value: 'crc32', label: 'CRC&32 (legacy verify)' },
   ];
 
   const policies: { value: OutputPolicy; label: string }[] = [
@@ -40,12 +41,18 @@
 
   const isRar = $derived(d?.kind === 'archiveChecksum' && /\.rar$/i.test(d.archivePath));
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      fileTools.close();
-    }
-  }
+  // FER-577: Esc closes; Enter in a field runs the dialog's primary action.
+  const dialogOpts = {
+    onEscape: () => fileTools.close(),
+    onEnter: () => {
+      if (!d) return;
+      if (d.kind === 'archiveChecksum') {
+        if (!fileTools.hashing && !isRar) void fileTools.runArchiveHash();
+      } else if (d.kind === 'checksumVerify') {
+        if (!fileTools.verifying) fileTools.close();
+      } else if (!fileTools.busy) void fileTools.submit();
+    },
+  };
 </script>
 
 {#if d}
@@ -65,8 +72,7 @@
             ? 'Split File'
             : 'Combine Files'}
     tabindex="-1"
-    use:focusModal
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     {#if d.kind === 'checksumCreate'}
       <h2>Create Checksum File(s)</h2>
@@ -74,7 +80,7 @@
         One sidecar manifest per file, next to it. An existing manifest is kept unless you choose
         otherwise below.
       </p>
-      <div class="algorithms" role="radiogroup" aria-label="Checksum algorithm">
+      <div class="algorithms" role="radiogroup" aria-label="Checksum algorithm" use:roving>
         {#each algorithms as a (a.value)}
           <label class="check">
             <input
@@ -84,7 +90,7 @@
               bind:group={fileTools.algorithm}
               disabled={fileTools.busy}
             />
-            {a.label}
+            <Mnemonic label={a.label} />
           </label>
         {/each}
       </div>
@@ -149,7 +155,7 @@
         <p class="error" role="alert">{RAR_CHECKSUM_UNSUPPORTED}</p>
       {:else}
         <p class="dim">The member is streamed through the archive reader; nothing is extracted.</p>
-        <div class="algorithms" role="radiogroup" aria-label="Checksum algorithm">
+        <div class="algorithms" role="radiogroup" aria-label="Checksum algorithm" use:roving>
           {#each algorithms as a (a.value)}
             <label class="check">
               <input
@@ -159,12 +165,12 @@
                 bind:group={fileTools.algorithm}
                 disabled={fileTools.hashing}
               />
-              {a.label.replace(' (legacy verify)', '')}
+              <Mnemonic label={a.label.replace(' (legacy verify)', '')} />
             </label>
           {/each}
         </div>
         <label class="field wide">
-          <span>Password (if the archive is encrypted)</span>
+          <span><Mnemonic label="&Password (if the archive is encrypted)" /></span>
           <input
             type="password"
             autocomplete="off"
@@ -198,14 +204,14 @@
           onclick={() => void fileTools.runArchiveHash()}
           disabled={fileTools.hashing || isRar}
         >
-          Compute
+          <Mnemonic label="&Compute" />
         </button>
       </div>
     {:else if d.kind === 'split'}
       <h2>Split File</h2>
       <p class="mono path">{d.path}</p>
       <label class="field">
-        <span>Part size (MB)</span>
+        <span><Mnemonic label="Part si&ze (MB)" /></span>
         <input type="number" min="1" bind:value={fileTools.partSizeMb} disabled={fileTools.busy} />
       </label>
       <p class="dim">Parts land next to the source as .001, .002, … plus a .parts.json manifest.</p>
@@ -219,7 +225,7 @@
     {/if}
     {#if d.kind === 'checksumCreate' || d.kind === 'split' || d.kind === 'combine'}
       <label class="field wide">
-        <span>If the output already exists</span>
+        <span><Mnemonic label="&If the output already exists" /></span>
         <select bind:value={fileTools.conflictPolicy} disabled={fileTools.busy}>
           {#each policyChoices as p (p.value)}
             <option value={p.value}>{p.label}</option>
@@ -239,7 +245,13 @@
           Close
         </button>
         <button class="primary" onclick={() => void fileTools.submit()} disabled={fileTools.busy}>
-          {d.kind === 'checksumCreate' ? 'Create' : d.kind === 'split' ? 'Split' : 'Combine'}
+          <Mnemonic
+            label={d.kind === 'checksumCreate'
+              ? '&Create'
+              : d.kind === 'split'
+                ? '&Split'
+                : '&Combine'}
+          />
         </button>
       </div>
     {/if}

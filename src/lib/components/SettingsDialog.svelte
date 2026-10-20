@@ -24,6 +24,7 @@
     openThirdPartyNotices,
     type TerminalChoice,
   } from '../ipc/shellOpen';
+  import { dialog } from '../dialogKit';
   import { prefs } from '../stores/prefsStore.svelte';
   import { copyText } from '../clipboard';
   import { APP_NAME, BUILD_LABEL, BUILD_DETAIL } from '../version';
@@ -134,16 +135,6 @@
   }
   const previewLimitValues = PREVIEW_TEXT_LIMITS.map(String);
 
-  let modal: HTMLElement | undefined = $state();
-  let previouslyFocused: HTMLElement | null = null;
-
-  onMount(() => {
-    previouslyFocused = document.activeElement as HTMLElement | null;
-    modal?.focus();
-    // Restore focus to the opener when the dialog goes away.
-    return () => previouslyFocused?.focus?.();
-  });
-
   const conflictPolicies = [
     { value: 'ask', label: 'Ask' },
     { value: 'overwrite', label: 'Overwrite' },
@@ -199,27 +190,9 @@
     if (isInTauri()) void refreshCacheSummary();
   });
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onclose?.();
-      return;
-    }
-    if (e.key !== 'Tab' || !modal) return;
-    const focusables = modal.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input, select, [href], [tabindex]:not([tabindex="-1"])',
-    );
-    if (focusables.length === 0) return;
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
+  // FER-577: focus on open, Tab trap, focus return and the modalDepth gate come from
+  // `use:dialog` (dialogKit.ts) instead of a hand-rolled copy.
+  const dialogOpts = { onEscape: () => onclose?.() };
 
   /** Radio semantics for segmented groups: arrows/Home/End move AND select. */
   function radioKey(e: KeyboardEvent, values: string[], current: string, set: (v: string) => void) {
@@ -256,8 +229,7 @@
   aria-modal="true"
   aria-label="Settings"
   tabindex="-1"
-  bind:this={modal}
-  onkeydown={onKey}
+  use:dialog={dialogOpts}
 >
   <aside class="cats">
     <h2>Settings</h2>

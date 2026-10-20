@@ -5,6 +5,8 @@
     viewPresets,
   } from '../stores/viewPresetsStore.svelte';
   import Icon from './Icon.svelte';
+  import Mnemonic from './Mnemonic.svelte';
+  import { dialog } from '../dialogKit';
 
   let inputEl = $state<HTMLInputElement | undefined>();
 
@@ -27,16 +29,17 @@
     queueMicrotask(() => inputEl?.focus());
   });
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      viewPresets.close();
-    } else if (e.key === 'Enter' && viewPresets.draftName.trim()) {
-      e.preventDefault();
+  // FER-577: shared trap / focus return / modalDepth. Enter in the name field saves; on a
+  // preset button it applies that preset (native button activation).
+  const dialogOpts = {
+    onEscape: () => viewPresets.close(),
+    onEnter: () => {
+      if (!viewPresets.draftName.trim()) return;
       saveActivePreset(viewPresets.draftName);
       viewPresets.draftName = '';
-    }
-  }
+    },
+    initial: () => inputEl,
+  };
 </script>
 
 {#if viewPresets.open}
@@ -48,7 +51,7 @@
     aria-modal="true"
     aria-label="Custom View Modes"
     tabindex="-1"
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     <header>
       <h2>Custom View Modes</h2>
@@ -76,7 +79,7 @@
           viewPresets.draftName = '';
         }}
       >
-        Save current
+        <Mnemonic label="&Save current" />
       </button>
     </div>
 

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { focusModal } from '../focusModal';
+  import { dialog } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
   import { propertiesStore as store, systemInfo } from '../stores/propertiesStore.svelte';
   import { formatSize } from '../format';
 
@@ -39,12 +40,26 @@
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      store.close();
-    }
-  }
+  // FER-577: Esc closes (closing the occupied-space dialog cancels the walk). Enter from the
+  // dialog / a checkbox is the safe forward step: close the read-only sheets, "Review" for
+  // attributes. It never applies attribute changes and never interrupts a running walk.
+  const dialogOpts = {
+    onEscape: () => store.close(),
+    onEnter: () => {
+      if (!d) return;
+      if (d.kind === 'attributes') {
+        if (
+          store.attributeStage === 'edit' &&
+          !store.busy &&
+          store.attributesSupported &&
+          store.hasAttributeChanges
+        )
+          store.reviewAttributes();
+      } else if (d.kind === 'occupied') {
+        if (!store.loading) store.close();
+      } else store.close();
+    },
+  };
 </script>
 
 {#if d}
@@ -64,8 +79,7 @@
             ? 'Volume Label'
             : 'System Information'}
     tabindex="-1"
-    use:focusModal
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     {#if d.kind === 'properties'}
       <h2>Properties</h2>
@@ -139,7 +153,7 @@
                 disabled={store.busy || !store.attributesSupported}
                 onchange={(e) => (store.attributeChoice.readOnly = e.currentTarget.checked)}
               />
-              Read-only
+              <Mnemonic label="&Read-only" />
             </label>
             <label class="check">
               <input
@@ -149,7 +163,7 @@
                 disabled={store.busy || !store.attributesSupported}
                 onchange={(e) => (store.attributeChoice.hidden = e.currentTarget.checked)}
               />
-              Hidden
+              <Mnemonic label="&Hidden" />
             </label>
           </div>
           {#if store.attributesApplied > 0 && store.attributeErrors.length === 0}
@@ -185,15 +199,15 @@
       {/if}
       <div class="actions">
         {#if store.attributeStage === 'preview'}
-          <button class="ghost" onclick={() => store.backToEdit()} disabled={store.busy}
-            >Back</button
-          >
+          <button class="ghost" onclick={() => store.backToEdit()} disabled={store.busy}>
+            <Mnemonic label="&Back" />
+          </button>
           <button
             class="primary"
             onclick={() => void store.applyAttributes()}
             disabled={store.busy || !store.attributesSupported || !store.hasAttributeChanges}
           >
-            Apply
+            <Mnemonic label="&Apply" />
           </button>
         {:else}
           <button class="ghost" onclick={() => store.close()} disabled={store.busy}>Close</button>
@@ -202,7 +216,7 @@
             onclick={() => store.reviewAttributes()}
             disabled={store.busy || !store.attributesSupported || !store.hasAttributeChanges}
           >
-            Review changes
+            <Mnemonic label="Re&view changes" />
           </button>
         {/if}
       </div>

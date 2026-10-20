@@ -2,7 +2,8 @@
   import { columns } from '../stores/columnsStore.svelte';
   import { ALL_COLUMNS, COLUMN_LABELS, type ColumnId } from '../columns';
   import Icon from './Icon.svelte';
-  import { focusModal } from '../focusModal';
+  import { dialog } from '../dialogKit';
+  import Mnemonic from './Mnemonic.svelte';
 
   const rest = $derived(columns.config.filter((id) => id !== 'name'));
 
@@ -10,12 +11,8 @@
     return columns.config.includes(id);
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      columns.close();
-    }
-  }
+  // FER-577: Esc and Enter (from a checkbox) both close; every toggle already applies live.
+  const dialogOpts = { onEscape: () => columns.close(), onEnter: () => columns.close() };
 </script>
 
 {#if columns.open}
@@ -27,8 +24,7 @@
     aria-modal="true"
     aria-label="Custom Columns"
     tabindex="-1"
-    use:focusModal
-    onkeydown={onKey}
+    use:dialog={dialogOpts}
   >
     <header>
       <h2>Custom Columns</h2>
@@ -83,8 +79,10 @@
     </ul>
 
     <footer>
-      <button class="ghost" onclick={() => columns.reset()}>Reset to default</button>
-      <button class="primary" onclick={() => columns.close()}>Done</button>
+      <button class="ghost" onclick={() => columns.reset()}
+        ><Mnemonic label="&Reset to default" /></button
+      >
+      <button class="primary" onclick={() => columns.close()}><Mnemonic label="&Done" /></button>
     </footer>
   </div>
 {/if}
