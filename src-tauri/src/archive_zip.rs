@@ -395,10 +395,11 @@ impl ArchiveProvider for ZipProvider {
         // Map zip members to engine entries (decoded sizes known up front).
         let names: Vec<String> = (0..archive.len())
             .map(|i| {
-                archive
-                    .by_index(i)
-                    .map(|zf| zf.name().to_owned())
-                    .map_err(|e| ArchiveError::new(ArchiveErrorCode::CorruptArchive, e.to_string()))
+                // The central-directory name, readable without decrypting: an encrypted member
+                // must reach the password-aware read below, not fail here as "corrupt" (FER-575).
+                archive.name_for_index(i).map(str::to_owned).ok_or_else(|| {
+                    ArchiveError::new(ArchiveErrorCode::CorruptArchive, "missing member name")
+                })
             })
             .collect::<Result<Vec<_>, ArchiveError>>()?;
         let mut entries: Vec<Entry<'_>> = Vec::with_capacity(names.len());

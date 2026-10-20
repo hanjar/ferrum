@@ -27,6 +27,8 @@
   import { activity } from '../stores/activityStore.svelte';
   import { shellOpen } from '../ipc/activity';
   import { handleShellError } from '../ipc/shellOpen';
+  import { openArchiveMemberAt } from '../stores/openArchiveMember';
+  import { toast } from '../stores/toastStore.svelte';
   import { formatSize, parentOf } from '../format';
   import { homeDir } from '@tauri-apps/api/path';
   import { registerPane } from '../stores/panesRegistry.svelte';
@@ -64,21 +66,22 @@
   // Browser dev keeps the shell previewable without Rust via mock listings.
   // In Tauri: archive-aware fetcher dispatches to disk or archive listing.
   const knownArchives = new SvelteSet<string>();
+  const archiveFetcher = isInTauri()
+    ? createArchiveAwareFetcher(
+        knownArchives,
+        (p) => knownArchives.add(p),
+        // FER-75: a non-first volume or a set with missing volumes gets an explanation, with a
+        // button to open the first volume, instead of a bare error.
+        (p, e) => {
+          if (isMultipartError(e)) void dialogs.showMultipart(p, (e as Error).message, 'Open');
+        },
+        // FER-504: a header-encrypted archive asks for its password when
+        // the pane opens it; the listing retries with what the user typed.
+        (p, wrong) => dialogs.askArchivePassword(p, wrong),
+      )
+    : null;
   const store = new PaneStore(
-    isInTauri()
-      ? createArchiveAwareFetcher(
-          knownArchives,
-          (p) => knownArchives.add(p),
-          // FER-75: a non-first volume or a set with missing volumes gets an explanation, with a
-          // button to open the first volume, instead of a bare error.
-          (p, e) => {
-            if (isMultipartError(e)) void dialogs.showMultipart(p, (e as Error).message, 'Open');
-          },
-          // FER-504: a header-encrypted archive asks for its password when
-          // the pane opens it; the listing retries with what the user typed.
-          (p, wrong) => dialogs.askArchivePassword(p, wrong),
-        )
-      : mockFetcher,
+    archiveFetcher ?? mockFetcher,
     // Desktop: homePath starts at the real drive root and is replaced by the real home dir in bootTabs.
     // Mock home is browser dev only.
     isInTauri() ? 'C:\\' : mockHome[paneId],
@@ -483,9 +486,23 @@
    * or paused windows pass record=false). Never called from preview/QuickView.
    */
   async function openFile(path: string) {
-    // Non-local / virtual locations (archives, URI-style paths) are not ours to open.
+    // Non-local / virtual locations (URI-style paths) are not ours to open.
     if (/^[A-Za-z][A-Za-z0-9+.-]+:\/\//.test(path)) return;
     try {
+      // FER-575: a file inside an archive is not a disk path. The backend extracts that member
+      // to its temp folder and opens it through the confirmed shell path; no receipt (temp file).
+      const inArchiveResult = await openArchiveMemberAt(path, {
+        passwordFor: archiveFetcher?.passwordFor,
+        rememberPassword: archiveFetcher?.rememberPassword,
+        askPassword: (p, wrong) => dialogs.askArchivePassword(p, wrong),
+        showWorking: (name) => {
+          toast.show(`Membuka ${name} dari arsip…`, 600_000);
+          return () => toast.show('', 0);
+        },
+        onError: (message) =>
+          dialogs.open({ kind: 'error', title: 'Open from archive', message }),
+      });
+      if (inArchiveResult !== 'notMember') return;
       await shellOpen(path, activity.recordingActive);
     } catch (err) {
       handleShellError('Open', err);

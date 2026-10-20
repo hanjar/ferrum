@@ -2310,11 +2310,25 @@ pub async fn shell_open(
 ) -> Result<bool, FsError> {
     validate_path(&path)?;
     let owner = window_hwnd(&window);
-    let path_clone = path.clone();
-    let accepted = spawn_blocking(move || {
+    let accepted = open_through_shell(owner, &path).await?;
+
+    if shell_open_records(accepted, record) {
+        // Receipt only after the OS accepted the request; failures are quiet.
+        if let Ok(service) = activity_service_of(&activity) {
+            let _ = service.record_visit(&path, VisitKind::FileOpen);
+        }
+    }
+    Ok(accepted)
+}
+
+/// The one launch path for an explicit "open this file": native confirmation for executables,
+/// scripts and installers, then the OS default handler.
+async fn open_through_shell(owner: isize, path: &str) -> Result<bool, FsError> {
+    let path = path.to_owned();
+    spawn_blocking(move || {
         crate::shell_open::shell_open_with(
             owner,
-            &path_clone,
+            &path,
             |o, text| {
                 crate::shell_open::native_confirm_with_guard(
                     o,
@@ -2326,15 +2340,55 @@ pub async fn shell_open(
         )
     })
     .await
-    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))??;
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+}
 
-    if shell_open_records(accepted, record) {
-        // Receipt only after the OS accepted the request; failures are quiet.
-        if let Ok(service) = activity_service_of(&activity) {
-            let _ = service.record_visit(&path, VisitKind::FileOpen);
-        }
-    }
-    Ok(accepted)
+/// FER-575: open one member of an archive. The backend parses the archive/member pair itself,
+/// extracts only that member through the fail-closed extract pipeline into Ferrum's own temp
+/// folder, and launches the extracted file through the same confirmed shell path as `shell_open`.
+/// Returns whether the OS accepted the launch. No activity receipt: the file lives in temp.
+#[tauri::command]
+pub async fn archive_open_member(
+    window: tauri::Window,
+    archive_path: String,
+    member_path: String,
+    password: Option<String>,
+    request_id: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<bool, FsError> {
+    validate_path(&archive_path)?;
+    let archive_path = crate::path_guard::check_str(&archive_path)?;
+    let provider = archive_provider(&archive_path)?;
+    let temp = app
+        .try_state::<crate::archive_open::OpenTemp>()
+        .map(|t| t.inner().clone())
+        .ok_or_else(|| {
+            FsError::new(
+                crate::domain::ErrorCode::Io,
+                "The temporary folder for opened archive files is not available",
+            )
+        })?;
+    let owner = window_hwnd(&window);
+    let job_archive = archive_path.clone();
+    let extracted = spawn_blocking(move || {
+        crate::archive_open::extract_member(
+            provider.as_ref(),
+            &temp,
+            &job_archive,
+            &member_path,
+            password.as_deref(),
+            request_id.as_deref(),
+            &mut |ev| {
+                let _ = app.emit(crate::archive_jobs::PROGRESS_EVENT, ev);
+            },
+        )
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+    .map_err(|e| archive_to_fs_err(&archive_path, e))?;
+    let extracted = extracted.to_string_lossy().into_owned();
+    validate_path(&extracted)?;
+    open_through_shell(owner, &extracted).await
 }
 
 /// FER-432 fail-closed: a receipt is written only when the OS accepted the
