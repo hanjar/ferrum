@@ -662,6 +662,121 @@ pub fn enqueue_move(
     ))
 }
 
+// ── FER-572: file clipboard (copy / cut / paste with Windows Explorer) ───────────────────
+
+/// A source path taken from (or put on) the shell clipboard. The list of a paste comes from
+/// ANOTHER process, so it gets the same gates as a manual copy / move source: the string gate
+/// (no relative paths, device namespaces, ADS, control characters incl. NUL), no reserved device
+/// names, no local-machine UNC spelling, and for a cut the protected app folders. The entry must
+/// exist. The normalised spelling is returned.
+fn check_clipboard_source(path: &str, cut: bool) -> Result<String, FsError> {
+    let normalised = crate::path_guard::check_str(path)?;
+    if crate::path_guard::has_reserved_device_component(&normalised) {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Path contains a reserved Windows device name",
+        ));
+    }
+    check_not_local_unc(&normalised)?;
+    if cut {
+        crate::protected_dirs::check_write_source(&normalised)?;
+    }
+    if std::fs::symlink_metadata(&normalised).is_err() {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::NotFound,
+            "Item not found on disk (it is gone, or lives inside an archive)",
+        ));
+    }
+    Ok(normalised)
+}
+
+/// Owner window for clipboard writes (`SetClipboardData` fails without a real owner window).
+fn clipboard_owner_hwnd(window: &tauri::WebviewWindow) -> Result<isize, FsError> {
+    #[cfg(windows)]
+    {
+        window
+            .hwnd()
+            .map(|h| h.0 as isize)
+            .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(0)
+    }
+}
+
+/// Result of a paste read: validated sources and whether the clipboard asked for a move.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardPaste {
+    pub paths: Vec<String>,
+    pub cut: bool,
+    pub sequence: u32,
+}
+
+/// Ctrl+C / Ctrl+X on files: puts them on the Windows clipboard as `CF_HDROP` plus
+/// `Preferred DropEffect` (copy or move), so Explorer can paste them. Returns the clipboard
+/// sequence number.
+#[tauri::command]
+pub async fn clipboard_copy_files(
+    paths: Vec<String>,
+    cut: bool,
+    window: tauri::WebviewWindow,
+) -> Result<u32, FsError> {
+    let hwnd = clipboard_owner_hwnd(&window)?;
+    spawn_blocking(move || {
+        let checked = paths
+            .iter()
+            .map(|p| check_clipboard_source(p, cut))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::clipboard_files::write_files(hwnd, &checked, cut)
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+}
+
+/// Ctrl+V: reads the file list from the clipboard. `None` = no files there. Every path is
+/// validated; the caller then runs the normal copy / move flow (plan, conflict dialog, queue,
+/// all guards) into the active pane's folder.
+#[tauri::command]
+pub async fn clipboard_read_files(
+    window: tauri::WebviewWindow,
+) -> Result<Option<ClipboardPaste>, FsError> {
+    let hwnd = clipboard_owner_hwnd(&window)?;
+    spawn_blocking(move || {
+        let Some(found) = crate::clipboard_files::read_files(hwnd)? else {
+            return Ok(None);
+        };
+        let paths = found
+            .paths
+            .iter()
+            .map(|p| check_clipboard_source(p, found.cut))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(ClipboardPaste {
+            paths,
+            cut: found.cut,
+            sequence: found.sequence,
+        }))
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+}
+
+/// After a pasted CUT completed (the move ran in our own queue): empty the clipboard when it
+/// still holds that same content, as Explorer does, so the moved files cannot be pasted again.
+/// A clipboard that changed in the meantime is left alone.
+#[tauri::command]
+pub async fn clipboard_finish_cut(
+    sequence: u32,
+    window: tauri::WebviewWindow,
+) -> Result<bool, FsError> {
+    let hwnd = clipboard_owner_hwnd(&window)?;
+    spawn_blocking(move || crate::clipboard_files::clear_if_unchanged(hwnd, sequence))
+        .await
+        .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+}
+
 // ── Archive commands (F2-12) ────────────────────────────────────────────
 
 use crate::archive_contract::{
@@ -3448,11 +3563,51 @@ mod preflight_request_debug_tests {
 /// FER-512 P3-3 / Info-1: the mutation guard and the queue-harness cap.
 #[cfg(test)]
 mod fer512_ipc_gate_tests {
-    use super::{check_mutation_path, check_write_sources, dummy_ticks};
+    use super::{check_clipboard_source, check_mutation_path, check_write_sources, dummy_ticks};
     use crate::domain::ErrorCode;
 
     /// The exact audit cases: an ADS spelling and a device namespace are
     /// refused at the command boundary.
+    #[test]
+    fn clipboard_sources_are_validated_like_manual_sources() {
+        // FER-572: a path list taken from the clipboard comes from another process.
+        let dir = std::env::temp_dir().join(format!("ferrum-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let ok = check_clipboard_source(file.to_str().unwrap(), false).unwrap();
+        assert!(ok.ends_with("a.txt"));
+        // Cut applies the protected-folder source gate as well; a plain temp file passes it.
+        assert!(check_clipboard_source(file.to_str().unwrap(), true).is_ok());
+
+        for bad in [
+            r"relative\path.txt",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\X",
+            r"\\?\C:\Windows\notepad.exe",
+            r"C:\Windows\notepad.exe:ads",
+            "C:\\Windows\\a\0b",
+            r"C:\Windows\CON",
+            r"C:\x\NUL.txt",
+            r"\\localhost\C$\Windows",
+            r"\\127.0.0.1\C$\Windows",
+            "",
+        ] {
+            assert!(
+                check_clipboard_source(bad, false).is_err(),
+                "should be refused: {bad:?}"
+            );
+        }
+        // Well-formed but missing.
+        assert_eq!(
+            check_clipboard_source(dir.join("missing.txt").to_str().unwrap(), false)
+                .unwrap_err()
+                .code,
+            crate::domain::ErrorCode::NotFound
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn mutation_paths_refuse_ads_and_device_namespaces() {
         for bad in [

@@ -159,6 +159,8 @@ export type Dialog =
       totalFiles: number;
       totalBytes: number;
       conflicts: { source: string; dest: string }[];
+      /** FER-572: a move pasted from the Windows clipboard (cut); the clipboard is emptied once it completes. */
+      clipboardSequence?: number;
     }
   /** F2-14: Select/Unselect Group with a live match-count preview. */
   | { kind: 'selectGroup'; unselect: boolean; parent: string }
@@ -575,14 +577,20 @@ class DialogStore {
   /** Drop flow (cross-pane drag): explicit paths and explicit target dir —
    *  no active/inactive pane lookups. planCopy still runs to surface
    *  conflicts (D21) before the confirm dialog opens. */
-  async beginTransferTo(kind: 'copy' | 'move', paths: string[], target: string) {
-    await this.beginTransferFlow(kind, target, paths);
+  async beginTransferTo(
+    kind: 'copy' | 'move',
+    paths: string[],
+    target: string,
+    opts?: { clipboardSequence?: number },
+  ) {
+    await this.beginTransferFlow(kind, target, paths, opts?.clipboardSequence);
   }
 
   private async beginTransferFlow(
     kind: 'copy' | 'move',
     explicitTarget?: string,
     explicitPaths?: string[],
+    clipboardSequence?: number,
   ) {
     const src = activePane();
     const dst = inactivePane();
@@ -641,6 +649,7 @@ class DialogStore {
         totalFiles: plan.totalFiles,
         totalBytes: plan.totalBytes,
         conflicts: plan.conflicts,
+        ...(clipboardSequence !== undefined ? { clipboardSequence } : {}),
       });
     } catch (e) {
       this.open({

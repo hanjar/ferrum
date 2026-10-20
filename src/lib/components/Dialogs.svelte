@@ -6,6 +6,8 @@
     enqueueMove,
     renameEntry,
   } from '../ipc/mutations';
+  import { clipboardFinishCut } from '../ipc/clipboardFiles';
+  import { ops } from '../stores/opsStore.svelte';
   import { runPack, type PackFormat } from '../packService';
   import { loadSelectionFile, saveSelectionFile } from '../ipc/selectionFile';
   import { FsError } from '../ipc/types';
@@ -345,7 +347,12 @@
     }
   }
 
-  async function submitCopy(kind: 'copy' | 'move', paths: string[], target: string) {
+  async function submitCopy(
+    kind: 'copy' | 'move',
+    paths: string[],
+    target: string,
+    clipboardSequence?: number,
+  ) {
     busy = true;
     try {
       if (kind === 'copy') await enqueueCopy(paths, target, policy);
@@ -354,6 +361,13 @@
         // DSK-06.3: the queued move is observed to its terminal state — the
         // scan goes stale only once the operation actually did work.
         recordQueuedMove(opId, paths, target);
+        // FER-572: a pasted CUT empties the clipboard once the move really completed (as
+        // Explorer does), so the same files cannot be pasted a second time.
+        if (clipboardSequence !== undefined) {
+          ops.watchTerminal(opId, (p) => {
+            if (p.state === 'completed') void clipboardFinishCut(clipboardSequence).catch(() => {});
+          });
+        }
       }
       dialogs.close();
     } catch (e) {
@@ -872,7 +886,7 @@
         {:else if d.kind === 'copy' || d.kind === 'move'}
           <button
             class="primary"
-            onclick={() => void submitCopy(d.kind, d.paths, d.target)}
+            onclick={() => void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence)}
             disabled={busy || (d.conflicts.length > 0 && policy === 'ask')}
           >
             {d.kind === 'copy' ? 'Copy' : 'Move'}

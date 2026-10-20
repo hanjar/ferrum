@@ -29,6 +29,18 @@ running`). Any explicit thread change turns auto mode off. Performance knobs onl
 Planned: `create_entry`, `rename_entry`, `delete_entries` (task 10),
 `enqueue_copy` / `enqueue_move`, `cancel_operation` (tasks 09–12).
 
+### File clipboard (FER-572)
+
+`clipboard_copy_files(paths, cut) -> u32`, `clipboard_read_files() -> { paths, cut, sequence } | null`,
+`clipboard_finish_cut(sequence) -> bool`. They exchange files with Windows Explorer through the shell
+clipboard formats `CF_HDROP` and `Preferred DropEffect` (Microsoft, "Shell Clipboard Formats").
+Paths read from the clipboard come from another process: the DROPFILES block is parsed within its
+GlobalSize bounds (item, path and total-size limits, ANSI lists refused) and every path passes the
+manual copy/move source gates (string gate, reserved device names, local-machine UNC, protected
+folders for a cut, must exist). A paste then goes through `plan_copy` and `enqueue_copy` /
+`enqueue_move` like F5/F6. After a pasted cut finishes, `clipboard_finish_cut` empties the clipboard
+if its sequence number is unchanged (Explorer does the same for a cut it performed itself).
+
 ## FileEntry
 
 ```ts
