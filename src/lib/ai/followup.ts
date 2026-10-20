@@ -175,7 +175,7 @@ function parseRename(payload: string): FollowUpParse {
     return {
       kind: 'rejected',
       message:
-        `Nama "${clip(text)}" tidak aman untuk file ZIP (tanpa pemisah folder, ":", titik di awal/akhir, ` +
+        `Nama "${clip(text)}" tidak aman untuk nama arsip (tanpa pemisah folder, ":", titik di awal/akhir, ` +
         'atau nama perangkat Windows seperti CON). Rencana tidak diubah.',
     };
   }

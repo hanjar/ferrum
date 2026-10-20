@@ -123,7 +123,7 @@ fn archive_prompt_offers_7z_levels_and_still_forbids_rar_and_paths() {
         "\"paling kecil\"",
         "-> \"ultra\"",
         "RAR and other formats are not available",
-        "Never name a path or file in the intent",
+        "Never put a path in the intent; outputName is a basename only",
     ] {
         assert!(prompt.contains(needle), "{needle}");
     }

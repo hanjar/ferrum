@@ -100,6 +100,6 @@ No new Tauri command, Cargo or `package.json` change is required by this lane.
   (`maximum` and `ultra` both -> `max`, LZMA2 level 9 for 7z, deflate 9 for ZIP). The model never names an engine flag.
 - Execution is the same Pack service as the manual dialog (`runPack`, `format: 'sevenz'`, conflict `skip`: never replaces a file).
 - A typed `.zip`/`.7z` output name is converted to the chosen format's extension. Format and level are part of the plan digest, so
-  changing either needs a fresh approval, and the preview text names them ("Format 7z, kompresi ultra").
+  changing either needs a fresh approval, and the preview text names them ("Format 7z, kompresi maksimum (level terkuat, sama dengan Max di dialog Pack)"); `ultra` is shown and digested as `maximum`.
 - The provider prompt has a format rule ("paling kecil", "terkecil", "smallest", "max compression" -> `ultra`). The mutating-prompt
   golden in `provider_activity_tests.rs` was updated for this; re-run `docs/ai/verification.md` against a real provider.

@@ -202,7 +202,9 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
       const intent = envelope.intent;
       const format: ArchiveIntentFormat =
         intent.capability === 'archive.create' ? intent.format : 'zip';
-      const level = intent.capability === 'archive.create' ? intent.level : undefined;
+      // `ultra` and `maximum` run the SAME engine level: one name, so the digest never implies a difference.
+      const rawLevel = intent.capability === 'archive.create' ? intent.level : undefined;
+      const level: ArchiveIntentLevel | undefined = rawLevel === 'ultra' ? 'maximum' : rawLevel;
       const label = format === '7z' ? '7z' : 'ZIP';
       const selection = selections.create(scope, deps.resolver.entries(scope.handle));
       const paths = selection.paths();

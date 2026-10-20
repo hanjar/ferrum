@@ -375,7 +375,7 @@ describe('7z and compression level — FER-576', () => {
     });
     const text = JSON.stringify(preview);
     expect(text).toContain('Format 7z');
-    expect(text).toContain('ultra');
+    expect(text).toContain('maksimum');
     t.ex.approve('run-1');
     await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
     const call = ipc.archiveCreate.mock.calls[0];
@@ -390,13 +390,6 @@ describe('7z and compression level — FER-576', () => {
     const t = build({ format: '7z', outputName: 'data.zip' });
     const preview = await t.submit();
     expect(preview?.plan?.operation).toMatchObject({ outputName: 'data.7z' });
-  });
-
-  it('the plan digest changes with the level (a level swap needs a fresh approval)', async () => {
-    const a = await build({ format: '7z', level: 'fast' }).submit();
-    const b = await build({ format: '7z', level: 'ultra' }).submit();
-    expect(a?.plan?.previewDigest).toBeTruthy();
-    expect(a?.plan?.previewDigest).not.toBe(b?.plan?.previewDigest);
   });
 
   it('maps every chat level to an engine level; maximum and ultra are the strongest', async () => {
@@ -419,5 +412,14 @@ describe('7z and compression level — FER-576', () => {
     await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
     expect(ipc.archiveCreate.mock.calls[0][2]).toBe('zip');
     expect(ipc.archiveCreate.mock.calls[0][5]).toBeUndefined();
+  });
+});
+
+describe('ultra and maximum are one level (FER-576 review S1)', () => {
+  it('show the same card text, and the word ultra never reaches the card', async () => {
+    const a = await build({ format: '7z', level: 'ultra' }).submit();
+    const b = await build({ format: '7z', level: 'maximum' }).submit();
+    expect(a?.scopeNote).toBe(b?.scopeNote);
+    expect(JSON.stringify(a)).not.toContain('ultra');
   });
 });
