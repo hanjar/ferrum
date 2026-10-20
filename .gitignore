@@ -16,3 +16,4 @@ contract-fixtures/ai/rust/target/
 
 # FER-453: generated sandboxed PDF viewer bundle (npm run build:viewer)
 public/pdf-viewer.js
+dist-e2e/
