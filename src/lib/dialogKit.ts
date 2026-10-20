@@ -446,6 +446,18 @@ export function menuKeys(node: HTMLElement, initial: MenuKeysOptions = {}) {
           opts.onRight(e);
         }
         return;
+      case 'Enter':
+      case ' ': {
+        // Run the focused item ourselves: the window shortcut handler would otherwise take
+        // Enter (Open) and preventDefault the native button activation.
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && items.includes(el)) {
+          e.preventDefault();
+          e.stopPropagation();
+          el.click();
+        }
+        return;
+      }
       case 'Escape':
         if (opts.onClose) {
           e.preventDefault();

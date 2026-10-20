@@ -366,6 +366,22 @@ describe('use:menuKeys', () => {
     k.destroy();
   });
 
+  it('Enter and Space click the focused item and never reach window shortcuts', () => {
+    const m = menu();
+    const k = menuKeys(m);
+    const leak = vi.fn();
+    window.addEventListener('keydown', leak);
+    const opened = vi.fn();
+    m.querySelector('#m1')!.addEventListener('click', opened);
+    m.querySelector<HTMLElement>('#m1')!.focus();
+    expect(key(document.activeElement!, 'Enter').defaultPrevented).toBe(true);
+    key(document.activeElement!, ' ');
+    expect(opened).toHaveBeenCalledTimes(2);
+    expect(leak).not.toHaveBeenCalled();
+    window.removeEventListener('keydown', leak);
+    k.destroy();
+  });
+
   it('Escape and Tab report to onClose; Left/Right only when wired', () => {
     const m = menu();
     const onClose = vi.fn();
