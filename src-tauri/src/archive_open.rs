@@ -285,13 +285,11 @@ fn is_plain_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !is_link(&m))
 }
 
-/// Characters that reorder or hide text in a displayed name (bidi controls, RLO, ...).
+/// Control characters and the shared invisible/bidi set (`hotlist::model::is_format_char`):
+/// reorder or hide text in a displayed name. ZWJ/ZWNJ stay allowed (emoji sequences, some scripts).
 fn has_format_chars(name: &str) -> bool {
-    name.chars().any(|c| {
-        matches!(c,
-            '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
-    })
+    name.chars()
+        .any(|c| c.is_control() || crate::hotlist::model::is_format_char(c))
 }
 
 /// Copy the archive's `Zone.Identifier` stream (if any) onto `target`. ONLY "the stream does not
@@ -300,7 +298,41 @@ fn has_format_chars(name: &str) -> bool {
 /// would otherwise open without its internet-origin marking (S2).
 #[cfg(windows)]
 fn copy_motw(archive: &Path, target: &Path) -> Result<(), ArchiveError> {
-    copy_motw_with(archive, target, |p| std::fs::File::open(p))
+    copy_motw_with(
+        archive,
+        target,
+        |p| std::fs::File::open(p),
+        volume_has_streams,
+    )
+}
+
+/// True when the volume holding `path` supports named streams (NTFS, ReFS). Unknown -> true, so
+/// an unreadable answer never turns into "no mark".
+#[cfg(windows)]
+fn volume_has_streams(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    const FILE_NAMED_STREAMS: u32 = 0x0004_0000;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = [0u16; 261];
+    // SAFETY: NUL-terminated input, output buffers sized as passed.
+    unsafe {
+        if GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) == 0 {
+            return true;
+        }
+        let mut flags = 0u32;
+        let ok = GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        );
+        ok == 0 || flags & FILE_NAMED_STREAMS != 0
+    }
 }
 
 #[cfg(windows)]
@@ -308,6 +340,7 @@ fn copy_motw_with(
     archive: &Path,
     target: &Path,
     open: impl FnOnce(&Path) -> std::io::Result<std::fs::File>,
+    volume_supports_streams: impl FnOnce(&Path) -> bool,
 ) -> Result<(), ArchiveError> {
     use std::io::Read;
     // ERROR_INVALID_NAME: a volume (FAT/exFAT) that has no alternate streams.
@@ -319,11 +352,15 @@ fn copy_motw_with(
     };
     let file = match open(&stream(archive)) {
         Ok(f) => f,
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                || e.raw_os_error() == Some(ERROR_INVALID_NAME) =>
-        {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(()); // no mark on the archive
+        }
+        // An invalid-name answer means "no streams here" only on a volume that really has none.
+        Err(e)
+            if e.raw_os_error() == Some(ERROR_INVALID_NAME)
+                && !volume_supports_streams(archive) =>
+        {
+            return Ok(());
         }
         Err(e) => {
             return Err(err(
@@ -1034,22 +1071,68 @@ mod tests {
         let target = dir.path().join("t.txt");
         std::fs::write(&archive, b"x").unwrap();
         std::fs::write(&target, b"x").unwrap();
-        let denied = copy_motw_with(&archive, &target, |_| {
-            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-        });
+        let denied = copy_motw_with(
+            &archive,
+            &target,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_| false,
+        );
         assert_eq!(denied.unwrap_err().code, ArchiveErrorCode::Io);
-        let shared = copy_motw_with(&archive, &target, |_| {
-            Err(std::io::Error::from_raw_os_error(32))
-        });
+        let shared = copy_motw_with(
+            &archive,
+            &target,
+            |_| Err(std::io::Error::from_raw_os_error(32)),
+            |_| false,
+        );
         assert!(shared.is_err());
-        let missing = copy_motw_with(&archive, &target, |_| {
-            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
-        });
+        let missing = copy_motw_with(
+            &archive,
+            &target,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            |_| false,
+        );
         assert!(missing.is_ok());
-        let no_streams = copy_motw_with(&archive, &target, |_| {
-            Err(std::io::Error::from_raw_os_error(123))
-        });
+        let no_streams = copy_motw_with(
+            &archive,
+            &target,
+            |_| Err(std::io::Error::from_raw_os_error(123)),
+            |_| false,
+        );
         assert!(no_streams.is_ok());
+        // The same answer on a volume that DOES support streams is not "no mark".
+        let on_ntfs = copy_motw_with(
+            &archive,
+            &target,
+            |_| Err(std::io::Error::from_raw_os_error(123)),
+            |_| true,
+        );
+        assert_eq!(on_ntfs.unwrap_err().code, ArchiveErrorCode::Io);
+        // The real probe says the temp volume (NTFS in CI and on dev machines) has streams.
+        assert!(volume_has_streams(&archive));
+    }
+
+    #[test]
+    fn zwj_and_zwnj_names_open_but_other_invisible_characters_do_not() {
+        let f = fixture(&[
+            (
+                "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} liburan.jpg",
+                b"family",
+            ),
+            ("kar\u{200C}ya.txt", b"zwnj"),
+        ]);
+        let a = open(
+            &f.temp,
+            &f.archive,
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} liburan.jpg",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(a).unwrap(), b"family");
+        let b = open(&f.temp, &f.archive, "kar\u{200C}ya.txt").unwrap();
+        assert_eq!(std::fs::read(b).unwrap(), b"zwnj");
+        for bad in ["a\u{00AD}b.txt", "a\u{E0041}b.txt", "gpj.\u{202E}exe"] {
+            let e = open(&f.temp, &f.archive, bad).unwrap_err();
+            assert_eq!(e.code, ArchiveErrorCode::InvalidMemberPath, "{bad:?}");
+        }
     }
 
     #[cfg(windows)]
