@@ -1,10 +1,14 @@
 <script lang="ts">
+  // FER-577: modalDepth (mutes the global shortcuts), Tab trap and focus return; Esc / Enter keep
+  // their own staged handling in onDialogKey.
+  const hotlistDialogOpts = { mnemonics: false };
   // "Configure…" of the Directory Hotlist (FER-458), modelled on Total Commander's "Change
   // directory menu": tree on the left, Add item / Add submenu / Add separator / Delete / Up / Down
   // on the right, Title / Path / Target path / Command fields below. Edits go into a draft that
   // is only written (atomically, by the backend) on OK. Also hosts the wincmd.ini import preview.
   import { tick, untrack } from 'svelte';
   import { hotlist } from '../stores/hotlistStore.svelte';
+  import { dialog } from '../dialogKit';
   import { activePane } from '../stores/panesRegistry.svelte';
   import {
     appendItems,
@@ -452,6 +456,7 @@
     aria-label="Configure Directory Hotlist"
     tabindex="-1"
     onkeydown={onDialogKey}
+    use:dialog={hotlistDialogOpts}
   >
     <h2>Change directory menu</h2>
     {#if hotlist.readOnly}

@@ -103,7 +103,7 @@ test.describe('FER-472 sync fast-scan offer (mock IPC)', () => {
   test('the offer defaults to the ordinary scan (Escape/Enter): no fastScan flag', async () => {
     await boot(page, { eligible: true });
     await openSync(page);
-    const offer = page.getByRole('dialog', { name: 'fastScanOffer' });
+    const offer = page.locator('[role="dialog"][data-kind="fastScanOffer"]');
     await expect(offer).toBeVisible();
     await expect(offer).toContainText('C:\\Users\\demo');
     await expect(offer.getByRole('button', { name: 'Scan biasa' })).toBeFocused();
@@ -133,7 +133,7 @@ test.describe('FER-472 sync fast-scan offer (mock IPC)', () => {
     await expect(
       page.getByRole('complementary', { name: 'Synchronize Directories' }),
     ).toBeVisible();
-    await expect(page.getByRole('dialog', { name: 'fastScanOffer' })).toHaveCount(0);
+    await expect(page.locator('[role="dialog"][data-kind="fastScanOffer"]')).toHaveCount(0);
     const c = await calls(page);
     expect(c.compare).toHaveLength(1);
     expect(c.compare[0]).not.toHaveProperty('fastScan');

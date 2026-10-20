@@ -111,9 +111,9 @@ describe('Pack dialog submit', () => {
   it('Pack button calls archiveCreate(paths, target, format, conflict, requestId), closes and refreshes the pane', async () => {
     archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Invoice.zip');
     open();
-    const { getByText } = render(Dialogs);
+    const { getByRole } = render(Dialogs);
     await tick();
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
     expect(archiveMocks.archiveCreate).toHaveBeenCalledTimes(1);
     expect(archiveMocks.archiveCreate).toHaveBeenCalledWith(
@@ -150,9 +150,9 @@ describe('Pack dialog submit', () => {
     });
 
     open();
-    const { getByText, getByRole } = render(Dialogs);
+    const { getByRole } = render(Dialogs);
     await tick();
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await tick();
 
     // Now progress dialog is active:
@@ -181,9 +181,9 @@ describe('Pack dialog submit', () => {
     });
 
     open();
-    const { getByText, getByRole } = render(Dialogs);
+    const { getByRole } = render(Dialogs);
     await tick();
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await tick();
 
     expect(dialogs.current).toMatchObject({ kind: 'archiveProgress' });
@@ -198,9 +198,9 @@ describe('Pack dialog submit', () => {
       new FsError({ code: 'io', message: 'disk is full' }),
     );
     open();
-    const { getByText, findByText } = render(Dialogs);
+    const { findByText, getByRole } = render(Dialogs);
     await tick();
-    await fireEvent.click(getByText('Pack', { selector: 'button' }));
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
     await findByText(/disk is full/);
     expect(dialogs.current).toMatchObject({ kind: 'pack' });
     expect(refresh).not.toHaveBeenCalled();
