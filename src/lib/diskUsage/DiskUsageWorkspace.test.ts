@@ -40,6 +40,7 @@ vi.mock('../ipc/diskUsage', () => ({
 
 import DiskUsageWorkspace from './DiskUsageWorkspace.svelte';
 import { duWorkspace } from './duWorkspace.svelte';
+import { ui } from '../uiState.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
 import { registerPane } from '../stores/panesRegistry.svelte';
 import type { DiskUsageChildItem, DiskUsageSnapshot } from '../ipc/types';
@@ -151,6 +152,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   duWorkspace.exit();
   duWorkspace.entryPane = 0;
+  duWorkspace.lastEntryCwd = null;
+  ui.activate(0);
   duWorkspace.store.reset();
   dialogs.close();
   duMocks.cancel.mockResolvedValue(true);
@@ -880,3 +883,102 @@ function paneOf(path: string) {
     selectPaths: vi.fn(),
   };
 }
+
+describe('DiskUsageWorkspace — FER-574 entry follows the ACTIVE pane', () => {
+  async function scanLeft(): Promise<void> {
+    duMocks.start.mockResolvedValueOnce('s-l');
+    duMocks.snapshot.mockResolvedValueOnce(snapshotFixture('s-l', 'C:\\left'));
+    duWorkspace.openFromPanes();
+    await duWorkspace.store.start();
+    finishScan('s-l');
+    await flush();
+    expect(duWorkspace.store.phase).toBe('complete');
+  }
+
+  it('left → scan → exit → activate right → enter: right folder is used (no stale left result)', async () => {
+    registerPane(0, paneOf('C:\\left'));
+    registerPane(1, paneOf('D:\\right'));
+    await scanLeft();
+    expect(duWorkspace.store.root).toBe('C:\\left');
+    duWorkspace.exit();
+    ui.activate(1);
+    duWorkspace.openFromPanes();
+    await flush();
+    expect(duWorkspace.entryPane).toBe(1);
+    expect(duWorkspace.store.rootInput).toBe('D:\\right');
+    // No cache → fresh-entry state (idle + Scan), the left result is gone.
+    expect(duWorkspace.store.phase).toBe('idle');
+    expect(duWorkspace.store.hasData).toBe(false);
+    expect(duMocks.cacheLoad).toHaveBeenCalledWith('D:\\right');
+  });
+
+  it('a cache of the right folder is loaded on entry from the right pane', async () => {
+    registerPane(0, paneOf('C:\\left'));
+    registerPane(1, paneOf('D:\\right'));
+    await scanLeft();
+    duWorkspace.exit();
+    ui.activate(1);
+    duMocks.cacheLoad.mockResolvedValue({
+      summary: { ...snapshotFixture('c-r', 'D:\\right'), scannedAtMs: Date.now() - 60_000 },
+      engine: 'walk' as const,
+      mutated: false,
+    });
+    duWorkspace.openFromPanes();
+    await flush();
+    expect(duWorkspace.store.phase).toBe('stale');
+    expect(duWorkspace.store.root).toBe('D:\\right');
+    expect(duWorkspace.store.scanId).toBe('c-r');
+  });
+
+  it('re-entering from the right pane again keeps the result without a rescan', async () => {
+    registerPane(0, paneOf('C:\\left'));
+    registerPane(1, paneOf('D:\\right'));
+    ui.activate(1);
+    duMocks.start.mockResolvedValueOnce('s-r');
+    duMocks.snapshot.mockResolvedValueOnce(snapshotFixture('s-r', 'D:\\right'));
+    duWorkspace.openFromPanes();
+    await duWorkspace.store.start();
+    finishScan('s-r');
+    await flush();
+    duWorkspace.exit();
+    const startsBefore = duMocks.start.mock.calls.length;
+    duWorkspace.openFromPanes();
+    await flush();
+    expect(duMocks.start.mock.calls.length).toBe(startsBefore);
+    expect(duWorkspace.store.phase).toBe('complete');
+    expect(duWorkspace.store.scanId).toBe('s-r');
+  });
+
+  it('a hand-typed root survives exit + re-entry while the entry folder is unchanged', async () => {
+    registerPane(0, paneOf('C:\\left'));
+    registerPane(1, paneOf('D:\\right'));
+    duWorkspace.openFromPanes();
+    duMocks.start.mockResolvedValueOnce('s-t');
+    duMocks.snapshot.mockResolvedValueOnce(snapshotFixture('s-t', 'E:\\typed'));
+    duWorkspace.store.rootInput = 'E:\\typed';
+    await duWorkspace.store.start();
+    finishScan('s-t');
+    await flush();
+    duWorkspace.exit();
+    duWorkspace.openFromPanes();
+    expect(duWorkspace.store.phase).toBe('complete');
+    expect(duWorkspace.store.root).toBe('E:\\typed');
+  });
+
+  it('a running scan for another root is not cancelled silently: only the suggestion changes', async () => {
+    registerPane(0, paneOf('C:\\left'));
+    registerPane(1, paneOf('D:\\right'));
+    duMocks.start.mockResolvedValueOnce('s-l');
+    duWorkspace.openFromPanes();
+    await duWorkspace.store.start();
+    expect(duWorkspace.store.phase).toBe('scanning');
+    duWorkspace.exit();
+    ui.activate(1);
+    duWorkspace.openFromPanes();
+    await flush();
+    expect(duWorkspace.store.phase).toBe('scanning');
+    expect(duWorkspace.store.root).toBe('C:\\left');
+    expect(duWorkspace.store.rootInput).toBe('D:\\right');
+    expect(duMocks.cancel).not.toHaveBeenCalled();
+  });
+});
