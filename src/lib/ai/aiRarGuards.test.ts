@@ -22,14 +22,14 @@ describe('FER-505 AI Guards: RAR format and rarExePath protection', () => {
         capability: 'archive.create',
         sourcePane: 'left',
         selector: { kind: 'selected' },
-        format: 'rar', // Forbidden: AI contracts only permit 'zip'
+        format: 'rar', // Forbidden: AI contracts only permit 'zip' and '7z'
         target: { kind: 'sourceDirectory' },
       },
     };
 
     expect(() => {
       parseIntent(invalidRarEnvelope, 'req-1');
-    }).toThrow(/expected zip/i);
+    }).toThrow(/zip or 7z/i);
   });
 
   it('parseIntent accepts format: "zip"', () => {

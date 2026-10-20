@@ -370,6 +370,7 @@ export function previousIntentSummary(prev: IntentEnvelope): Record<string, unkn
     // FER-433: id entity opak tidak perlu sampai ke provider.
     selector: i.selector.kind === 'entity' ? { kind: 'entity' } : i.selector,
     format: i.format,
+    ...(i.level !== undefined ? { level: i.level } : {}),
     target: i.target,
     hasOutputName: i.outputName !== undefined,
   };

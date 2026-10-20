@@ -28,6 +28,9 @@ interface BuildOptions {
   measure?: (paths: readonly string[], targetDirectory: string) => Promise<PackMeasure | undefined>;
   target?: { kind: 'sourceDirectory' } | { kind: 'pane'; pane: 'left' | 'right' };
   rightPath?: string;
+  format?: 'zip' | '7z';
+  level?: 'store' | 'fast' | 'normal' | 'maximum' | 'ultra';
+  outputName?: string;
 }
 
 function build(options: BuildOptions = {}) {
@@ -72,7 +75,9 @@ function build(options: BuildOptions = {}) {
             capability: 'archive.create',
             sourcePane: 'left',
             selector: { kind: 'allVisible', entries: 'all' },
-            format: 'zip',
+            format: options.format ?? 'zip',
+            ...(options.level !== undefined ? { level: options.level } : {}),
+            ...(options.outputName !== undefined ? { outputName: options.outputName } : {}),
             target: options.target ?? { kind: 'sourceDirectory' },
           },
         },
@@ -356,5 +361,63 @@ describe('capability follows the Pack service — FER-206', () => {
     const t = build({ packAvailable: () => true });
     expect(t.registry.availability('archive.create')).toEqual({ available: true });
     expect(t.registry.offeredCapabilityIds()).toContain('archive.create');
+  });
+});
+
+describe('7z and compression level — FER-576', () => {
+  it('7z + ultra: the preview says so, the output is .7z, and the Pack call is sevenz/max', async () => {
+    ipc.archiveCreate.mockResolvedValue(`${LEFT}\\Invoice.7z`);
+    const t = build({ format: '7z', level: 'ultra' });
+    const preview = await t.submit();
+    expect(preview?.plan?.operation).toMatchObject({
+      kind: 'archive.create',
+      outputName: 'Invoice.7z',
+    });
+    const text = JSON.stringify(preview);
+    expect(text).toContain('Format 7z');
+    expect(text).toContain('ultra');
+    t.ex.approve('run-1');
+    await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
+    const call = ipc.archiveCreate.mock.calls[0];
+    expect(call[1]).toBe(`${LEFT}\\Invoice.7z`);
+    expect(call[2]).toBe('sevenz');
+    expect(call[3]).toBe('skip'); // never replaces an existing file
+    expect(call[5]).toBe('max');
+  });
+
+  it('a user-typed .zip name is turned into .7z, not stacked', async () => {
+    ipc.archiveCreate.mockResolvedValue(`${LEFT}\\data.7z`);
+    const t = build({ format: '7z', outputName: 'data.zip' });
+    const preview = await t.submit();
+    expect(preview?.plan?.operation).toMatchObject({ outputName: 'data.7z' });
+  });
+
+  it('the plan digest changes with the level (a level swap needs a fresh approval)', async () => {
+    const a = await build({ format: '7z', level: 'fast' }).submit();
+    const b = await build({ format: '7z', level: 'ultra' }).submit();
+    expect(a?.plan?.previewDigest).toBeTruthy();
+    expect(a?.plan?.previewDigest).not.toBe(b?.plan?.previewDigest);
+  });
+
+  it('maps every chat level to an engine level; maximum and ultra are the strongest', async () => {
+    const { packLevelOf, packFormatOf } = await import('./archive');
+    expect(packLevelOf(undefined)).toBeUndefined();
+    expect(packLevelOf('store')).toBe('store');
+    expect(packLevelOf('fast')).toBe('fast');
+    expect(packLevelOf('normal')).toBe('normal');
+    expect(packLevelOf('maximum')).toBe('max');
+    expect(packLevelOf('ultra')).toBe('max');
+    expect(packFormatOf('7z')).toBe('sevenz');
+    expect(packFormatOf('zip')).toBe('zip');
+  });
+
+  it('zip without a level keeps the old call shape (no level argument)', async () => {
+    ipc.archiveCreate.mockResolvedValue(`${LEFT}\\Invoice.zip`);
+    const t = build();
+    await t.submit();
+    t.ex.approve('run-1');
+    await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
+    expect(ipc.archiveCreate.mock.calls[0][2]).toBe('zip');
+    expect(ipc.archiveCreate.mock.calls[0][5]).toBeUndefined();
   });
 });
