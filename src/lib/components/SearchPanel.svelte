@@ -8,6 +8,7 @@
   import { formatSize } from '../format';
   import { kindOf } from '../kind';
   import FileIcon from './FileIcon.svelte';
+  import { dialog } from '../dialogKit';
 
   const store = searchStore;
 
@@ -36,10 +37,6 @@
       case 'Enter':
         if (!store.revealCursor()) return;
         break;
-      case 'Escape':
-        if (store.running) void store.cancel();
-        else store.togglePanel();
-        break;
       default:
         return;
     }
@@ -49,13 +46,27 @@
     );
   }
 
+  // FER-577 (B3): a docked panel, not a modal. Alt+F7 puts the cursor in the pattern field, Esc
+  // from ANY control of the panel stops a running search first and closes the panel on the next
+  // press, and focus goes back to where it was (the file list). Tab is not trapped, the global
+  // shortcuts keep working, and no Alt accelerators (they would shadow the menu bar's Alt+S/F/...).
+  const panelOpts = {
+    modal: false,
+    mnemonics: false,
+    initial: '.pattern',
+    onEscape: () => {
+      if (store.running) void store.cancel();
+      else store.togglePanel();
+    },
+  };
+
   function maxSizeInput(e: Event) {
     store.options.maxSize = numberOrNull((e.target as HTMLInputElement).value);
   }
 </script>
 
 {#if store.panelOpen}
-  <aside class="panel" aria-label="Search">
+  <aside class="panel" aria-label="Search" tabindex="-1" use:dialog={panelOpts}>
     <div class="headRow">
       <h2>Search</h2>
       <span class="root mono">{store.root || '—'}</span>

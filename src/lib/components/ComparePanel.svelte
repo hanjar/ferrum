@@ -8,6 +8,7 @@
   import { formatSize } from '../format';
   import { compareRun } from '../stores/compareRun.svelte';
   import type { CompareEncoding, DirDiffState } from '../ipc/compare';
+  import { dialog } from '../dialogKit';
 
   const store = compareStore;
 
@@ -18,6 +19,18 @@
     if (f) void store.compareContents(f.leftPath, f.rightPath, enc);
     else store.encoding = enc;
   }
+
+  // FER-577 (B3): docked panel. The cursor starts on "Compare Directories"; Esc cancels a running
+  // compare (read-only, harmless), otherwise closes the panel; focus returns to the opener.
+  const panelOpts = {
+    modal: false,
+    mnemonics: false,
+    initial: '[data-autofocus]',
+    onEscape: () => {
+      if (store.busy) void store.cancelRun();
+      else store.closePanel();
+    },
+  };
 
   const progressPct = $derived.by(() => {
     const p = compareRun.progress;
@@ -36,7 +49,7 @@
 </script>
 
 {#if store.panelOpen}
-  <aside class="panel" aria-label="Compare">
+  <aside class="panel" aria-label="Compare" tabindex="-1" use:dialog={panelOpts}>
     <div class="headRow">
       <h2>Compare</h2>
       <button class="close" aria-label="Close compare panel" onclick={() => store.closePanel()}>
@@ -88,6 +101,7 @@
     <div class="row">
       <button
         type="button"
+        data-autofocus
         onclick={() => void store.compareDirectories(store.byContent)}
         disabled={store.busy}
       >

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getAction, isEnabled, runAction, type Action } from '../actions';
+  import { getAction, isEnabled, runAction, shortcutBlockedByModal, type Action } from '../actions';
 
   const keys: { key: string; id: string; label: string }[] = [
     { key: 'F2', id: 'file.rename', label: 'Rename' },
@@ -28,7 +28,7 @@
       disabled={!action || !isEnabled(action)}
       onclick={(e) => {
         const chosen = choose(e, item.id);
-        if (chosen) runAction(chosen);
+        if (chosen && !shortcutBlockedByModal(chosen)) runAction(chosen);
       }}
     >
       <span class="mono kbd">{item.key}</span>{item.label}

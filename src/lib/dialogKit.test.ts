@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  accessKey,
   assignMnemonics,
   dialog,
   duplicateMnemonics,
@@ -396,5 +397,90 @@ describe('use:menuKeys', () => {
     expect(onRight).toHaveBeenCalledTimes(1);
     expect(key(document.activeElement!, 'ArrowLeft').defaultPrevented).toBe(false);
     k.destroy();
+  });
+});
+
+describe('FER-577 B3 additions', () => {
+  it('modal: false (docked panel) does not count toward modalDepth and does not trap Tab', () => {
+    const host = html('<aside tabindex="-1"><input id="a"><button id="b">b</button></aside>');
+    const node = host.querySelector('aside') as HTMLElement;
+    const act = dialog(node, { modal: false, initial: '#a' });
+    expect(modalDepth()).toBe(0);
+    expect(document.activeElement).toBe(node.querySelector('#a'));
+    (node.querySelector('#b') as HTMLElement).focus();
+    const ev = key(node.querySelector('#b')!, 'Tab');
+    expect(ev.defaultPrevented).toBe(false);
+    act.destroy();
+    expect(modalDepth()).toBe(0);
+  });
+
+  it('modal: false still handles Esc and returns focus to the opener', () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const host = html('<aside tabindex="-1"><input id="a"></aside>');
+    const node = host.querySelector('aside') as HTMLElement;
+    const onEscape = vi.fn();
+    const act = dialog(node, { modal: false, onEscape, initial: '#a' });
+    key(node.querySelector('#a')!, 'Escape');
+    expect(onEscape).toHaveBeenCalledTimes(1);
+    act.destroy();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('accessKey: Latin keys as typed, physical key on non-Latin layouts, Alt-codes excluded', () => {
+    expect(accessKey({ key: 'p', code: 'KeyP' })).toBe('p');
+    expect(accessKey({ key: 'з', code: 'KeyP' })).toBe('p'); // Cyrillic layout
+    expect(accessKey({ key: '&', code: 'Digit1' })).toBe('1'); // AZERTY digit row
+    expect(accessKey({ key: ',', code: 'Comma' })).toBeNull();
+    expect(accessKey({ key: 'Enter', code: 'Enter' })).toBeNull();
+  });
+
+  it('a Cyrillic layout still reaches the mnemonic through the physical key', () => {
+    const host = html('<div tabindex="-1"><button data-mnemonic="p" id="pack">Pack</button></div>');
+    const node = host.firstElementChild as HTMLElement;
+    const onClick = vi.fn();
+    node.querySelector('#pack')!.addEventListener('click', onClick);
+    const act = dialog(node);
+    key(node, 'з', { altKey: true, code: 'KeyP' });
+    expect(onClick).toHaveBeenCalledTimes(1);
+    act.destroy();
+  });
+
+  it('Alt+Numpad digits (Alt-codes) never trigger a mnemonic (N2)', () => {
+    const host = html('<div tabindex="-1"><button data-mnemonic="2" id="two">Two</button></div>');
+    const node = host.firstElementChild as HTMLElement;
+    const onClick = vi.fn();
+    node.querySelector('#two')!.addEventListener('click', onClick);
+    const act = dialog(node);
+    key(node, '2', { altKey: true, location: 3, code: 'Numpad2' });
+    expect(onClick).not.toHaveBeenCalled();
+    key(node, '2', { altKey: true, code: 'Digit2' });
+    expect(onClick).toHaveBeenCalledTimes(1);
+    act.destroy();
+  });
+
+  it('Enter on input[type=button] is native, not the dialog primary action (N10)', () => {
+    const host = html('<div tabindex="-1"><input type="button" id="b" value="x"></div>');
+    const node = host.firstElementChild as HTMLElement;
+    const onEnter = vi.fn();
+    const act = dialog(node, { onEnter });
+    const ev = key(node.querySelector('#b')!, 'Enter');
+    expect(onEnter).not.toHaveBeenCalled();
+    expect(ev.defaultPrevented).toBe(false);
+    act.destroy();
+  });
+
+  it('roving treats aria-current / aria-pressed as the selected item and starts from it when the group has focus', () => {
+    const host = html(
+      '<div id="g" tabindex="-1"><button id="a">a</button><button id="b" aria-current="true">b</button><button id="c">c</button></div>',
+    );
+    const g = host.querySelector('#g') as HTMLElement;
+    const act = roving(g, { items: 'button', select: false });
+    expect((g.querySelector('#b') as HTMLElement).tabIndex).toBe(0);
+    expect((g.querySelector('#a') as HTMLElement).tabIndex).toBe(-1);
+    key(g, 'ArrowRight'); // the group itself has focus: continue after the selected "b"
+    expect(document.activeElement).toBe(g.querySelector('#c'));
+    act.destroy();
   });
 });

@@ -11,7 +11,7 @@ import { modalDepth } from './dialogKit';
 
 /** Containers whose own keyboard handling (focus traps, menus, panels) must keep Tab. */
 const OWN_TAB_SCOPES =
-  '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],aside.chat,[role="search"]';
+  '[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"],aside.chat,[role="search"],aside.panel';
 
 const other = (id: PaneId): PaneId => (id === 0 ? 1 : 0);
 

@@ -4,6 +4,7 @@ import Keybar from './Keybar.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
 import { registerPane, type PaneApi } from '../stores/panesRegistry.svelte';
 import { ui } from '../uiState.svelte';
+import { dialog, resetModalDepth } from '../dialogKit';
 
 let unregister: (() => void) | undefined;
 
@@ -51,5 +52,23 @@ describe('keybar registry parity', () => {
     fireEvent.click(getByRole('button', { name: 'F8 Delete' }), { shiftKey: true });
     expect(beginDelete).toHaveBeenCalledWith(true);
     beginDelete.mockRestore();
+  });
+});
+
+describe('keybar behind a modal (FER-577 S3)', () => {
+  it('does not run F7 / F8 while any modal is open', async () => {
+    const { getByRole } = mount(['C:\bench\notes.txt']);
+    const host = document.createElement('div');
+    host.tabIndex = -1;
+    document.body.append(host);
+    const act = dialog(host);
+    await fireEvent.click(getByRole('button', { name: 'F8 Delete' }));
+    await fireEvent.click(getByRole('button', { name: 'F7 New folder' }));
+    expect(dialogs.current).toBeNull();
+    act.destroy();
+    host.remove();
+    resetModalDepth();
+    await fireEvent.click(getByRole('button', { name: 'F7 New folder' }));
+    expect(dialogs.current?.kind).toBe('mkdir');
   });
 });

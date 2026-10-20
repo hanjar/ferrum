@@ -4,6 +4,7 @@
   import Icon from './Icon.svelte';
   import MenuBar from './MenuBar.svelte';
   import { ui } from '../uiState.svelte';
+  import { modalDepth } from '../dialogKit';
   import { BUILD_LABEL_COMPACT, BUILD_DETAIL } from '../version';
   import { ops } from '../stores/opsStore.svelte';
   import { aiChatHost } from '../ai/aiChatHost.svelte';
@@ -111,7 +112,7 @@
   <button
     class="paletteBox"
     title="Search files or run a command (Ctrl+K)"
-    onclick={() => (ui.paletteOpen = true)}
+    onclick={() => modalDepth() === 0 && (ui.paletteOpen = true)}
   >
     <Icon name="search" size={14} />
     <span class="paletteText">Search files or run a command</span>

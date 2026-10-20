@@ -150,12 +150,23 @@ export function tabbables(root: HTMLElement): HTMLElement[] {
   });
 }
 
+/**
+ * The Latin access letter / digit of a key event. On a non-Latin layout (Cyrillic, Greek, ...)
+ * `e.key` is not a Latin letter, so the physical key (`KeyX` / `DigitN`) stands in (FER-577, N3).
+ */
+export function accessKey(e: Pick<KeyboardEvent, 'key' | 'code'>): string | null {
+  if (/^[a-z0-9]$/i.test(e.key)) return e.key;
+  const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code ?? '');
+  if (m) return (m[1] ?? m[2]).toLowerCase();
+  return e.key.length === 1 && /^[\p{L}\p{N}]$/u.test(e.key) ? e.key : null;
+}
+
 /** Native activation keys: Enter on these must not be hijacked by a dialog. */
 function ownsEnter(t: HTMLElement | null, root: HTMLElement): boolean {
   if (!t || t === root) return false;
   if (t.closest('textarea,select')) return true;
   const el = t.closest<HTMLElement>(
-    'button,a[href],summary,[role="button"],[role="menuitem"],[role="tab"],[role="option"]',
+    'button,a[href],summary,input[type="button"],input[type="submit"],input[type="reset"],[role="button"],[role="menuitem"],[role="tab"],[role="option"]',
   );
   return !!el && root.contains(el);
 }
@@ -200,10 +211,22 @@ export interface DialogOptions {
    * button, link, select or textarea; Ctrl+Enter also fires from a textarea).
    */
   onEnter?: (e: KeyboardEvent, target: HTMLElement) => void;
-  /** Keep Tab inside the dialog. Default true. */
+  /**
+   * `false` for a docked, non-blocking panel (Search, Compare, Sync): the panel still gets
+   * initial focus, Esc, Enter rules and focus return, but it does not count toward `modalDepth`
+   * (the global shortcuts keep working) and Tab is not trapped unless `trap: true`.
+   * Default true.
+   */
+  modal?: boolean;
+  /** Keep Tab inside the dialog. Default true for modals, false for `modal: false`. */
   trap?: boolean;
   /** Alt+letter activates the control carrying `data-mnemonic`. Default true. */
   mnemonics?: boolean;
+  /**
+   * A dialog nested inside another one (an inline confirmation): Alt+key and Ctrl+PageUp/Down
+   * must not reach the outer dialog's accelerators and pull focus out of this one.
+   */
+  isolate?: boolean;
   /** Hand focus back to the element that was focused before the dialog opened. Default true. */
   returnFocus?: boolean;
 }
@@ -224,7 +247,8 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
   // FER-577 (N1): count the modal only once the setup did not throw, so a failing `initial`
   // can never leave modalDepth stuck above zero (which would mute every shortcut).
   focusInitial();
-  depth += 1;
+  const counted = opts.modal !== false;
+  if (counted) depth += 1;
 
   function onKeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.isComposing) return;
@@ -240,7 +264,7 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       e.preventDefault();
       e.stopPropagation();
       opts.onEnter(e, t ?? node);
-    } else if (e.key === 'Tab' && opts.trap !== false) {
+    } else if (e.key === 'Tab' && (opts.trap ?? counted)) {
       const list = tabbables(node);
       if (list.length === 0) {
         e.preventDefault();
@@ -276,9 +300,10 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       !e.ctrlKey &&
       !e.metaKey &&
       !e.shiftKey &&
-      e.key.length === 1
+      e.location !== 3 && // FER-577 (N2): Alt+Numpad digits are Alt-codes, not accelerators
+      accessKey(e) !== null
     ) {
-      const hit = findMnemonic(node, e.key);
+      const hit = findMnemonic(node, accessKey(e)!);
       if (hit) {
         e.preventDefault();
         e.stopPropagation();
@@ -286,7 +311,13 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       }
     }
   }
+  function onIsolate(e: KeyboardEvent) {
+    if (!opts.isolate) return;
+    if (e.altKey || (e.ctrlKey && (e.key === 'PageUp' || e.key === 'PageDown')))
+      e.stopPropagation();
+  }
   node.addEventListener('keydown', onKeydown);
+  node.addEventListener('keydown', onIsolate);
 
   return {
     update(next: DialogOptions) {
@@ -294,7 +325,8 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
     },
     destroy() {
       node.removeEventListener('keydown', onKeydown);
-      depth = Math.max(0, depth - 1);
+      node.removeEventListener('keydown', onIsolate);
+      if (counted) depth = Math.max(0, depth - 1);
       if (opts.returnFocus !== false && opener?.isConnected) opener.focus?.();
     },
   };
@@ -323,7 +355,9 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
   const isSelected = (el: HTMLElement) =>
     (el instanceof HTMLInputElement && el.checked) ||
     el.getAttribute('aria-checked') === 'true' ||
-    el.getAttribute('aria-selected') === 'true';
+    el.getAttribute('aria-selected') === 'true' ||
+    el.getAttribute('aria-current') === 'true' ||
+    el.getAttribute('aria-pressed') === 'true';
 
   /** Roving tabindex for non-native items; native radios already tab to the checked one. */
   function sync() {
@@ -339,7 +373,14 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['aria-checked', 'aria-selected', 'checked', 'disabled'],
+    attributeFilter: [
+      'aria-checked',
+      'aria-selected',
+      'aria-current',
+      'aria-pressed',
+      'checked',
+      'disabled',
+    ],
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -356,7 +397,9 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
     else return;
     const list = items();
     if (list.length === 0) return;
-    const at = list.findIndex((el) => el === e.target || el.contains(e.target as Node));
+    let at = list.findIndex((el) => el === e.target || el.contains(e.target as Node));
+    // The group itself has focus (a click on its gap): continue from the selected item.
+    if (at < 0 && e.target === node) at = Math.max(0, list.findIndex(isSelected));
     if (at < 0) return;
     e.preventDefault();
     e.stopPropagation();
