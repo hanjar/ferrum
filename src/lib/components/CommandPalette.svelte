@@ -238,6 +238,14 @@
     if (!ui.paletteOpen) return;
     const a = untrack(() => document.activeElement);
     opener = a instanceof HTMLElement && a !== document.body ? a : null;
+    // Opened from the Titlebar box (or with nothing focused): hand focus back to the active file
+    // list, so a dialog the command opens does not return to the Titlebar afterwards.
+    if (!opener?.closest('section.pane')) {
+      opener =
+        document.querySelector<HTMLElement>(
+          `section.pane[data-pane="${ui.activePane}"] [data-pane-list]`,
+        ) ?? opener;
+    }
   });
   function restoreFocus(): void {
     if (opener?.isConnected) opener.focus();
@@ -385,12 +393,21 @@
   function runResult(i: number): void {
     const item = flatItems[i];
     if (!item) return;
-    restoreFocus();
+    activateItem(item);
+  }
+
+  /** Commands decide for themselves (a stale row must leave the palette open, focus inside). */
+  function activateItem(item: FlatItem): void {
+    if (item.group !== 'cmd' && item.group !== 'rcmd') restoreFocus();
     item.activate();
   }
 
   function run(a: Action) {
-    if (!isEnabled(a)) return;
+    if (!isEnabled(a)) {
+      inputEl?.focus();
+      return;
+    }
+    restoreFocus();
     ui.paletteOpen = false;
     runAction(a);
   }
@@ -552,9 +569,8 @@
                 selectedId = item.id;
               }}
               onclick={() => {
-                restoreFocus();
-                ui.paletteOpen = false;
-                item.activate();
+                if (item.group !== 'cmd' && item.group !== 'rcmd') ui.paletteOpen = false;
+                activateItem(item);
               }}
             >
               <span class="label">{item.label}</span>

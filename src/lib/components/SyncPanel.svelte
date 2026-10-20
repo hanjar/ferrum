@@ -40,10 +40,20 @@
       if (!store.syncBusy) store.closeSync();
     },
   };
+  let panelEl = $state<HTMLElement>();
+  let runBtn = $state<HTMLButtonElement>();
+  // The opener (Run Synchronization) is disabled once the run starts, so focus is handed back by
+  // hand: to the Run button after Cancel / Esc, to the panel itself after Overwrite (busy).
+  function dismissConfirm() {
+    store.syncConfirm = null;
+    queueMicrotask(() => runBtn?.focus());
+  }
   const confirmOpts = {
     initial: '[data-autofocus]',
-    onEscape: () => (store.syncConfirm = null),
+    onEscape: dismissConfirm,
     mnemonics: false,
+    isolate: true,
+    returnFocus: false,
   };
 
   const PAGE = 200;
@@ -67,7 +77,13 @@
 </script>
 
 {#if store.syncOpen}
-  <aside class="panel" aria-label="Synchronize Directories" tabindex="-1" use:dialog={panelOpts}>
+  <aside
+    class="panel"
+    aria-label="Synchronize Directories"
+    tabindex="-1"
+    bind:this={panelEl}
+    use:dialog={panelOpts}
+  >
     <div class="headRow">
       <h2>Synchronize Dirs</h2>
       <button class="close" aria-label="Close synchronize panel" onclick={() => store.closeSync()}>
@@ -174,6 +190,8 @@
     {/if}
 
     {#if store.syncConfirm}
+      <!-- The confirmation is a modal step: dim and block everything else while it is up. -->
+      <div class="confirmScrim" aria-hidden="true"></div>
       <div
         class="confirm"
         role="alertdialog"
@@ -187,13 +205,14 @@
           are replaced, not backed up.
         </p>
         <div class="row buttons">
-          <button type="button" data-autofocus onclick={() => (store.syncConfirm = null)}>
-            Cancel
-          </button>
+          <button type="button" data-autofocus onclick={dismissConfirm}> Cancel </button>
           <button
             type="button"
             class="primary danger"
-            onclick={() => void store.executeSync({ confirmOverwrite: true })}
+            onclick={() => {
+              panelEl?.focus();
+              void store.executeSync({ confirmOverwrite: true });
+            }}
           >
             Overwrite {store.syncConfirm.overwrites} file(s)
           </button>
@@ -299,6 +318,7 @@
       <button
         type="button"
         class="primary"
+        bind:this={runBtn}
         onclick={() => void store.executeSync()}
         disabled={store.syncBusy || !store.syncPlan}
         title="Executes exactly the previewed plan after re-checking the folders"
@@ -428,7 +448,16 @@
     padding: 0 8px;
     font-size: 11px;
   }
+  .confirmScrim {
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 60;
+  }
   .confirm {
+    position: relative;
+    z-index: 61;
+    background: var(--elev);
     border: 1px solid var(--red);
     border-radius: var(--r);
     padding: 6px 8px;

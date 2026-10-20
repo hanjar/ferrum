@@ -292,7 +292,10 @@
     onEnter: (_e: KeyboardEvent, target: HTMLElement) => {
       if (target.closest('[role="tree"]')) return;
       if (importOpen) {
-        if (preview) applyImport();
+        // Enter in the path field previews (as before the shared dialog action); anywhere else it
+        // imports the preview that is showing.
+        if (target === importInputEl) void runPreview();
+        else if (preview) applyImport();
       } else void ok();
     },
   };
@@ -497,14 +500,9 @@
             aria-label="wincmd.ini path"
             bind:this={importInputEl}
             bind:value={importPath}
+            oninput={() => (preview = null)}
             spellcheck="false"
             placeholder="%APPDATA%\GHISLER\wincmd.ini"
-            onkeydown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void runPreview();
-              }
-            }}
           />
           <button onclick={() => void runPreview()} disabled={importBusy}
             ><Mnemonic label="&Preview" /></button

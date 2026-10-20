@@ -28,6 +28,7 @@ export const RECENT_EXCLUDED_IDS: readonly string[] = [
   'file.clipCopy',
   'file.clipCut',
   'file.clipPaste',
+  'file.quit',
 ];
 
 function storage(): Storage | undefined {

@@ -139,4 +139,42 @@ describe('HotlistDialog keyboard (B3)', () => {
     });
     await vi.waitFor(() => expect(replace).toHaveBeenCalledTimes(1));
   });
+
+  it('Enter in the wincmd.ini path field previews; it never applies an old preview (B1)', async () => {
+    await openDialog();
+    const fileA = {
+      doc: { version: 2, items: [{ type: 'dir', title: 'FromA', path: 'C:\\a' }] },
+      warnings: [],
+    };
+    const fileB = {
+      doc: { version: 2, items: [{ type: 'dir', title: 'FromB', path: 'C:\\b' }] },
+      warnings: [],
+    };
+    const prev = vi
+      .spyOn(hotlist.api, 'importPreview')
+      .mockResolvedValueOnce(fileA as never)
+      .mockResolvedValueOnce(fileB as never);
+    await fireEvent.click(screen.getByRole('button', { name: /Import from Total Commander/ }));
+    await tick();
+    const path = (await vi.waitFor(() =>
+      screen.getByLabelText('wincmd.ini path'),
+    )) as HTMLInputElement;
+    await fireEvent.input(path, { target: { value: 'C:\\a.ini' } });
+    await fireEvent.keyDown(path, { key: 'Enter' });
+    await vi.waitFor(() => expect(prev).toHaveBeenCalledTimes(1));
+    await screen.findByText('FromA');
+    // Replace mode, then the path changes: the old preview is gone, Enter previews B and does not
+    // replace the draft with A.
+    await fireEvent.click(screen.getByLabelText(/Replace my hotlist/));
+    await fireEvent.input(path, { target: { value: 'C:\\b.ini' } });
+    expect(screen.queryByText('FromA')).toBeNull();
+    await fireEvent.keyDown(path, { key: 'Enter' });
+    await vi.waitFor(() => expect(prev).toHaveBeenCalledTimes(2));
+    await screen.findByText('FromB');
+    expect(screen.queryByRole('region', { name: 'Import from Total Commander' })).not.toBeNull();
+    // The draft still holds the original tree (nothing was replaced yet).
+    await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await tick();
+    expect(screen.queryAllByRole('treeitem').length).toBe(START.length);
+  });
 });

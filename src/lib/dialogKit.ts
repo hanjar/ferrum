@@ -222,6 +222,11 @@ export interface DialogOptions {
   trap?: boolean;
   /** Alt+letter activates the control carrying `data-mnemonic`. Default true. */
   mnemonics?: boolean;
+  /**
+   * A dialog nested inside another one (an inline confirmation): Alt+key and Ctrl+PageUp/Down
+   * must not reach the outer dialog's accelerators and pull focus out of this one.
+   */
+  isolate?: boolean;
   /** Hand focus back to the element that was focused before the dialog opened. Default true. */
   returnFocus?: boolean;
 }
@@ -306,7 +311,13 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       }
     }
   }
+  function onIsolate(e: KeyboardEvent) {
+    if (!opts.isolate) return;
+    if (e.altKey || (e.ctrlKey && (e.key === 'PageUp' || e.key === 'PageDown')))
+      e.stopPropagation();
+  }
   node.addEventListener('keydown', onKeydown);
+  node.addEventListener('keydown', onIsolate);
 
   return {
     update(next: DialogOptions) {
@@ -314,6 +325,7 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
     },
     destroy() {
       node.removeEventListener('keydown', onKeydown);
+      node.removeEventListener('keydown', onIsolate);
       if (counted) depth = Math.max(0, depth - 1);
       if (opts.returnFocus !== false && opener?.isConnected) opener.focus?.();
     },

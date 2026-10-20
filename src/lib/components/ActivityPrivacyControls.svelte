@@ -74,6 +74,7 @@
     initial: '[data-autofocus]',
     onEscape: () => activityPage.cancelScope(),
     mnemonics: false,
+    isolate: true,
   };
 
   async function confirm() {

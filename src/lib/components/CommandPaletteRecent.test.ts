@@ -19,6 +19,8 @@ import App from '../../App.svelte';
 import { ui } from '../uiState.svelte';
 import { activity } from '../stores/activityStore.svelte';
 import { getAction, runAction } from '../actions';
+import { dialogs } from '../stores/dialogStore.svelte';
+import { registerPane } from '../stores/panesRegistry.svelte';
 import { recentCommands } from '../stores/recentCommands.svelte';
 import { dialog, modalDepth, resetModalDepth } from '../dialogKit';
 
@@ -214,5 +216,70 @@ describe('recording routes (FER-580)', () => {
     await fireEvent.keyDown(window, { key: 'h', ctrlKey: true });
     expect(recentCommands.ids).toEqual(['view.hidden']);
     expect(localStorage.getItem('ferrum.recentCommands.v1')).toBe('["view.hidden"]');
+  });
+});
+
+describe('rework R1', () => {
+  it('a stale (now disabled) command keeps the palette open with focus inside (S2)', async () => {
+    runAction(getAction('show.tree')!);
+    const pal = await openPalette();
+    const a = getAction('show.tree')!;
+    const prev = a.available;
+    a.available = () => false; // became unavailable after the list was drawn
+    try {
+      await fireEvent.keyDown(pal, { key: 'Enter' });
+      expect(ui.paletteOpen).toBe(true);
+      expect(pal.contains(document.activeElement)).toBe(true);
+    } finally {
+      a.available = prev;
+    }
+  });
+
+  it('file.quit is never recorded (N4)', () => {
+    recentCommands.record('file.quit');
+    expect(recentCommands.ids).toEqual([]);
+  });
+
+  it('opened from outside a pane, focus returns to the active file list (N5)', async () => {
+    const pane = document.createElement('section');
+    pane.className = 'pane';
+    pane.dataset.pane = String(ui.activePane);
+    const list = document.createElement('div');
+    list.tabIndex = 0;
+    list.setAttribute('data-pane-list', '');
+    pane.append(list);
+    const titlebar = document.createElement('button');
+    document.body.append(pane, titlebar);
+    titlebar.focus();
+    const pal = await openPalette();
+    await fireEvent.keyDown(pal, { key: 'Escape' });
+    await tick();
+    expect(document.activeElement).toBe(list);
+    pane.remove();
+    titlebar.remove();
+  });
+
+  it('re-running Delete from Recent only opens the confirmation dialog (N6)', async () => {
+    const del = getAction('file.delete')!;
+    const unregister = registerPane(0, {
+      path: 'C:\\w',
+      selectedPaths: () => ['C:\\w\\a.txt'],
+      cursorEntry: () => ({ name: 'a.txt', path: 'C:\\w\\a.txt', isDir: false }),
+      refresh: () => {},
+      newTab: () => {},
+      closeCurrentTab: () => {},
+      goUp: () => {},
+      openCursorEntry: () => {},
+    });
+    const spy = vi.spyOn(dialogs, 'beginDelete').mockImplementation(() => undefined as never);
+    recentCommands.record('file.delete');
+    const pal = await openPalette();
+    expect(optionLabels(pal, 'Recent commands').length).toBe(1);
+    expect(del).toBeDefined();
+    await fireEvent.keyDown(pal, { key: 'Enter' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(false); // current selection, goes through the dialog
+    spy.mockRestore();
+    unregister();
   });
 });

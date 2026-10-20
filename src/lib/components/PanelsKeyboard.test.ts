@@ -11,6 +11,7 @@ import SyncPanel from './SyncPanel.svelte';
 import { searchStore } from '../stores/searchStore.svelte';
 import { compareStore } from '../stores/compareStore.svelte';
 import { modalDepth, resetModalDepth } from '../dialogKit';
+import App from '../../App.svelte';
 
 vi.mock('../ipc/compare', () => ({
   validateSyncRoots: vi.fn(async () => {}),
@@ -146,7 +147,6 @@ describe('SyncPanel', () => {
     overwrite.focus();
     await fireEvent.keyDown(overwrite, { key: 'Tab' });
     expect(document.activeElement).toBe(cancel);
-    await fireEvent.keyDown(cancel, { key: 'Shift' });
     await fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(overwrite);
     expect(confirm.contains(document.activeElement)).toBe(true);
@@ -170,5 +170,52 @@ describe('SyncPanel', () => {
     expect(ev.defaultPrevented).toBe(false);
     expect(exec).not.toHaveBeenCalled();
     exec.mockRestore();
+  });
+
+  it('the overwrite confirmation dims the rest of the panel and Esc puts focus on Run', async () => {
+    await openSync();
+    compareStore.syncPlan = [] as never;
+    compareStore.syncConfirm = { overwrites: 1, names: ['a'] };
+    await tick();
+    expect(document.querySelector('.confirmScrim')).not.toBeNull();
+    await fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { key: 'Escape' });
+    expect(document.querySelector('.confirmScrim')).toBeNull();
+    await tick();
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Run Synchronization' }),
+    );
+  });
+
+  it('Alt+letter and Ctrl+PageDown inside the confirmation do not leak to an outer dialog', async () => {
+    await openSync();
+    compareStore.syncConfirm = { overwrites: 1, names: ['a'] };
+    await tick();
+    const seen = vi.fn();
+    document.body.addEventListener('keydown', seen);
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    await fireEvent.keyDown(cancel, { key: 't', altKey: true });
+    await fireEvent.keyDown(cancel, { key: 'PageDown', ctrlKey: true });
+    document.body.removeEventListener('keydown', seen);
+    expect(seen).not.toHaveBeenCalled();
+  });
+});
+
+describe('Tab inside docked panels with the whole App mounted (S1)', () => {
+  it.each([
+    ['Compare', () => (compareStore.panelOpen = true), 'Compare Directories'],
+    ['Sync', () => (compareStore.syncOpen = true), 'Refresh Preview'],
+  ])('%s: Tab is not taken by the pane switcher', async (_n, open, button) => {
+    render(App);
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('.row[data-path]').length).toBeGreaterThan(5),
+    );
+    open();
+    await tick();
+    const b = screen.getByRole('button', { name: button });
+    b.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    b.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(b);
   });
 });
