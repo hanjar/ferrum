@@ -455,71 +455,136 @@ pub fn delete_entries(
 pub struct RecycleCheck {
     pub path: String,
     pub ok: bool,
-    /// Stable code (`network_or_unc`, `reserved_name`, `no_recycle_bin`), never a raw OS message.
+    /// Stable code (see `recycle_gate::reason`), never a raw OS message.
     pub reason: Option<&'static str>,
+    /// The REAL recursive size of the item (links are not followed); 0 when it could not be measured.
+    pub bytes: u64,
+    /// Files and folders in the item, itself included.
+    pub entries: u64,
+    /// Symlinks / junctions inside the item (an archive skips them).
+    pub links: u64,
+}
+
+/// What [`ai_tree_census`] counted over a set of paths.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeCensus {
+    pub bytes: u64,
+    /// Members a 7z / ZIP of these paths lists: every file plus every empty folder.
+    pub archive_members: u64,
+    pub links: u64,
 }
 
 /// Upper bound of one AI delete batch.
 const MAX_AI_DELETE_ITEMS: usize = 10_000;
 
-/// FER-576: read-only. Can each path go to the Recycle Bin? Used when the AI delete card is built.
-#[tauri::command]
-pub fn ai_recycle_check(paths: Vec<String>) -> Result<Vec<RecycleCheck>, FsError> {
+fn ai_batch_check(paths: &[String]) -> Result<(), FsError> {
     if paths.is_empty() || paths.len() > MAX_AI_DELETE_ITEMS {
         return Err(FsError::new(
             crate::domain::ErrorCode::InvalidPath,
             "Invalid number of items",
         ));
     }
-    Ok(paths
-        .into_iter()
-        .map(|path| {
-            let reason = crate::mutations::recycle_blocker(&path);
-            RecycleCheck {
-                ok: reason.is_none(),
-                reason,
-                path,
-            }
-        })
-        .collect())
+    Ok(())
 }
 
-/// FER-576: the ONLY delete the AI can reach. It goes to the Recycle Bin and nowhere else: there is
-/// no `permanent` argument and `delete_permanent` is never called from here. The same source gate as
-/// the manual Delete applies (path gate, protected folders, local-UNC). When ANY item cannot go to
-/// the Recycle Bin the whole batch is refused before anything is touched, so a mixed batch is never
-/// half-deleted and nothing falls through to a permanent delete.
+fn blocking_failed(e: tauri::Error) -> FsError {
+    FsError::new(crate::domain::ErrorCode::Io, e.to_string())
+}
+
+/// FER-576: read-only. Is the shell guaranteed to move each path into the Recycle Bin (volume, bin settings,
+/// quota against the real size)? Used when the AI delete card is built; the delete asks again.
 #[tauri::command]
-pub fn ai_delete_to_recycle(
+pub async fn ai_recycle_check(paths: Vec<String>) -> Result<Vec<RecycleCheck>, FsError> {
+    ai_batch_check(&paths)?;
+    spawn_blocking(move || {
+        crate::recycle_gate::assess(&paths, &crate::recycle_gate::SystemRecycleEnv)
+            .into_iter()
+            .map(|verdict| RecycleCheck {
+                path: verdict.path,
+                ok: verdict.ok,
+                reason: verdict.reason,
+                bytes: verdict.census.bytes,
+                entries: verdict.census.entries(),
+                links: verdict.census.links,
+            })
+            .collect()
+    })
+    .await
+    .map_err(blocking_failed)
+}
+
+/// FER-576: read-only size and entry counts of a set of paths (no link is followed). The archive step of a
+/// chain uses it to know how many entries the archive MUST hold before the original may be deleted.
+#[tauri::command]
+pub async fn ai_tree_census(paths: Vec<String>) -> Result<TreeCensus, FsError> {
+    ai_batch_check(&paths)?;
+    spawn_blocking(move || {
+        let mut total = TreeCensus {
+            bytes: 0,
+            archive_members: 0,
+            links: 0,
+        };
+        for path in &paths {
+            let census = crate::recycle_gate::census_tree(path).map_err(|_| {
+                FsError::new(
+                    crate::domain::ErrorCode::Io,
+                    "An item could not be measured completely",
+                )
+            })?;
+            total.bytes = total.bytes.saturating_add(census.bytes);
+            total.archive_members += census.archive_members();
+            total.links += census.links;
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(blocking_failed)?
+}
+
+/// FER-576: the ONLY delete the AI can reach, and it goes to the Recycle Bin or it does not happen.
+///
+/// - No `permanent` argument; `delete_permanent` is never called from here.
+/// - The same source gate as the manual Delete (path gate, protected folders, local-UNC).
+/// - `recycle_gate::assess` refuses the WHOLE batch, before anything is touched, when any item is not
+///   guaranteed to be recycled: not a fixed local volume, a mount point or redirect, a bin that is
+///   disabled/unreadable ("Don't move files to the Recycle Bin", size 0, policy), an item (or the batch)
+///   that does not fit half of the volume's bin quota, a link, or a size that cannot be measured.
+/// - Items go one at a time; each is checked through a handle opened BEFORE the shell call to be inside
+///   `$Recycle.Bin` afterwards. An item that is not is reported in `bypassed` (it was deleted for good)
+///   and the batch stops there; it is never reported as a success.
+#[tauri::command]
+pub async fn ai_delete_to_recycle(
     paths: Vec<String>,
     app: AppHandle,
-) -> Result<crate::mutations::DeleteReport, FsError> {
-    if paths.is_empty() || paths.len() > MAX_AI_DELETE_ITEMS {
-        return Err(FsError::new(
-            crate::domain::ErrorCode::InvalidPath,
-            "Invalid number of items",
-        ));
-    }
+) -> Result<crate::recycle_gate::RecycleReport, FsError> {
+    ai_batch_check(&paths)?;
     let prepared = prepare_sources(&paths)?;
-    if paths
-        .iter()
-        .any(|path| crate::mutations::recycle_blocker(path).is_some())
-    {
-        return Err(FsError::new(
-            crate::domain::ErrorCode::Unsupported,
-            "At least one item cannot be moved to the Recycle Bin; nothing was deleted",
-        ));
-    }
-    let report = crate::mutations::delete_to_trash(&prepared);
-    let failed: std::collections::HashSet<&str> =
-        report.failed.iter().map(|f| f.path.as_str()).collect();
-    let deleted: Vec<(String, Option<String>)> = prepared
-        .iter()
-        .filter(|p| !failed.contains(p.as_str()))
-        .map(|p| (p.clone(), None))
-        .collect();
-    note_activity_changes(&app, FsChangeKind::Delete, deleted);
-    Ok(report)
+    spawn_blocking(move || {
+        let verdicts =
+            crate::recycle_gate::assess(&prepared, &crate::recycle_gate::SystemRecycleEnv);
+        if crate::recycle_gate::first_refusal(&verdicts).is_some() {
+            return Err(FsError::new(
+                crate::domain::ErrorCode::Unsupported,
+                "At least one item is not guaranteed to go to the Recycle Bin; nothing was deleted",
+            ));
+        }
+        let report =
+            crate::recycle_gate::delete_verified(&prepared, &crate::recycle_gate::SystemRecycleIo);
+        // Items that left their place (recycled, or for good) are receipts; the failed ones did not.
+        let failed: std::collections::HashSet<&str> =
+            report.failed.iter().map(|f| f.path.as_str()).collect();
+        let gone: Vec<(String, Option<String>)> = prepared
+            .iter()
+            .take(prepared.len() - report.skipped)
+            .filter(|p| !failed.contains(p.as_str()))
+            .map(|p| (p.clone(), None))
+            .collect();
+        note_activity_changes(&app, FsChangeKind::Delete, gone);
+        Ok(report)
+    })
+    .await
+    .map_err(blocking_failed)?
 }
 
 fn parse_policy(s: &str) -> Result<crate::copy_engine::ConflictPolicy, FsError> {

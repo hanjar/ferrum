@@ -1295,6 +1295,50 @@ pub fn path_typed_by_user(path: &str, user_text: &str) -> bool {
     })
 }
 
+/// FER-576 (review R1, S5): did the user ask to delete something? A model that hallucinates or is steered by
+/// injected text must not be able to turn "jelaskan file ini" into a delete card. Tokens that look like a path
+/// (a backslash, slash or colon) are ignored, so a folder called `Remove` does not count as a request.
+pub fn user_asked_to_delete(user_text: &str) -> bool {
+    const EXACT: [&str; 11] = [
+        "delete", "deleted", "deleting", "del", "remove", "removed", "removing", "erase", "erased",
+        "trash", "rm",
+    ];
+    const STEMS: [&str; 4] = ["hapus", "buang", "singkirkan", "hilangkan"];
+    const PREFIXES: [&str; 6] = ["meng", "men", "mem", "me", "di", "pe"];
+    user_text
+        .split_whitespace()
+        .filter(|chunk| !chunk.contains(['\\', '/', ':']))
+        .flat_map(|chunk| chunk.split(|c: char| !c.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            let token = token.to_lowercase();
+            if EXACT.contains(&token.as_str()) {
+                return true;
+            }
+            let core = PREFIXES
+                .iter()
+                .find_map(|prefix| token.strip_prefix(prefix))
+                .unwrap_or(&token);
+            STEMS
+                .iter()
+                .any(|stem| core.starts_with(stem) || token.starts_with(stem))
+        })
+}
+
+/// FER-576 (review R1, S6): how many absolute drive paths the user wrote (`D:\`, `d:/`). A chain that deletes
+/// is only accepted for ONE path: with two, the model would be choosing which one to open and delete.
+pub fn drive_path_count(user_text: &str) -> usize {
+    let chars: Vec<char> = user_text.chars().collect();
+    (0..chars.len().saturating_sub(2))
+        .filter(|&i| {
+            chars[i].is_ascii_alphabetic()
+                && chars[i + 1] == ':'
+                && matches!(chars[i + 2], '\\' | '/')
+                && (i == 0 || !chars[i - 1].is_alphanumeric())
+        })
+        .count()
+}
+
 /// A multi-step plan: an ordered, closed grammar of at most [`MAX_CHAIN_STEPS`] steps. Each step is
 /// an ordinary intent; the app runs them one at a time, one approval card per mutating step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1334,6 +1378,14 @@ pub fn parse_chain_offered(
         .steps
         .iter()
         .any(|step| matches!(step, Intent::ArchiveCreate(_)));
+    if chain
+        .steps
+        .iter()
+        .any(|step| matches!(step, Intent::ItemsDelete(_)))
+        && (!user_asked_to_delete(user_text) || drive_path_count(user_text) > 1)
+    {
+        return bad("A delete needs an explicit request and a single path");
+    }
     let mut last_rank = 0u8;
     let mut pane: Option<SourcePane> = None;
     for (index, step) in chain.steps.iter().enumerate() {

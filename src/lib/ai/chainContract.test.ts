@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import chainCases from '../../../contract-fixtures/ai/chain-cases.json';
 import navigateCases from '../../../contract-fixtures/ai/navigate-cases.json';
+import deleteVerbCases from '../../../contract-fixtures/ai/delete-verb-cases.json';
 import {
   ContractError,
   isSafeNavigatePath,
@@ -11,7 +12,7 @@ import {
   parseResolvedPlan,
 } from './contracts';
 import { parseModelReply } from './provider';
-import { parentFolder, pathTypedByUser } from './paneNavigate';
+import { drivePathCount, parentFolder, pathTypedByUser, userAskedToDelete } from './paneNavigate';
 
 describe('shared chain / navigate / delete cases (Rust parity)', () => {
   it.each(chainCases)('$name', (c) => {
@@ -25,6 +26,21 @@ describe('shared chain / navigate / delete cases (Rust parity)', () => {
 
   it.each(navigateCases)('typed path: $name', (c) => {
     expect(pathTypedByUser(c.path, c.text)).toBe(c.typed);
+  });
+});
+
+describe('delete request gate (Rust parity)', () => {
+  it.each(deleteVerbCases)('asked to delete: $name', (c) => {
+    expect(userAskedToDelete(c.text)).toBe(c.asked);
+  });
+  it('counts absolute drive paths by their drive prefix', () => {
+    expect(
+      drivePathCount('a D:' + String.fromCharCode(92) + 'x' + String.fromCharCode(92) + 'y b'),
+    ).toBe(1);
+    expect(drivePathCount('d:/x dan E:/y')).toBe(2);
+    expect(drivePathCount('tidak ada')).toBe(0);
+    expect(drivePathCount('abcD:/x')).toBe(0);
+    expect(drivePathCount('')).toBe(0);
   });
 });
 
@@ -93,7 +109,11 @@ describe('provider replies (parseModelReply)', () => {
     };
     expect(() => parseModelReply(reply, 'req_1', ['archive.create'])).toThrow(ContractError);
     expect(() => parseModelReply(reply, 'req_1', undefined)).toThrow(ContractError);
-    expect(parseModelReply(reply, 'req_1', offered).kind).toBe('intent');
+    expect(parseModelReply(reply, 'req_1', offered, 'tolong hapus').kind).toBe('intent');
+    // Review R1 S5: no delete word in the request, no delete plan.
+    expect(() => parseModelReply(reply, 'req_1', offered, 'jelaskan file ini')).toThrow(
+      ContractError,
+    );
   });
 });
 

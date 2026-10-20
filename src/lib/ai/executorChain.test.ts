@@ -11,7 +11,9 @@ vi.mock('../ipc/archive', () => ({ archiveCreate: ipc.archiveCreate }));
 
 const { entry } = await import('./contextTestKit');
 const { buildKit, ownerChain, CSV, FOLDER, OTHER, USER_TEXT } = await import('./chainTestKit');
-import type { Kit } from './chainTestKit';
+import type { Kit, KitOptions } from './chainTestKit';
+import type { ExecutionGuard } from './executor';
+import type { ProviderEvent } from './provider';
 
 const ARCHIVE = `${FOLDER}\\pc_20250814.7z`;
 
@@ -59,7 +61,7 @@ describe('the owner example', () => {
     expect(call[2]).toBe('sevenz');
     expect(call[3]).toBe('skip');
     expect(call[5]).toBe('max');
-    expect(kit.verify).toHaveBeenCalledWith(ARCHIVE);
+    expect(kit.verify).toHaveBeenCalledWith(ARCHIVE, { members: 1 });
     const card = kit.last('run-1-c2');
     expect(card?.plan?.operation).toMatchObject({
       kind: 'items.delete',
@@ -153,37 +155,207 @@ describe('the delete step is gated by a verified archive of exactly the same sel
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
-  it('if the selection changed after the archive, the delete is refused (it must be exactly what was archived)', async () => {
-    // The change happens while the archive is being tested, i.e. before the delete card is prepared.
+  it('restores the typed file after the archive refresh cleared the marks, then builds the delete card for exactly it', async () => {
+    const kit = buildKit({ events: [ownerChain()] }); // the fake refresh clears the marks, like the real one
+    await toArchiveDone(kit);
+    await awaiting(kit, 'run-1-c2');
+    expect(kit.navigate.open).toHaveBeenCalledTimes(2);
+    expect(kit.host.left.selected).toEqual([CSV]);
+    expect(kit.last('run-1-c2')?.plan?.preview.itemCount).toBe(1);
+  });
+
+  it('a file the user typed that cannot be shown again ends the chain without a delete', async () => {
     const holder: { kit?: Kit } = {};
     const kit = buildKit({
       events: [ownerChain()],
+      verify: async () => {
+        holder.kit!.navigate.open.mockResolvedValue(false);
+        return { ok: true, message: 'ok' };
+      },
+    });
+    holder.kit = kit;
+    await toArchiveDone(kit);
+    await settled(kit, 'run-1-c2', 'failed');
+    expect(kit.last('run-1-c2')?.errorMessage).toContain('tidak ada yang dihapus');
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+});
+
+describe('archive then delete of the marked selection (no navigation)', () => {
+  const chain = (): ProviderEvent => ({
+    kind: 'chain',
+    requestId: 'req_1',
+    steps: [
+      {
+        capability: 'archive.create',
+        sourcePane: 'left',
+        selector: { kind: 'selected' },
+        format: '7z',
+        target: { kind: 'sourceDirectory' },
+      },
+      { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
+    ],
+  });
+  const TEXT = 'arsipkan yang kupilih ke 7z lalu hapus';
+  function setup(over: Partial<KitOptions> = {}) {
+    const kit = buildKit({
+      events: [chain()],
+      userText: TEXT,
+      keepSelectionOnRefresh: true,
+      ...over,
+    });
+    kit.host.left.path = FOLDER;
+    kit.host.left.all = [
+      entry('pc_202508014.csv', { path: CSV }),
+      entry('keep-me.txt', { path: OTHER }),
+    ];
+    kit.host.left.selected = [CSV];
+    start(kit);
+    return kit;
+  }
+
+  it('deletes what was archived when nothing changed', async () => {
+    const kit = setup();
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await awaiting(kit, 'run-1-c1');
+    expect(kit.last('run-1-c1')?.plan?.operation.kind).toBe('items.delete');
+    kit.executor.approve('run-1-c1');
+    await settled(kit, 'run-1-c1', 'succeeded');
+    expect(kit.recycle.deleteToRecycle).toHaveBeenCalledWith([CSV]);
+  });
+
+  it('refuses the delete when the selection changed after the archive (it must be exactly what was archived)', async () => {
+    const holder: { kit?: Kit } = {};
+    const kit = setup({
       verify: async () => {
         holder.kit!.host.left.selected = [CSV, OTHER];
         return { ok: true, message: 'ok' };
       },
     });
     holder.kit = kit;
-    await toArchiveDone(kit);
-    await settled(kit, 'run-1-c2', 'stale');
-    expect(kit.last('run-1-c2')?.errorMessage).toContain('persis yang diarsipkan');
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1-c1', 'stale');
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('persis yang diarsipkan');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
-  it('a user who clears the selection after the archive gets a question, not a delete', async () => {
+  it('a selection cleared after the archive gives a question, not a delete', async () => {
     const holder: { kit?: Kit } = {};
-    const kit = buildKit({
-      events: [ownerChain()],
+    const kit = setup({
       verify: async () => {
         holder.kit!.host.left.selected = [];
         return { ok: true, message: 'ok' };
       },
     });
     holder.kit = kit;
-    await toArchiveDone(kit);
-    await settled(kit, 'run-1-c2', 'needsInput');
-    expect(kit.last('run-1-c2')?.errorMessage).toContain('Belum ada item');
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1-c1', 'needsInput');
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('Belum ada item');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('S1: refuses the delete when the BACKEND fingerprint of the sources changed since the archive card', async () => {
+    let calls = 0;
+    const digests = new Map<string, string>();
+    const guard: ExecutionGuard = {
+      register: async (ticket) => {
+        digests.set(ticket.handleId, calls++ === 0 ? 'digest-at-archive' : 'digest-after-edit');
+        return { ok: true };
+      },
+      authorize: async () => ({ ok: true }),
+      scopeDigestOf: (ticket) => digests.get(ticket.handleId),
+    };
+    const kit = setup({ guard });
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1-c1', 'stale');
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('Isi item berubah');
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('S1: the same backend fingerprint lets the delete card through', async () => {
+    const digests = new Map<string, string>();
+    const guard: ExecutionGuard = {
+      register: async (ticket) => {
+        digests.set(ticket.handleId, 'same-digest');
+        return { ok: true };
+      },
+      authorize: async () => ({ ok: true }),
+      scopeDigestOf: (ticket) => digests.get(ticket.handleId),
+    };
+    const kit = setup({ guard });
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await awaiting(kit, 'run-1-c1');
+  });
+
+  it('S1: a guard that cannot tell the digest fails closed for the delete', async () => {
+    const guard: ExecutionGuard = {
+      register: async () => ({ ok: true }),
+      authorize: async () => ({ ok: true }),
+      scopeDigestOf: () => undefined,
+    };
+    const kit = setup({ guard });
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1-c1', 'stale');
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('S2: symlinks or junctions inside the sources stop the chain before the archive is written', async () => {
+    const kit = setup({ census: { archiveMembers: 1, links: 2 } });
+    await settled(kit, 'run-1', 'stale');
+    expect(kit.last('run-1')?.errorMessage).toContain('tidak bisa dipastikan lengkap');
+    expect(ipc.archiveCreate).not.toHaveBeenCalled();
+  });
+
+  it('S2: an unknown member count stops the chain too (fail closed)', async () => {
+    const kit = setup({ census: 'absent' });
+    await settled(kit, 'run-1', 'stale');
+    expect(ipc.archiveCreate).not.toHaveBeenCalled();
+  });
+
+  it('S2: the number of members the archive must hold goes to Test Archive', async () => {
+    const kit = setup({ census: { archiveMembers: 7, links: 0 } });
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await awaiting(kit, 'run-1-c1');
+    expect(kit.verify).toHaveBeenCalledWith(ARCHIVE, { members: 7 });
+  });
+
+  it('S3: an archive written inside the folder that will be deleted stops the chain', async () => {
+    const kit = buildKit({
+      events: [
+        {
+          kind: 'chain',
+          requestId: 'req_1',
+          steps: [
+            {
+              capability: 'archive.create',
+              sourcePane: 'left',
+              selector: { kind: 'selected' },
+              format: '7z',
+              target: { kind: 'pane', pane: 'right' },
+            },
+            { capability: 'items.delete', sourcePane: 'left', selector: { kind: 'selected' } },
+          ],
+        },
+      ],
+      userText: TEXT,
+      keepSelectionOnRefresh: true,
+    });
+    kit.host.left.path = FOLDER;
+    const sep = String.fromCharCode(92);
+    kit.host.left.all = [entry('sub', { path: `${FOLDER}${sep}sub`, isDir: true })];
+    kit.host.left.selected = [`${FOLDER}${sep}sub`];
+    kit.host.right.path = `${FOLDER}${sep}sub${sep}out`;
+    start(kit);
+    await settled(kit, 'run-1', 'stale');
+    expect(kit.last('run-1')?.errorMessage).toContain('di dalam item yang akan dihapus');
+    expect(ipc.archiveCreate).not.toHaveBeenCalled();
   });
 });
 
@@ -357,7 +529,7 @@ describe('the delete card', () => {
     const message = kit.last('run-1')?.errorMessage ?? '';
     expect(message).toContain('tidak bisa dipindahkan ke Recycle Bin');
     expect(message).toContain('pc_202508014.csv');
-    expect(message).toContain('tidak pernah menghapus permanen');
+    expect(message).toContain('menolak bila itu tidak terjamin');
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
   });
 
@@ -489,6 +661,173 @@ describe('the delete card', () => {
     );
     expect(result.accepted).toBe(false);
     expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+});
+
+describe('a chain that deletes is strict about what it works on (review R1 S5/S6)', () => {
+  it('S6: refuses a navigation to a FOLDER in a chain that deletes', async () => {
+    const chain = ownerChain();
+    if (chain.kind !== 'chain') throw new Error('test setup');
+    chain.steps[0] = { capability: 'pane.navigate', pane: 'activeAtSubmit', path: FOLDER };
+    const kit = buildKit({ events: [chain], userText: `hapus isi ${FOLDER}` });
+    start(kit);
+    await settled(kit, 'run-1', 'failed');
+    expect(kit.last('run-1')?.errorMessage).toContain('path FILE');
+    expect(kit.runIds()).toEqual(['run-1']);
+    expect(ipc.archiveCreate).not.toHaveBeenCalled();
+  });
+
+  it('S6: refuses the archive step when the selection is not exactly the typed file', async () => {
+    const kit = buildKit({ events: [ownerChain()], navSelectsExtra: true });
+    start(kit);
+    await settled(kit, 'run-1-c1', 'stale');
+    expect(kit.last('run-1-c1')?.errorMessage).toContain('bukan persis file');
+    expect(ipc.archiveCreate).not.toHaveBeenCalled();
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('S6: refuses a chain that deletes when the request names two paths', async () => {
+    const kit = buildKit({
+      events: [ownerChain()],
+      userText: `${USER_TEXT} dan simpan di D:\\backup`,
+    });
+    start(kit);
+    await settled(kit, 'run-1', 'blockedCapability');
+    expect(kit.navigate.open).not.toHaveBeenCalled();
+  });
+
+  it('S5: refuses a chain with a delete step when the request does not ask to delete', async () => {
+    const kit = buildKit({ events: [ownerChain()], userText: `arsipkan ${CSV} ke 7z` });
+    start(kit);
+    await settled(kit, 'run-1', 'blockedCapability');
+    expect(kit.navigate.open).not.toHaveBeenCalled();
+  });
+
+  it('S5: a standalone delete intent for a request that does not ask to delete gets no card', async () => {
+    const kit = buildKit({
+      events: [
+        {
+          kind: 'intent',
+          intent: {
+            schemaVersion: 1,
+            requestId: 'req_1',
+            intent: {
+              capability: 'items.delete',
+              sourcePane: 'left',
+              selector: { kind: 'selected' },
+            },
+          },
+        },
+      ],
+      userText: 'jelaskan file ini',
+    });
+    kit.host.left.selected = [kit.host.left.all[0].path];
+    kit.submit();
+    await vi.waitFor(() => expect(kit.stateOf('run-1')).toBe('needsInput'));
+    expect(kit.last('run-1')?.errorMessage).toContain('tidak meminta menghapus');
+    expect(kit.recycle.check).not.toHaveBeenCalled();
+  });
+});
+
+describe('the Recycle Bin gate shows through to the card (review R1 B1)', () => {
+  const standalone = {
+    kind: 'intent' as const,
+    intent: {
+      schemaVersion: 1 as const,
+      requestId: 'req_1',
+      intent: {
+        capability: 'items.delete' as const,
+        sourcePane: 'left' as const,
+        selector: { kind: 'selected' as const },
+      },
+    },
+  };
+  function withSelection(kit: Kit) {
+    kit.host.left.path = FOLDER;
+    kit.host.left.all = [entry('pc_202508014.csv', { path: CSV })];
+    kit.host.left.selected = [CSV];
+  }
+
+  it('shows the REAL size the backend measured on the card', async () => {
+    const kit = buildKit({
+      events: [standalone],
+      userText: 'hapus',
+      recycleCheck: (paths) => paths.map((path) => ({ path, ok: true, bytes: 123_456 })),
+    });
+    withSelection(kit);
+    kit.submit();
+    await awaiting(kit, 'run-1');
+    expect(kit.last('run-1')?.plan?.preview.totalBytes).toBe(123_456);
+  });
+
+  it.each([
+    ['recycle_disabled', 'dimatikan'],
+    ['recycle_unknown', 'tidak bisa dibaca'],
+    ['too_big', 'melebihi kuota'],
+    ['mount_point', 'di-mount'],
+    ['redirected', 'dialihkan'],
+    ['size_unknown', 'tidak dapat diukur'],
+    ['link_item', 'symlink'],
+    ['capacity_unknown', 'tidak diketahui'],
+  ])('refuses the plan with a clear reason: %s', async (code, text) => {
+    const kit = buildKit({
+      events: [standalone],
+      userText: 'hapus',
+      recycleCheck: (paths) => paths.map((path) => ({ path, ok: false, reason: code })),
+    });
+    withSelection(kit);
+    kit.submit();
+    await settled(kit, 'run-1', 'needsInput');
+    expect(kit.last('run-1')?.errorMessage).toContain(text);
+    expect(kit.recycle.deleteToRecycle).not.toHaveBeenCalled();
+  });
+
+  it('a delete the shell did NOT send to the Recycle Bin is reported as a failure, never a success', async () => {
+    const kit = buildKit({
+      events: [standalone],
+      userText: 'hapus',
+      recycleDelete: async (paths) => ({
+        requested: paths.length,
+        deleted: 0,
+        failed: [],
+        bypassed: [paths[0]],
+        skipped: 0,
+      }),
+    });
+    withSelection(kit);
+    kit.submit();
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1', 'failed');
+    expect(kit.last('run-1')?.errorMessage).toContain('secara permanen');
+  });
+
+  it('a partial batch with a bypass is partial and says so loudly', async () => {
+    const kit = buildKit({
+      events: [standalone],
+      userText: 'hapus',
+      recycleDelete: async (paths) => ({
+        requested: paths.length,
+        deleted: 1,
+        failed: [],
+        bypassed: [paths[1]],
+        skipped: 1,
+      }),
+    });
+    kit.host.left.path = FOLDER;
+    kit.host.left.all = [
+      entry('a.txt', { path: `${FOLDER}/a.txt` }),
+      entry('b.txt', { path: `${FOLDER}/b.txt` }),
+      entry('c.txt', { path: `${FOLDER}/c.txt` }),
+    ];
+    kit.host.left.selected = kit.host.left.all.map((e) => e.path);
+    kit.submit();
+    await awaiting(kit, 'run-1');
+    kit.executor.approve('run-1');
+    await settled(kit, 'run-1', 'partial');
+    const message = kit.last('run-1')?.errorMessage ?? '';
+    expect(message).toContain('PERINGATAN');
+    expect(message).toContain('TIDAK masuk Recycle Bin');
   });
 });
 

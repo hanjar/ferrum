@@ -113,3 +113,75 @@ export function describeNavigate(target: Exclude<NavigateTarget, { kind: 'missin
     ? `Membuka folder ${target.path}.`
     : `Membuka folder ${target.folder} dan memilih ${baseName(target.path)}.`;
 }
+
+const DELETE_EXACT = new Set([
+  'delete',
+  'deleted',
+  'deleting',
+  'del',
+  'remove',
+  'removed',
+  'removing',
+  'erase',
+  'erased',
+  'trash',
+  'rm',
+]);
+const DELETE_STEMS = ['hapus', 'buang', 'singkirkan', 'hilangkan'];
+const DELETE_PREFIXES = ['meng', 'men', 'mem', 'me', 'di', 'pe'];
+
+/**
+ * FER-576 (review R1, S5): did the user ask to delete something? A hallucinating or steered model must not turn
+ * "jelaskan file ini" into a delete card. Chunks that look like a path (a backslash, slash or colon) are ignored,
+ * so a folder called `Remove` is not a request. Mirror of Rust `user_asked_to_delete`; shared cases in
+ * `contract-fixtures/ai/delete-verb-cases.json`.
+ */
+export function userAskedToDelete(userText: string): boolean {
+  for (const chunk of userText.split(/\s+/u)) {
+    if (/[\\/:]/u.test(chunk)) continue;
+    for (const raw of chunk.split(/[^\p{L}\p{N}]+/u)) {
+      if (!raw) continue;
+      const token = raw.toLowerCase();
+      if (DELETE_EXACT.has(token)) return true;
+      const prefix = DELETE_PREFIXES.find((p) => token.startsWith(p));
+      const core = prefix ? token.slice(prefix.length) : token;
+      if (DELETE_STEMS.some((stem) => core.startsWith(stem) || token.startsWith(stem))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * FER-576 (review R1, S6): how many absolute drive paths the user wrote (`D:\`, `d:/`). A chain that deletes is
+ * only accepted for ONE path. Mirror of Rust `drive_path_count`.
+ */
+export function drivePathCount(userText: string): number {
+  const chars = [...userText];
+  let count = 0;
+  for (let i = 0; i + 2 < chars.length; i++) {
+    if (
+      /[A-Za-z]/u.test(chars[i]) &&
+      chars[i + 1] === ':' &&
+      (chars[i + 2] === '\\' || chars[i + 2] === '/') &&
+      (i === 0 || !/[\p{L}\p{N}]/u.test(chars[i - 1]))
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
+const normalizePath = (path: string): string =>
+  path.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
+/** Same Windows path (case-insensitive, either separator, trailing separator ignored). */
+export function samePath(a: string, b: string): boolean {
+  return normalizePath(a) === normalizePath(b);
+}
+
+/** Is `child` strictly inside `parent` (case-insensitive, either separator)? */
+export function isInsidePath(child: string, parent: string): boolean {
+  const c = normalizePath(child);
+  const p = normalizePath(parent);
+  return c.length > p.length && c.startsWith(p) && c[p.length] === '\\';
+}

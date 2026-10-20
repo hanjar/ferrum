@@ -49,6 +49,10 @@
   // FER-576: a delete card is a WARNING card (never auto-approved; Recycle Bin only).
   const isDelete = $derived(plan?.operation.kind === 'items.delete');
   const deleteNames = $derived((run.items?.rows ?? []).slice(0, 10));
+  // Review R1 S4: the confirm button of a delete stays off until the names it will delete are on screen.
+  const namesShown = $derived(
+    !!run.items && !run.items.loading && !run.items.error && run.items.rows.length > 0,
+  );
   $effect(() => {
     // The names come from the local frozen manifest; they are never sent to the provider.
     if (isDelete && run.state === 'awaitingApproval' && !run.items)
@@ -199,6 +203,11 @@
           {#if run.items.total > deleteNames.length}
             <p class="muted">dan {run.items.total - deleteNames.length} item lainnya</p>
           {/if}
+        {:else if run.items?.error}
+          <p class="error" role="alert">
+            Daftar item tidak dapat dimuat, jadi penghapusan tidak bisa disetujui. Batalkan dan coba
+            lagi.
+          </p>
         {:else if run.state === 'awaitingApproval'}
           <p class="muted">Memuat daftar item…</p>
         {/if}
@@ -412,7 +421,7 @@
 
   {#if cancellable}
     <div class="actions">
-      {#if isDelete}
+      {#if isDelete && !active}
         <!-- Cancel comes first so keyboard focus never lands on the destructive button by default. -->
         <button
           type="button"
@@ -428,7 +437,7 @@
           type="button"
           class={isDelete ? 'danger' : 'primary'}
           data-testid={isDelete ? 'confirm-delete' : undefined}
-          disabled={!run.canApprove}
+          disabled={!run.canApprove || (isDelete && !namesShown)}
           onclick={() => store.approve(run.runId)}
         >
           {isDelete ? 'Pindahkan ke Recycle Bin' : 'Run'}

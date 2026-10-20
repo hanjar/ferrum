@@ -384,5 +384,52 @@
     "offered": ["items.delete"],
     "valid": false,
     "value": { "schemaVersion": 1, "requestId": "req_1", "intent": { "capability": "items.delete", "sourcePane": "activeAtSubmit" } }
+  },
+  {
+    "name": "a chain with a delete step but a request that never asks to delete",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke 7z",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain that deletes while the request names two paths",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate", "items.delete"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke D:\\backup lalu hapus",
+    "valid": false,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } },
+        { "capability": "items.delete", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" } }
+      ]
+    }
+  },
+  {
+    "name": "a chain without a delete step is not limited by the delete rules",
+    "kind": "chain",
+    "offered": ["archive.create", "pane.navigate"],
+    "userText": "arsipkan C:\\Data\\report.xlsx ke D:\\backup",
+    "valid": true,
+    "value": {
+      "schemaVersion": 1,
+      "requestId": "req_1",
+      "steps": [
+        { "capability": "pane.navigate", "pane": "activeAtSubmit", "path": "C:\\Data\\report.xlsx" },
+        { "capability": "archive.create", "sourcePane": "activeAtSubmit", "selector": { "kind": "selected" }, "format": "7z", "target": { "kind": "sourceDirectory" } }
+      ]
+    }
   }
 ]

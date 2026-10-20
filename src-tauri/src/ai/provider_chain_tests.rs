@@ -117,3 +117,29 @@ fn the_capability_list_knows_navigation_and_delete_but_legacy_callers_do_not_get
         vec![ARCHIVE, "directories.sync"]
     );
 }
+
+const DELETE_INTENT: &str = r#"{"schemaVersion":1,"requestId":"req_1","intent":{"capability":"items.delete","sourcePane":"left","selector":{"kind":"selected"}}}"#;
+
+#[test]
+fn a_delete_is_accepted_only_when_the_user_asked_to_delete() {
+    let body = reply(DELETE_INTENT);
+    assert!(matches!(
+        interpret_for(&body, "req_1", &[DELETE], "tolong hapus yang kupilih"),
+        Interpreted::Done(PlanOutcome::Intent { .. })
+    ));
+    for text in ["jelaskan file ini", "arsipkan saja", ""] {
+        assert!(
+            matches!(
+                interpret_for(&body, "req_1", &[DELETE], text),
+                Interpreted::Malformed(_)
+            ),
+            "{text}"
+        );
+    }
+    // A chain with a delete step needs the verb as well.
+    let no_verb = r"arsipkan D:\Downloads\Telegram Desktop\pc_20250814\pc_202508014.csv";
+    assert!(matches!(
+        interpret_for(&reply(CHAIN), "req_1", &[ARCHIVE, NAV, DELETE], no_verb),
+        Interpreted::Malformed(_)
+    ));
+}

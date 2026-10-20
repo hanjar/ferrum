@@ -15,5 +15,11 @@
   { "name": "not at a token start", "path": "D:\\x\\a.csv", "text": "abcD:\\x\\a.csv", "typed": false },
   { "name": "empty path", "path": "", "text": "apa saja", "typed": false },
   { "name": "empty text", "path": "D:\\x", "text": "", "typed": false },
-  { "name": "text shorter than the path", "path": "D:\\Downloads\\Telegram Desktop\\a.csv", "text": "D:\\x", "typed": false }
+  { "name": "text shorter than the path", "path": "D:\\Downloads\\Telegram Desktop\\a.csv", "text": "D:\\x", "typed": false },
+  { "name": "accented letters match case-insensitively", "path": "D:\\Caf\u00e9\\a.txt", "text": "buka d:\\CAF\u00c9\\a.txt", "typed": true },
+  { "name": "kelvin sign lowercases to k", "path": "D:\\k\\a", "text": "buka d:\\\u212a\\a", "typed": true },
+  { "name": "fullwidth backslash is not a separator", "path": "D:\\x\\a.csv", "text": "buka D:\uff3cx\uff3ca.csv", "typed": false },
+  { "name": "a combining mark before the drive letter is not a letter", "path": "D:\\x\\a.csv", "text": "e\u0301D:\\x\\a.csv", "typed": true },
+  { "name": "an accented letter before the drive letter blocks the match", "path": "D:\\x\\a.csv", "text": "\u00e9D:\\x\\a.csv", "typed": false },
+  { "name": "digits before the drive letter block the match", "path": "D:\\x\\a.csv", "text": "7D:\\x\\a.csv", "typed": false }
 ]

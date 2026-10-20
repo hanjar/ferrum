@@ -15,7 +15,7 @@ import type { CopyControlPort } from './copyAdjust';
 import { indexerSetMode, indexerStatus } from '../ipc/indexer';
 import { isInTauri } from '../ipc/tauri';
 import { archiveTest } from '../ipc/archive';
-import { aiDeleteToRecycle, aiRecycleCheck } from '../ipc/mutations';
+import { aiDeleteToRecycle, aiRecycleCheck, aiTreeCensus } from '../ipc/mutations';
 import { pathResolve } from '../ipc/pathSuggest';
 import { createNavigatePort } from './navigatePort';
 import type { IndexerControlPort } from './indexerControl';
@@ -127,23 +127,23 @@ function indexerControlPort(): IndexerControlPort {
 }
 
 /**
- * FER-576: refresh both panes after a step but KEEP the selection that still exists (the next step of a chain,
- * e.g. the delete after an archive, looks at it). Panes without the incremental refresh fall back to the reset.
+ * FER-576: "Test Archive" as the gate before a chain deletes the original. Passes only if EVERY entry passed AND
+ * (review R1, S2) the archive holds exactly the members the sources have (files + empty folders), so nothing the
+ * Pack engine silently skipped can be deleted.
  */
-function refreshPanesKeepingSelection(): void {
-  for (const id of [0, 1] as const) {
-    const pane = getPane(id);
-    if (!pane) continue;
-    if (pane.refreshExternal) pane.refreshExternal();
-    else pane.refresh();
-  }
-}
-
-/** FER-576: "Test Archive" as the gate before a chain deletes the original. Passed only if EVERY entry passed. */
-async function verifyArchiveOutput(outputPath: string): Promise<{ ok: boolean; message: string }> {
+export async function verifyArchiveOutput(
+  outputPath: string,
+  expected?: { members?: number },
+): Promise<{ ok: boolean; message: string }> {
   const report = await archiveTest(outputPath);
   const entries = report.entries;
   if (entries.length === 0) return { ok: false, message: 'arsip kosong' };
+  if (expected?.members !== undefined && entries.length !== expected.members) {
+    return {
+      ok: false,
+      message: `isi arsip ${entries.length} entri, seharusnya ${expected.members}; ada yang tidak ikut diarsipkan`,
+    };
+  }
   const bad = entries.filter((entry) => entry.status !== 'passed');
   if (bad.length > 0) {
     const status = bad[0].status;
@@ -194,7 +194,8 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
       resolver,
       ctx,
       outputExists,
-      onCompleted: refreshPanesKeepingSelection,
+      onCompleted: refreshAllPanes,
+      census: (paths) => aiTreeCensus([...paths]),
       packAvailable: packServiceAvailable,
       locateEntity: (entityId) => activityPort.locate?.(entityId) ?? Promise.resolve(null),
     },

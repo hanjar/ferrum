@@ -18,6 +18,7 @@ import {
   type IndexerSetModeRequest,
   type IntentEnvelope,
 } from './contracts';
+import { userAskedToDelete } from './paneNavigate';
 
 export interface ProviderPlanRequest {
   requestId: string;
@@ -92,6 +93,10 @@ export function parseModelReply(
   }
   if (capability === ITEMS_DELETE_CAPABILITY && !offered?.includes(ITEMS_DELETE_CAPABILITY)) {
     throw new ContractError('invalid_payload', 'Capability not offered');
+  }
+  // FER-576 (review R1, S5): a delete is only accepted when the user asked to delete.
+  if (capability === ITEMS_DELETE_CAPABILITY && !userAskedToDelete(userText)) {
+    throw new ContractError('invalid_payload', 'The request does not ask to delete');
   }
   if (
     (capability === INDEXER_STATUS_CAPABILITY || capability === INDEXER_SET_MODE_CAPABILITY) &&

@@ -91,6 +91,17 @@ export interface PreviewInfo {
    * that "archive, then delete" can only delete exactly what was archived.
    */
   selectionDigest?: string;
+  /**
+   * FER-576 (review R1, S6): is the frozen selection exactly this ONE path? A function, not a list: the preview
+   * never carries paths (a test pins that). A chain asks it about the file it navigated to.
+   */
+  selectionIsOnly?: (path: string) => boolean;
+  /** FER-576 (review R1, S3): the output is written inside one of the sources (it would be deleted with them). */
+  outputInsideSource?: boolean;
+  /** FER-576 (review R1, S2): members a 7z / ZIP of the sources must hold (files + empty folders). */
+  expectedMembers?: number;
+  /** FER-576 (review R1, S2): symlinks / junctions inside the sources; an archive silently skips them. */
+  linkCount?: number;
 }
 
 /** What an adapter hands the facade after a read-only prepare. */

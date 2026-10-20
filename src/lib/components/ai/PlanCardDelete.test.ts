@@ -89,3 +89,80 @@ describe('PlanCard: items.delete warning card', () => {
     expect(screen.getByTestId('chain-note').textContent).toContain('lolos uji arsip');
   });
 });
+
+describe('PlanCard: items.delete confirm button waits for the names (review R1 S4)', () => {
+  it('stays disabled while the item names are not loaded, then enables', async () => {
+    const ex = new FakeExecutor();
+    let release: (value: { rows: never[]; total: number }) => void = () => undefined;
+    ex.listItems = () =>
+      new Promise((resolve) => {
+        release = resolve as typeof release;
+      });
+    const store = new ChatStore(ex);
+    store.send('hapus yang terpilih');
+    await tick();
+    const runId = store.runs.at(-1)!.runId;
+    ex.emit({
+      runId,
+      requestId: ex.submitted.at(-1)!.requestId,
+      state: 'awaitingApproval',
+      plan: deletePlan(),
+    });
+    await tick();
+    render(PlanCard, { run: store.runs.at(-1) as RunView, store });
+    await tick();
+    const confirm = screen.getByTestId('confirm-delete') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    release({
+      rows: [{ ref: 'a', label: 'a.csv', detail: 'file' }] as never[],
+      total: 1,
+    });
+    await tick();
+    await tick();
+    await tick();
+    expect((screen.getByTestId('confirm-delete') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('stays disabled, with a message, when the names cannot be loaded', async () => {
+    const ex = new FakeExecutor();
+    ex.listItems = async () => {
+      throw new Error('boom');
+    };
+    const store = new ChatStore(ex);
+    store.send('hapus yang terpilih');
+    await tick();
+    const runId = store.runs.at(-1)!.runId;
+    ex.emit({
+      runId,
+      requestId: ex.submitted.at(-1)!.requestId,
+      state: 'awaitingApproval',
+      plan: deletePlan(),
+    });
+    await tick();
+    render(PlanCard, { run: store.runs.at(-1) as RunView, store });
+    for (let i = 0; i < 6; i++) await tick();
+    expect((screen.getByTestId('confirm-delete') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('delete-warning').textContent).toContain('tidak dapat dimuat');
+    expect(ex.approved).toEqual([]);
+  });
+
+  it('shows one Stop button, not two, while the delete is running', async () => {
+    const ex = new FakeExecutor();
+    ex.listItems = async () => ({ rows: [{ ref: 'a', label: 'a.csv' }], total: 1 });
+    const store = new ChatStore(ex);
+    store.send('hapus yang terpilih');
+    await tick();
+    const runId = store.runs.at(-1)!.runId;
+    ex.emit({
+      runId,
+      requestId: ex.submitted.at(-1)!.requestId,
+      state: 'running',
+      plan: deletePlan(),
+    });
+    await tick();
+    render(PlanCard, { run: store.runs.at(-1) as RunView, store });
+    await tick();
+    const names = screen.getAllByRole('button').map((b) => b.textContent?.trim());
+    expect(names.filter((n) => n === 'Stop' || n === 'Cancel')).toEqual(['Stop']);
+  });
+});

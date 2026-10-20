@@ -6,7 +6,7 @@
 //! module touches the filesystem or the operation queue.
 use super::contract::{
     ChainEnvelope, Intent, IntentEnvelope, MAX_INPUT_BYTES, parse_chain_offered,
-    parse_intent_offered, path_typed_by_user,
+    parse_intent_offered, path_typed_by_user, user_asked_to_delete,
 };
 use super::credential::{self, CREDENTIAL_TARGET, CredentialError};
 use serde::{Deserialize, Serialize};
@@ -928,6 +928,11 @@ fn interpret_for(body: &str, request_id: &str, offered: &[&str], user_text: &str
             // FER-576: a navigation path must be one the user typed; a made-up path is a rejected reply.
             if let Intent::PaneNavigate(navigate) = &envelope.intent
                 && !path_typed_by_user(&navigate.path, user_text)
+            {
+                return echo();
+            }
+            // FER-576: a delete is only accepted when the user asked to delete.
+            if matches!(envelope.intent, Intent::ItemsDelete(_)) && !user_asked_to_delete(user_text)
             {
                 return echo();
             }

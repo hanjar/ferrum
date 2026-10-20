@@ -170,10 +170,10 @@ impl BinConfig for RegistryBinConfig {
     }
 }
 
+/// `\\?\Volume{GUID}\` of a drive-letter volume root -> `{GUID}`; `None` when Windows cannot tell.
 #[cfg(windows)]
-fn bin_state_from_registry(root: &str) -> BinState {
+fn volume_guid_of(root: &str) -> Option<String> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
-    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
     let mut mount: Vec<u16> = root.encode_utf16().collect();
     if mount.last() != Some(&(b'\\' as u16)) {
@@ -186,15 +186,40 @@ fn bin_state_from_registry(root: &str) -> BinState {
         GetVolumeNameForVolumeMountPointW(mount.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
     };
     if ok == 0 {
-        return BinState::Unknown;
+        return None;
     }
     let len = buf.iter().position(|c| *c == 0).unwrap_or(0);
     let name = String::from_utf16_lossy(&buf[..len]);
-    // `\\?\Volume{GUID}\` -> `{GUID}`
-    let (Some(a), Some(b)) = (name.find('{'), name.find('}')) else {
+    let (a, b) = (name.find('{')?, name.find('}')?);
+    Some(name[a..=b].to_owned())
+}
+
+/// FER-576: the explicit Recycle Bin size limit of a volume in MB (`MaxCapacity` of its bin settings).
+/// `None` = the volume has no explicit limit (the system default applies) or it could not be read.
+#[cfg(windows)]
+pub fn bin_max_capacity_mb(root: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
+    let guid = volume_guid_of(root)?;
+    let key =
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+    reg_dword(HKEY_CURRENT_USER, &key, "MaxCapacity")
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(windows))]
+pub fn bin_max_capacity_mb(_root: &str) -> Option<u32> {
+    None
+}
+
+#[cfg(windows)]
+fn bin_state_from_registry(root: &str) -> BinState {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let Some(guid) = volume_guid_of(root) else {
         return BinState::Unknown;
     };
-    let guid = &name[a..=b];
+    let guid = guid.as_str();
 
     let explorer = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket";
     let policy = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";

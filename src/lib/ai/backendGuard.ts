@@ -154,6 +154,10 @@ export function createBackendGuard(deps: BackendGuardDeps): ExecutionGuard {
       }
     },
 
+    scopeDigestOf(ticket: ApprovalTicket) {
+      return scopes.get(ticket.handleId);
+    },
+
     revoke(ticket: ApprovalTicket) {
       scopes.delete(ticket.handleId);
       void Promise.resolve(invoke('ai_revoke_approval', { handleId: ticket.handleId })).catch(

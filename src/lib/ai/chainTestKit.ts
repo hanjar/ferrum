@@ -28,7 +28,16 @@ export interface KitOptions {
   /** `check` answers; default: everything can go to the Recycle Bin. */
   recycleCheck?: (paths: readonly string[]) => RecycleCheckRow[];
   recycleDelete?: (paths: readonly string[]) => Promise<RecycleDeleteReport>;
-  verify?: (path: string) => Promise<{ ok: boolean; message: string }>;
+  verify?: (
+    path: string,
+    expected?: { members?: number },
+  ) => Promise<{ ok: boolean; message: string }>;
+  /** What the size/entry census says about the archive sources (default: 1 member, no links). */
+  census?: { archiveMembers: number; links: number } | 'absent';
+  /** Marks kept by a pane refresh (default false: the real refresh clears them). */
+  keepSelectionOnRefresh?: boolean;
+  /** After the navigation, the pane also marks this other file. */
+  navSelectsExtra?: boolean;
   noVerify?: boolean;
   noDelete?: boolean;
   noNavigate?: boolean;
@@ -70,7 +79,8 @@ export function buildKit(options: KitOptions) {
           entry('pc_202508014.csv', { path: CSV }),
           entry('keep-me.txt', { path: OTHER }),
         ];
-        pane.selected = target.kind === 'file' ? [target.path] : [];
+        pane.selected =
+          target.kind === 'file' ? [target.path, ...(options.navSelectsExtra ? [OTHER] : [])] : [];
         pane.listing = {};
         return true;
       },
@@ -90,9 +100,11 @@ export function buildKit(options: KitOptions) {
         : { requested: paths.length, deleted: paths.length, failed: [] };
     }),
   };
-  const verify = vi.fn(async (path: string) => {
+  const verify = vi.fn(async (path: string, expected?: { members?: number }) => {
     order.push(`verify:${path}`);
-    return options.verify ? options.verify(path) : { ok: true, message: '1 entri terverifikasi' };
+    return options.verify
+      ? options.verify(path, expected)
+      : { ok: true, message: '1 entri terverifikasi' };
   });
 
   const { facade, registry } = createCommandFacade({
@@ -113,8 +125,18 @@ export function buildKit(options: KitOptions) {
           entry('pc_20250814.7z', { path: `${FOLDER}\\pc_20250814.7z` }),
         ];
         host.left.listing = {};
+        // The real refresh resets the marks; only a test can ask to keep them.
+        if (options.keepSelectionOnRefresh !== true) host.left.selected = [];
       },
       measure: async () => undefined,
+      ...(options.census === 'absent'
+        ? {}
+        : {
+            census: async () => {
+              const census = options.census;
+              return census && census !== 'absent' ? census : { archiveMembers: 1, links: 0 };
+            },
+          }),
     },
     sync: { flow, ctx: svc, readJob: () => undefined },
     ...(options.noDelete

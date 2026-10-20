@@ -104,8 +104,30 @@ export async function enqueueMove(
 export interface RecycleCheckRow {
   path: string;
   ok: boolean;
-  /** Stable backend code: `network_or_unc`, `reserved_name` or `no_recycle_bin`. */
+  /** Stable backend code (see `recycle_gate::reason`): `no_recycle_bin`, `recycle_disabled`, `too_big`, ... */
   reason?: string | null;
+  /** The REAL recursive size of the item (links are not followed). */
+  bytes?: number;
+  entries?: number;
+  links?: number;
+}
+
+export interface TreeCensus {
+  bytes: number;
+  /** Members a 7z / ZIP of the paths lists: every file plus every empty folder. */
+  archiveMembers: number;
+  /** Symlinks / junctions inside the paths (the Pack engine skips them). */
+  links: number;
+}
+
+/** FER-576 (review R1, S2): read-only size and archive-member counts of a set of paths. */
+export async function aiTreeCensus(paths: string[]): Promise<TreeCensus> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<TreeCensus>('ai_tree_census', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
 }
 
 /** FER-576: can each path go to the Recycle Bin? Read-only. */

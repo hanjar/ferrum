@@ -1,6 +1,6 @@
 // AI-01 wire contracts. Model input is parsed only as IntentEnvelope; other contracts
 // are app/backend-owned and must never be constructed from model output.
-import { pathTypedByUser } from './paneNavigate';
+import { drivePathCount, pathTypedByUser, userAskedToDelete } from './paneNavigate';
 export type PaneRef = 'left' | 'right' | 'activeAtSubmit';
 // AI-09: `extensions` (opsional) menyaring item ke file dengan ekstensi tersebut (huruf kecil, tanpa titik).
 export type Selector =
@@ -1040,6 +1040,12 @@ export function parseChain(
   if (!Array.isArray(chain.steps) || chain.steps.length < 2 || chain.steps.length > MAX_CHAIN_STEPS)
     fail('invalid_payload', 'A chain has 2 to 4 steps');
   const steps = chain.steps as Array<Record<string, unknown>>;
+  // FER-576 (review R1, S5/S6): a chain that deletes needs an explicit request and ONE path.
+  if (
+    steps.some((step) => step?.capability === ITEMS_DELETE_CAPABILITY) &&
+    (!userAskedToDelete(userText) || drivePathCount(userText) > 1)
+  )
+    fail('invalid_payload', 'A delete needs an explicit request and a single path');
   const archive = steps.find((step) => step?.capability === 'archive.create');
   let lastRank = 0;
   let pane: unknown;
