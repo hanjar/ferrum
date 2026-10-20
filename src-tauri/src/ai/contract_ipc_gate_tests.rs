@@ -11,7 +11,7 @@ use serde_json::json;
 
 /// Every capability that exists on the AI wire today. A new `Intent` variant must be added here
 /// AND the change must be checked against the endpoint/set-mode boundary this file pins down.
-const ALL_CAPABILITIES: [&str; 7] = [
+const ALL_CAPABILITIES: [&str; 9] = [
     "archive.create",
     "directories.sync",
     ACTIVITY_QUERY_CAPABILITY,
@@ -19,6 +19,8 @@ const ALL_CAPABILITIES: [&str; 7] = [
     INDEXER_STATUS_CAPABILITY,
     INDEXER_SET_MODE_CAPABILITY,
     DISK_USAGE_QUERY_CAPABILITY,
+    PANE_NAVIGATE_CAPABILITY,
+    ITEMS_DELETE_CAPABILITY,
 ];
 
 #[test]
@@ -204,6 +206,12 @@ fn ai_intents_are_structurally_isolated_from_shell_open_and_execution() {
             }
             Intent::DiskUsageQuery(_) => {
                 // Read-only query of disk usage snapshot.
+            }
+            Intent::PaneNavigate(_) => {
+                // Opens a typed folder in a pane; nothing is executed.
+            }
+            Intent::ItemsDelete(_) => {
+                // Recycle Bin only (no permanent flag exists on the wire).
             }
         }
     }

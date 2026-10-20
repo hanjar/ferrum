@@ -1,5 +1,6 @@
 // AI-01 wire contracts. Model input is parsed only as IntentEnvelope; other contracts
 // are app/backend-owned and must never be constructed from model output.
+import { pathTypedByUser } from './paneNavigate';
 export type PaneRef = 'left' | 'right' | 'activeAtSubmit';
 // AI-09: `extensions` (opsional) menyaring item ke file dengan ekstensi tersebut (huruf kecil, tanpa titik).
 export type Selector =
@@ -37,7 +38,12 @@ export type ProposedIntent =
       target: { kind: 'sourceDirectory' } | { kind: 'pane'; pane: PaneRef };
       outputName?: string;
     }
-  | { capability: 'directories.sync'; leftPane: 'left'; rightPane: 'right'; mode: 'bidirectional' };
+  | { capability: 'directories.sync'; leftPane: 'left'; rightPane: 'right'; mode: 'bidirectional' }
+  /**
+   * FER-576: move the items SELECTED in a pane to the Recycle Bin. No name, no path, no permanent flag exists
+   * on the wire; the target is always the pane selection and the user confirms on a warning card.
+   */
+  | { capability: 'items.delete'; sourcePane: PaneRef; selector: { kind: 'selected' } };
 export interface IntentEnvelope {
   schemaVersion: 1;
   requestId: string;
@@ -130,7 +136,23 @@ export interface DiskUsageQueryRequest {
 export type DiskUsageQueryIntent = DiskUsageQueryRequest & {
   capability: typeof DISK_USAGE_QUERY_CAPABILITY;
 };
+/**
+ * FER-576: open a folder the USER typed (or the folder of a typed file, with that file selected). Read-only
+ * navigation; the path must occur in the user's request text (`pathTypedByUser`), be absolute and exist.
+ * Mirrors `Intent::PaneNavigate` in Rust.
+ */
+export const PANE_NAVIGATE_CAPABILITY = 'pane.navigate';
+export const ITEMS_DELETE_CAPABILITY = 'items.delete';
+export const MAX_NAVIGATE_PATH = 1024;
+/** A multi-step plan is at most this long (navigate, archive, delete, plus one spare). */
+export const MAX_CHAIN_STEPS = 4;
+export interface PaneNavigateIntent {
+  capability: typeof PANE_NAVIGATE_CAPABILITY;
+  pane: PaneRef;
+  path: string;
+}
 export type ModelIntent =
+  | PaneNavigateIntent
   | DiskUsageQueryIntent
   | ProposedIntent
   | ActivityQueryIntent
@@ -161,6 +183,7 @@ export interface PaneSnapshot {
 }
 export type ResolvedOperation =
   | { kind: 'archive.create'; sourceManifest: string; targetDirectory: string; outputName: string }
+  | { kind: 'items.delete'; sourceManifest: string; sourceDirectory: string }
   | {
       kind: 'directories.sync';
       leftRoot: string;
@@ -367,6 +390,23 @@ function safeWindowsPath(value: unknown): value is string {
       return !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(stem);
     });
 }
+/**
+ * FER-576: a navigation path is absolute, local (a drive letter), free of traversal, device names and stream
+ * syntax. A trailing separator and a bare drive root (`D:`) are fine. Mirror of Rust `safe_navigate_path`.
+ */
+export function isSafeNavigatePath(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    value.length > MAX_NAVIGATE_PATH ||
+    value.includes('\0')
+  )
+    return false;
+  const trimmed = value.replace(/\//g, '\\').replace(/\\+$/, '');
+  if (!/^[A-Za-z]:/.test(trimmed)) return false;
+  if (trimmed.length === 2) return true;
+  return safeWindowsPath(trimmed);
+}
 function version(value: unknown): void {
   if (value !== 1) fail('unsupported_version', 'Expected schema version 1');
 }
@@ -480,6 +520,11 @@ export function parseIntent(
     if (intent.outputName !== undefined && !isSafeOutputName(intent.outputName)) {
       fail('invalid_payload', 'Output name must be safe basename');
     }
+  } else if (intent.capability === 'items.delete') {
+    obj(intent, ['capability', 'sourcePane', 'selector'], ['capability', 'sourcePane', 'selector']);
+    paneRef(intent.sourcePane);
+    const picked = obj(intent.selector, ['kind'], ['kind']);
+    literal(picked.kind, 'selected');
   } else if (intent.capability === 'directories.sync') {
     obj(
       intent,
@@ -629,6 +674,7 @@ export function parseOfferedIntent(
     fail('invalid_payload', 'Capability not offered');
   }
   if (
+    intent.capability !== PANE_NAVIGATE_CAPABILITY &&
     intent.capability !== ACTIVITY_QUERY_CAPABILITY &&
     intent.capability !== COPY_ADJUST_CAPABILITY &&
     intent.capability !== INDEXER_STATUS_CAPABILITY &&
@@ -639,6 +685,12 @@ export function parseOfferedIntent(
   version(envelope.schemaVersion);
   ref(envelope.requestId);
   if (envelope.requestId !== activeRequestId) fail('request_mismatch', 'Request no longer active');
+  if (intent.capability === PANE_NAVIGATE_CAPABILITY) {
+    const record = obj(intent, ['capability', 'pane', 'path'], ['capability', 'pane', 'path']);
+    paneRef(record.pane);
+    if (!isSafeNavigatePath(record.path)) fail('invalid_payload', 'Invalid navigation path');
+    return value as OfferedIntentEnvelope;
+  }
   if (intent.capability === DISK_USAGE_QUERY_CAPABILITY) {
     const record = obj(intent, ['capability', 'query'], ['capability', 'query']);
     parseDiskUsageQueryKind(record.query);
@@ -759,7 +811,7 @@ export function parseResolvedPlan(value: unknown): ResolvedPlan {
   ref(p.planId);
   ref(p.requestId);
   positive(p.revision);
-  choice(p.capability, ['archive.create', 'directories.sync']);
+  choice(p.capability, ['archive.create', 'directories.sync', 'items.delete']);
   const snapshot = parsePaneSnapshot(p.sourceSnapshot);
   if (snapshot.requestId !== p.requestId)
     fail('request_mismatch', 'Plan snapshot request mismatch');
@@ -770,6 +822,7 @@ export function parseResolvedPlan(value: unknown): ResolvedPlan {
       'sourceManifest',
       'targetDirectory',
       'outputName',
+      'sourceDirectory',
       'leftRoot',
       'rightRoot',
       'leftManifest',
@@ -797,6 +850,17 @@ export function parseResolvedPlan(value: unknown): ResolvedPlan {
     ) {
       fail('invalid_payload', 'Invalid resolved output name');
     }
+  } else if (operation.kind === 'items.delete') {
+    obj(
+      operation,
+      ['kind', 'sourceManifest', 'sourceDirectory'],
+      ['kind', 'sourceManifest', 'sourceDirectory'],
+    );
+    ref(operation.sourceManifest);
+    if (!safeWindowsPath(operation.sourceDirectory))
+      fail('invalid_reference', 'Unsafe source directory');
+    if (obj(p.preview, ['itemCount', 'conflictCount', 'totalBytes'], []).conflictCount !== 0)
+      fail('invalid_payload', 'A delete has no conflicts');
   } else {
     obj(
       operation,
@@ -932,4 +996,72 @@ export function parseExecutionReceipt(value: unknown): ExecutionReceipt {
     if (e.itemRef !== undefined) ref(e.itemRef);
   }
   return value as ExecutionReceipt;
+}
+
+// ───────────────────────── FER-576: multi-step plan ("chain") ─────────────────────────
+
+/** A model reply with several steps. Each step is an ordinary intent; the app runs them one at a time. */
+export interface ChainEnvelope {
+  schemaVersion: 1;
+  requestId: string;
+  steps: Array<
+    PaneNavigateIntent | Extract<ProposedIntent, { capability: 'archive.create' | 'items.delete' }>
+  >;
+}
+
+const CHAIN_RANK: Record<string, number> = {
+  [PANE_NAVIGATE_CAPABILITY]: 1,
+  'archive.create': 2,
+  [ITEMS_DELETE_CAPABILITY]: 3,
+};
+
+/**
+ * Strict parse of a chain reply (mirror of Rust `parse_chain_offered`; shared cases in
+ * `contract-fixtures/ai/chain-cases.json`). 2 to 4 steps, the closed order `pane.navigate`? -> `archive.create`?
+ * -> `items.delete`? with each at most once, one pane reference throughout, every step offered and valid as a
+ * single intent, an archive that feeds a delete archives the pane selection, and a navigation path must be one
+ * the user typed. Anything else is invalid and nothing runs.
+ */
+export function parseChain(
+  value: unknown,
+  activeRequestId: string,
+  offered: readonly string[],
+  userText: string,
+): ChainEnvelope {
+  bounded(value);
+  const chain = obj(
+    value,
+    ['schemaVersion', 'requestId', 'steps'],
+    ['schemaVersion', 'requestId', 'steps'],
+  );
+  version(chain.schemaVersion);
+  ref(chain.requestId);
+  if (chain.requestId !== activeRequestId) fail('request_mismatch', 'Request no longer active');
+  if (!Array.isArray(chain.steps) || chain.steps.length < 2 || chain.steps.length > MAX_CHAIN_STEPS)
+    fail('invalid_payload', 'A chain has 2 to 4 steps');
+  const steps = chain.steps as Array<Record<string, unknown>>;
+  const archive = steps.find((step) => step?.capability === 'archive.create');
+  let lastRank = 0;
+  let pane: unknown;
+  steps.forEach((step, index) => {
+    const envelope = { schemaVersion: 1, requestId: activeRequestId, intent: step };
+    const parsed = parseOfferedIntent(envelope, activeRequestId, offered);
+    const capability = parsed.intent.capability;
+    const rank = CHAIN_RANK[capability];
+    if (rank === undefined) fail('invalid_payload', 'Capability not allowed in a chain');
+    if (rank <= lastRank || (rank === 1 && index !== 0))
+      fail('invalid_payload', 'Chain steps are out of order');
+    lastRank = rank;
+    const stepPane = capability === PANE_NAVIGATE_CAPABILITY ? step.pane : step.sourcePane;
+    pane ??= stepPane;
+    if (pane !== stepPane) fail('invalid_payload', 'A chain works on one pane');
+    if (capability === PANE_NAVIGATE_CAPABILITY && !pathTypedByUser(String(step.path), userText))
+      fail('invalid_payload', 'Navigation path was not typed in the request');
+    if (capability === ITEMS_DELETE_CAPABILITY && archive) {
+      const picked = archive.selector as { kind?: unknown } | undefined;
+      if (picked?.kind !== 'selected')
+        fail('invalid_payload', 'Archive-then-delete must archive the pane selection');
+    }
+  });
+  return value as ChainEnvelope;
 }

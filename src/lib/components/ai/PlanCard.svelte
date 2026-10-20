@@ -35,8 +35,9 @@
   );
 
   const CAPABILITY: Record<string, string> = {
-    'archive.create': 'Create ZIP archive',
+    'archive.create': 'Create archive (ZIP / 7z)',
     'directories.sync': 'Two-way directory sync',
+    'items.delete': 'Move to Recycle Bin',
   };
   const CONFLICT_PAGE = 20;
   const JOB_CAP = 50;
@@ -45,6 +46,14 @@
   let showItems = $state(false);
 
   const plan = $derived(run.plan);
+  // FER-576: a delete card is a WARNING card (never auto-approved; Recycle Bin only).
+  const isDelete = $derived(plan?.operation.kind === 'items.delete');
+  const deleteNames = $derived((run.items?.rows ?? []).slice(0, 10));
+  $effect(() => {
+    // The names come from the local frozen manifest; they are never sent to the provider.
+    if (isDelete && run.state === 'awaitingApproval' && !run.items)
+      void store.loadItems(run.runId, 0);
+  });
   const progress = $derived(jobsProgress(run.jobs));
   const active = $derived(run.state === 'queued' || run.state === 'running');
   const cancellable = $derived(
@@ -100,7 +109,21 @@
   <div class="status" role="status" aria-live="polite">
     <span class="dot" aria-hidden="true"></span>
     <strong>{run.cancelRequested && active ? 'Cancelling…' : run.label}</strong>
+    {#if run.chain}
+      <span class="rev" data-testid="chain-step"
+        >Langkah {run.chain.index + 1} dari {run.chain.total}</span
+      >
+    {/if}
   </div>
+  {#if run.chain?.note}
+    <p class="muted" data-testid="chain-note">{run.chain.note}</p>
+  {/if}
+  {#if run.navigate}
+    <p class={run.navigate.result?.ok === false ? 'error' : 'muted'} data-testid="navigate-result">
+      {run.navigate.summary}
+      {#if run.navigate.result}{run.navigate.result.message}{/if}
+    </p>
+  {/if}
 
   {#if run.modelText}
     <div class="note">
@@ -157,10 +180,37 @@
         Changes typed now do not alter this job. Type "cancel" to stop it, then start a new request.
       </p>
     {/if}
+    {#if isDelete && plan.operation.kind === 'items.delete'}
+      <div class="deleteWarn" role="alert" data-testid="delete-warning">
+        <strong>⚠ Peringatan: {plan.preview.itemCount} item akan dipindahkan ke Recycle Bin</strong>
+        <p class="muted">
+          Dari {plan.operation.sourceDirectory}. Item bisa dikembalikan dari Recycle Bin; ini bukan
+          hapus permanen. Pastikan daftar di bawah benar sebelum menekan tombol konfirmasi.
+        </p>
+        {#if run.items && run.items.rows.length}
+          <ul class="rows" aria-label="Items to delete" data-testid="delete-items">
+            {#each deleteNames as row (row.ref)}
+              <li>
+                <span class="mono">{row.label}</span>
+                {#if row.detail}<span class="muted">{row.detail}</span>{/if}
+              </li>
+            {/each}
+          </ul>
+          {#if run.items.total > deleteNames.length}
+            <p class="muted">dan {run.items.total - deleteNames.length} item lainnya</p>
+          {/if}
+        {:else if run.state === 'awaitingApproval'}
+          <p class="muted">Memuat daftar item…</p>
+        {/if}
+      </div>
+    {/if}
     <dl class="kv">
       {#if plan.operation.kind === 'archive.create'}
         <dt>Output</dt>
         <dd class="mono">{plan.operation.targetDirectory}\{plan.operation.outputName}</dd>
+      {:else if plan.operation.kind === 'items.delete'}
+        <dt>Destination</dt>
+        <dd>Recycle Bin</dd>
       {:else}
         <dt>Left root</dt>
         <dd class="mono">{plan.operation.leftRoot}</dd>
@@ -362,27 +412,41 @@
 
   {#if cancellable}
     <div class="actions">
+      {#if isDelete}
+        <!-- Cancel comes first so keyboard focus never lands on the destructive button by default. -->
+        <button
+          type="button"
+          class="ghost"
+          disabled={run.cancelRequested}
+          onclick={() => store.cancel(run.runId)}
+        >
+          Cancel
+        </button>
+      {/if}
       {#if run.state === 'awaitingApproval'}
         <button
           type="button"
-          class="primary"
+          class={isDelete ? 'danger' : 'primary'}
+          data-testid={isDelete ? 'confirm-delete' : undefined}
           disabled={!run.canApprove}
           onclick={() => store.approve(run.runId)}
         >
-          Run
+          {isDelete ? 'Pindahkan ke Recycle Bin' : 'Run'}
         </button>
       {/if}
-      {#if editable}
+      {#if editable && !isDelete}
         <button type="button" class="ghost" onclick={() => store.edit(run.runId)}>Edit</button>
       {/if}
-      <button
-        type="button"
-        class="ghost"
-        disabled={run.cancelRequested}
-        onclick={() => store.cancel(run.runId)}
-      >
-        {active ? 'Stop' : 'Cancel'}
-      </button>
+      {#if !isDelete || active}
+        <button
+          type="button"
+          class="ghost"
+          disabled={run.cancelRequested}
+          onclick={() => store.cancel(run.runId)}
+        >
+          {active ? 'Stop' : 'Cancel'}
+        </button>
+      {/if}
     </div>
   {/if}
 </section>
@@ -550,6 +614,23 @@
   }
   .ghost:hover:not(:disabled) {
     background: var(--hover2);
+  }
+  .deleteWarn {
+    border: 1px solid var(--red);
+    border-radius: var(--r);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .deleteWarn p {
+    margin: 0;
+  }
+  .danger {
+    background: var(--red);
+    border: 1px solid var(--red);
+    color: #fff;
   }
   .primary {
     background: var(--accent);

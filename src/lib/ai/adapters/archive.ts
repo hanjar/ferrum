@@ -234,6 +234,7 @@ export function createArchiveAdapter(deps: ArchiveAdapterDeps): CommandAdapter<A
           totalBytes: facts.totalBytes,
           outputPath: target.outputPath,
           warnings,
+          selectionDigest: selection.digest,
         },
         digestParts: [
           scope.handle,

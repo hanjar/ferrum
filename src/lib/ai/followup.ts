@@ -364,6 +364,9 @@ function validated(candidate: IntentEnvelope): ApplyResult {
 export function previousIntentSummary(prev: IntentEnvelope): Record<string, unknown> {
   const i = prev.intent;
   if (i.capability === 'directories.sync') return { capability: i.capability, mode: i.mode };
+  // FER-576: a delete has no format/target/name; the follow-up only keeps the shape.
+  if (i.capability === 'items.delete')
+    return { capability: i.capability, sourcePane: i.sourcePane, selector: i.selector };
   return {
     capability: i.capability,
     sourcePane: i.sourcePane,

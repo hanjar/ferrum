@@ -114,6 +114,8 @@ pub fn run() {
             ipc::create_entry,
             ipc::rename_entry,
             ipc::delete_entries,
+            ipc::ai_recycle_check,
+            ipc::ai_delete_to_recycle,
             ipc::plan_copy,
             ipc::enqueue_copy,
             ipc::enqueue_move,

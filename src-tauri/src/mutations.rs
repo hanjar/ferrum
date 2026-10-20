@@ -192,6 +192,59 @@ fn delete_to_trash_with(
     report
 }
 
+/// `GetDriveTypeW` value of a fixed local disk, the only kind of volume the AI delete trusts to
+/// have a Recycle Bin (USB sticks, network drives and optical media have none or a per-user one that
+/// the shell may skip, in which case a "recycle" silently turns into a permanent delete).
+const DRIVE_FIXED: u32 = 3;
+
+/// FER-576: why `path` cannot be moved to the Recycle Bin, or `None` when it can. Pure part: the drive
+/// type is passed in (`None` = unknown). The AI delete refuses the WHOLE batch when any item has a
+/// blocker; it never falls back to a permanent delete.
+pub fn recycle_blocker_for(path: &str, drive_type: Option<u32>) -> Option<&'static str> {
+    let plain = crate::path_guard::strip_verbatim(path);
+    let bytes = plain.as_bytes();
+    let drive_letter_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if !drive_letter_path {
+        return Some("network_or_unc");
+    }
+    if crate::path_guard::has_reserved_device_component(&plain) {
+        return Some("reserved_name");
+    }
+    match drive_type {
+        Some(DRIVE_FIXED) => None,
+        _ => Some("no_recycle_bin"),
+    }
+}
+
+/// FER-576: the blocker for a real path (asks Windows for the drive type).
+pub fn recycle_blocker(path: &str) -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        let plain = crate::path_guard::strip_verbatim(path);
+        let drive_type = plain
+            .chars()
+            .next()
+            .filter(char::is_ascii_alphabetic)
+            .map(|letter| {
+                let root: Vec<u16> = format!("{}:\\", letter.to_ascii_uppercase())
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                // SAFETY: `root` is a NUL-terminated UTF-16 string that outlives the call.
+                unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) }
+            });
+        recycle_blocker_for(path, drive_type)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Some("no_recycle_bin")
+    }
+}
+
 /// Permanently delete (explicit user intent only — the UI must confirm).
 pub fn delete_permanent(paths: &[String]) -> DeleteReport {
     delete_impl(paths, &|p| {
@@ -432,5 +485,59 @@ mod tests {
         assert_eq!(report.deleted, 1, "failed: {:?}", report.failed);
         assert!(!root.join("gone.txt").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::{recycle_blocker, recycle_blocker_for};
+
+    #[test]
+    fn only_a_fixed_drive_letter_volume_can_take_a_recycle() {
+        assert_eq!(recycle_blocker_for(r"D:\Downloads\a.csv", Some(3)), None);
+        assert_eq!(recycle_blocker_for(r"d:/x/a.csv", Some(3)), None);
+        // removable, remote, optical, ram disk, unknown
+        for kind in [Some(2), Some(4), Some(5), Some(6), Some(1), Some(0), None] {
+            assert_eq!(
+                recycle_blocker_for(r"E:\x\a.csv", kind),
+                Some("no_recycle_bin"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unc_relative_and_device_names_are_refused_before_the_drive_is_asked() {
+        for path in [
+            r"\server\share\a.txt",
+            r"relative\a.txt",
+            "a.txt",
+            r"C:a.txt",
+            "",
+        ] {
+            assert_eq!(
+                recycle_blocker_for(path, Some(3)),
+                Some("network_or_unc"),
+                "{path}"
+            );
+        }
+        for path in [r"C:\x\nul", r"C:\x\CON.txt", r"C:\COM1\a"] {
+            assert_eq!(
+                recycle_blocker_for(path, Some(3)),
+                Some("reserved_name"),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_real_system_drive_is_a_fixed_volume() {
+        let root = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert_eq!(recycle_blocker(&format!(r"{root}\Windows\x.txt")), None);
+        assert_eq!(
+            recycle_blocker(r"\localhost\share\x"),
+            Some("network_or_unc")
+        );
     }
 }

@@ -86,6 +86,11 @@ export interface PreviewInfo {
   totalBytes: number;
   outputPath?: string;
   warnings: string[];
+  /**
+   * FER-576: digest of the frozen source selection (archive and delete adapters). A chain compares the two so
+   * that "archive, then delete" can only delete exactly what was archived.
+   */
+  selectionDigest?: string;
 }
 
 /** What an adapter hands the facade after a read-only prepare. */
@@ -107,6 +112,8 @@ export interface AdapterRun {
   conflictsSkipped: number;
   /** Items that could not be put on the queue (sync): the run must not be reported as fully done. */
   failedToQueue?: number;
+  /** FER-576: app-built text for the partial result when `failedToQueue` > 0 (e.g. which deletes failed). */
+  failureNote?: string;
   outputPath?: string;
   notes: string[];
 }
@@ -149,6 +156,7 @@ export interface CommandReceipt {
   completed: number;
   conflictsSkipped: number;
   failedToQueue?: number;
+  failureNote?: string;
   outputPath?: string;
   notes: string[];
 }
@@ -368,6 +376,7 @@ export class CommandFacade {
         notes: r.notes,
       };
       if (r.failedToQueue) receipt.failedToQueue = r.failedToQueue;
+      if (r.failureNote !== undefined) receipt.failureNote = r.failureNote;
       if (r.outputPath !== undefined) receipt.outputPath = r.outputPath;
       return ok(receipt);
     } catch (e) {

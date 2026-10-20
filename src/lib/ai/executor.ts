@@ -42,6 +42,7 @@ import {
   type IndexerView,
 } from './indexerControl';
 import { readiness } from '../ipc/indexer';
+import { pathTypedByUser } from './paneNavigate';
 import {
   describeDiskUsageQuery,
   type DiskUsageAnswer,
@@ -85,9 +86,14 @@ import {
   type CommandFacade,
   type PreparedCommand,
 } from './commands';
+import { describeNavigate, type NavigatePort, type NavigateTarget } from './paneNavigate';
 import {
   ACTIVITY_QUERY_CAPABILITY,
   DISK_USAGE_QUERY_CAPABILITY,
+  PANE_NAVIGATE_CAPABILITY,
+  isSafeNavigatePath,
+  type ChainEnvelope,
+  type PaneRef,
   parseDiskUsageQueryKind,
   type DiskUsageQueryKind,
   COPY_ADJUST_CAPABILITY,
@@ -208,6 +214,16 @@ export interface ExecutorDeps {
    * answer is built here from a local snapshot and never sent to the provider.
    */
   diskUsage?: DiskUsageQueryPort;
+  /**
+   * FER-576: open a path the user typed in a pane. Absent = `pane.navigate` is never offered. Read-only:
+   * nothing is executed or modified.
+   */
+  navigate?: NavigatePort;
+  /**
+   * FER-576: Test Archive for the "archive, then delete" gate. A chain deletes the original ONLY after this
+   * says the archive passed; absent or failing = the delete step is never created (fail closed).
+   */
+  verifyArchive?: (outputPath: string) => Promise<{ ok: boolean; message: string }>;
   /** FER-465: endpoint provider (hanya host:port yang dipakai di pesan galat). */
   providerEndpoint?: () => string | undefined;
   /** FER-465: dipanggil dengan kode aman saat provider gagal (mis. untuk indikator status header). */
@@ -254,6 +270,37 @@ interface Run {
   entity?: boolean;
   /** FER-471/476: this run is a control request (copy.adjust / indexer.*; allows its extra state edges only). */
   control?: boolean;
+  /** FER-576: this run is one step of a multi-step plan; the rest waits here until this step succeeds. */
+  chain?: ChainState;
+  /** FER-576: app-built text for a partial result (e.g. which deletes failed). */
+  partialNote?: string;
+}
+
+type ChainStep = ChainEnvelope['steps'][number];
+
+/** FER-576: where a multi-step plan stands. Lives on the run that is currently executing a step. */
+interface ChainState {
+  /** Capability of the step this run executes. */
+  capability: ChainStep['capability'];
+  /** Ids the follow-up runs derive from. */
+  baseRunId: string;
+  /** Zero-based index of the step this run executes. */
+  index: number;
+  total: number;
+  /** Steps after this one. Cleared by any failure, cancel or refusal: the rest never runs. */
+  rest: ChainStep[];
+  /** The request text of step 1 (a navigation path must be in it). */
+  userText: string;
+  /** Request id the step ids derive from. */
+  baseRequestId: string;
+  /** The previous step was `archive.create`: a delete step needs the archive verified and the same selection. */
+  afterArchive: boolean;
+  /** Digest of the frozen selection the archive step used. */
+  archiveSelectionDigest?: string;
+  /** Test Archive passed for the archive this chain created. */
+  verified?: boolean;
+  /** App-built line shown on the card of this step. */
+  note?: string;
 }
 
 const FOLLOWUP_PROVIDER_ERROR =
@@ -295,6 +342,7 @@ const ENGINE_FAILURE_CAUSES: Readonly<Record<string, string>> = {
   notADirectory: 'tujuan bukan folder',
   unsupported: 'operasi tidak didukung oleh engine',
   io: 'kesalahan baca/tulis disk',
+  recycleRefused: 'backend menolak memindahkan item ke Recycle Bin (tidak ada yang dihapus)',
 };
 export function engineFailureMessage(cause: string): string | undefined {
   const label = Object.hasOwn(ENGINE_FAILURE_CAUSES, cause)
@@ -524,6 +572,12 @@ export class AiExecutor implements ChatExecutor {
       return no('limit', `Batas ${MAX_REVISIONS} revisi tercapai; buat permintaan baru.`);
     }
     const prev = history.current.envelope;
+    if (prev.intent.capability === 'items.delete') {
+      return no(
+        'invalid_edit',
+        'Penghapusan tidak bisa diubah lewat perubahan. Batalkan, pilih ulang item, lalu buat permintaan baru.',
+      );
+    }
     const next = history.revision + 1;
     if (parsed.kind === 'local') {
       const applied = applyEdit(prev, parsed.edit);
@@ -691,8 +745,12 @@ export class AiExecutor implements ChatExecutor {
     const indexer = indexerPort
       ? offeredIndexerCapabilityIds({ desktopAvailable: safeIndexerAvailable(indexerPort) })
       : [];
-    return read.length || control.length || indexer.length || diskUsage.length
-      ? [...base, ...read, ...control, ...indexer, ...diskUsage]
+    const nav =
+      this.deps.navigate && safeNavigateAvailable(this.deps.navigate)
+        ? [PANE_NAVIGATE_CAPABILITY]
+        : [];
+    return read.length || control.length || indexer.length || diskUsage.length || nav.length
+      ? [...base, ...read, ...control, ...indexer, ...diskUsage, ...nav]
       : base;
   }
 
@@ -1034,6 +1092,14 @@ export class AiExecutor implements ChatExecutor {
       await this.proposeIndexerMode(run, epoch, event.request);
       return;
     }
+    if (event.kind === 'paneNavigate') {
+      await this.runNavigate(run, epoch, event.pane, event.path);
+      return;
+    }
+    if (event.kind === 'chain') {
+      await this.startChain(run, epoch, event.steps);
+      return;
+    }
     run.history = new IntentHistory(event.intent);
     if (!this.emit(run, 'resolving', {})) return;
     await this.buildPlan(run, epoch, event.intent);
@@ -1068,6 +1134,16 @@ export class AiExecutor implements ChatExecutor {
     run.prepared = prepared.value;
     run.preparedDropped = false;
     const plan = prepared.value.plan;
+    const chainRefusal = this.chainGate(
+      run,
+      plan.capability,
+      prepared.value.preview.selectionDigest,
+    );
+    if (chainRefusal) {
+      this.dropPrepared(run);
+      this.setFinal(run, 'stale', { errorMessage: chainRefusal });
+      return;
+    }
     // Revision baru hanya tercatat bila prepare berhasil: perubahan yang gagal tidak "menempel".
     if (pending) run.history!.append(envelope, pending.cause, pending.note);
     run.planId = plan.planId;
@@ -1164,7 +1240,9 @@ export class AiExecutor implements ChatExecutor {
       event.kind === 'copyAdjust' ||
       event.kind === 'indexerStatus' ||
       event.kind === 'indexerSetMode' ||
-      event.kind === 'diskUsageQuery'
+      event.kind === 'diskUsageQuery' ||
+      event.kind === 'paneNavigate' ||
+      event.kind === 'chain'
     ) {
       // Pertanyaan riwayat / penyesuaian copy bukan perubahan rencana: rencana tidak diubah.
       this.emit(run, 'needsInput', {
@@ -1379,6 +1457,19 @@ export class AiExecutor implements ChatExecutor {
       mapped = false;
     }
     this.dropPrepared(run);
+    run.partialNote = receipt.failureNote;
+    if (receipt.state === 'completed' && run.chain?.rest[0]?.capability === 'items.delete') {
+      // FER-576: "archive, then delete": the delete step exists ONLY if the archive passes Test Archive.
+      const verdict = await this.verifyChainArchive(receipt.outputPath);
+      if (!verdict.ok) {
+        run.chain.rest = [];
+        this.setFinal(run, 'failed', { errorMessage: verdict.message });
+        return;
+      }
+      run.chain.verified = true;
+      run.chain.note = verdict.message;
+      if (run.cancelRequested) run.chain.rest = [];
+    }
     if (receipt.state === 'completed') {
       // Service selesai in-process (mis. Pack): hasil engine = hasil run.
       run.completedInProcess = receipt.completed;
@@ -1506,8 +1597,11 @@ export class AiExecutor implements ChatExecutor {
       // Some items never reached the queue: a finished job list must not read as "all done".
       summary = { ...summary, outcome: 'partial', failed: summary.failed + run.failedToQueue };
       extra = {
-        errorMessage: `${run.failedToQueue} item gagal masuk antrean dan tidak disalin.`,
         ...extra,
+        errorMessage:
+          extra.errorMessage ??
+          run.partialNote ??
+          `${run.failedToQueue} item gagal masuk antrean dan tidak disalin.`,
       };
     }
     const jobs = this.jobViews(run);
@@ -1553,6 +1647,211 @@ export class AiExecutor implements ChatExecutor {
       } catch {
         this.emit(run, run.state, { errorMessage: 'Permintaan batal gagal dikirim ke antrean.' });
       }
+    }
+  }
+
+  // ───────────────────────── FER-576: navigasi + rantai langkah ─────────────────────────
+
+  /**
+   * `pane.navigate`: open a folder the USER typed. The path must be in the request text (also checked by the
+   * contract parsers and by the Rust provider), absolute and clean, and it must exist. A file opens its folder
+   * and selects the file. No facade/policy/guard/ledger/queue: nothing is written or executed, and the
+   * result (names, listing) never goes to the provider.
+   */
+  private async runNavigate(run: Run, epoch: number, pane: PaneRef, path: string): Promise<void> {
+    run.control = true;
+    const port = this.deps.navigate;
+    if (!port || !this.offered().includes(PANE_NAVIGATE_CAPABILITY)) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Membuka folder dari path yang diketik hanya tersedia di aplikasi desktop Ferrum.',
+      });
+      return;
+    }
+    // Defence in depth: the model's path is only ever one the user typed.
+    if (!isSafeNavigatePath(path) || !pathTypedByUser(path, run.chain?.userText ?? run.userText)) {
+      this.fail(run, epoch, 'Path itu tidak tertulis di permintaan Anda; tidak ada yang dibuka.');
+      return;
+    }
+    const side = pane === 'activeAtSubmit' ? run.snapshot!.activePaneAtSubmit : pane;
+    let target: NavigateTarget;
+    try {
+      target = await port.resolve(path);
+    } catch {
+      target = { kind: 'missing' };
+    }
+    if (!this.alive(run, epoch)) return;
+    if (target.kind === 'missing') {
+      this.setFinal(run, 'failed', {
+        errorMessage: `Path tidak ditemukan atau tidak bisa dibuka: ${path}. Tidak ada yang diubah.`,
+        navigate: {
+          summary: `Membuka ${path}`,
+          result: { ok: false, message: 'Path tidak ditemukan.' },
+        },
+      });
+      return;
+    }
+    let opened = false;
+    try {
+      opened = await port.open(side, target);
+    } catch {
+      opened = false;
+    }
+    if (!this.alive(run, epoch)) return;
+    const summary = describeNavigate(target);
+    if (!opened) {
+      this.setFinal(run, 'failed', {
+        errorMessage: 'Panel tidak menampilkan folder itu; langkah berikutnya tidak dijalankan.',
+        navigate: {
+          summary,
+          result: { ok: false, message: 'Panel tidak menampilkan folder itu.' },
+        },
+      });
+      return;
+    }
+    this.setFinal(run, 'succeeded', {
+      navigate: { summary, result: { ok: true, message: 'Folder dibuka di panel.' } },
+    });
+  }
+
+  /**
+   * A multi-step plan ("chain"). Step 1 runs in THIS run; every later step becomes its own run with its own
+   * card, prepared against the panes as they are by then. The remaining steps live on the run that is executing
+   * a step and are dropped by any failure, cancel or refusal. Panel references are bound to a concrete side now,
+   * so clicking the other panel in between cannot redirect a step.
+   */
+  private async startChain(run: Run, epoch: number, raw: ChainEnvelope['steps']): Promise<void> {
+    const pane = run.snapshot!.activePaneAtSubmit;
+    const steps = raw.map((step) => bindPane(step, pane));
+    const offered = this.offered();
+    if (steps.length < 2 || steps.some((step) => !offered.includes(step.capability))) {
+      this.emit(run, 'blockedCapability', {
+        blockedReason:
+          'Salah satu langkah rencana tidak tersedia sekarang; tidak ada yang dijalankan.',
+      });
+      return;
+    }
+    run.chain = {
+      index: 0,
+      total: steps.length,
+      rest: steps.slice(1),
+      capability: steps[0].capability,
+      userText: run.userText,
+      baseRequestId: run.requestId,
+      baseRunId: run.runId,
+      afterArchive: false,
+    };
+    await this.runChainStep(run, epoch, steps[0]);
+  }
+
+  private async runChainStep(run: Run, epoch: number, step: ChainStep): Promise<void> {
+    if (step.capability === PANE_NAVIGATE_CAPABILITY) {
+      await this.runNavigate(run, epoch, step.pane, step.path);
+      return;
+    }
+    const envelope: IntentEnvelope = { schemaVersion: 1, requestId: run.requestId, intent: step };
+    run.history = new IntentHistory(envelope);
+    if (!this.emit(run, 'resolving', {})) return;
+    await this.buildPlan(run, epoch, envelope);
+  }
+
+  /** The run for the step after `from`, registered and ready to start. */
+  private makeChainRun(from: Run): { run: Run; step: ChainStep } {
+    const chain = from.chain!;
+    const [step, ...rest] = chain.rest;
+    const index = chain.index + 1;
+    const run: Run = {
+      runId: `${chain.baseRunId}-c${index}`,
+      requestId: `${chain.baseRequestId}-c${index}`,
+      userText: from.userText,
+      state: 'planning',
+      epoch: 0,
+      abort: new AbortController(),
+      preparedDropped: false,
+      revision: 0,
+      approving: false,
+      cancelRequested: false,
+      jobIds: [],
+      seen: new Set(),
+      failedToQueue: 0,
+      conflictsSkipped: 0,
+      checking: false,
+      chain: {
+        ...chain,
+        index,
+        rest,
+        capability: step.capability,
+        afterArchive: chain.capability === 'archive.create',
+        ...(chain.capability === 'archive.create' && chain.note
+          ? { note: chain.note }
+          : { note: undefined }),
+      },
+    };
+    this.runs.set(run.runId, run);
+    return { run, step };
+  }
+
+  private async startChainRun(run: Run, step: ChainStep): Promise<void> {
+    // Let the panes finish re-listing (the previous step may have refreshed them), then look at them fresh.
+    try {
+      await this.deps.navigate?.settled?.();
+    } catch {
+      // best effort: a stale snapshot is refused later, never acted on
+    }
+    if (!this.alive(run, run.epoch)) return;
+    try {
+      run.snapshot = this.deps.capture(run.requestId);
+    } catch {
+      this.fail(run, run.epoch, 'Panel tidak tersedia; langkah berikutnya tidak dijalankan.');
+      return;
+    }
+    await this.runChainStep(run, run.epoch, step);
+  }
+
+  /**
+   * "Archive, then delete" gates, checked when the step's plan is prepared. The archive step records the digest
+   * of the selection it used; the delete step must see the very same selection, and only after Test Archive
+   * passed. Anything else refuses the delete (nothing is deleted).
+   */
+  private chainGate(
+    run: Run,
+    capability: ResolvedPlan['capability'],
+    selectionDigest: string | undefined,
+  ): string | undefined {
+    const chain = run.chain;
+    if (!chain) return undefined;
+    if (capability === 'archive.create') {
+      chain.archiveSelectionDigest = selectionDigest;
+      return undefined;
+    }
+    if (capability === 'items.delete' && chain.afterArchive) {
+      if (!chain.verified) return 'Arsip belum lolos uji; tidak ada yang dihapus.';
+      if (!selectionDigest || selectionDigest !== chain.archiveSelectionDigest) {
+        return 'Item terpilih berubah setelah arsip dibuat. Yang dihapus harus persis yang diarsipkan; tidak ada yang dihapus.';
+      }
+    }
+    return undefined;
+  }
+
+  private async verifyChainArchive(
+    outputPath: string | undefined,
+  ): Promise<{ ok: boolean; message: string }> {
+    const name = outputPath ? (outputPath.split(/[\\/]/).pop() ?? outputPath) : 'arsip';
+    const refuse = (why: string) => ({
+      ok: false,
+      message: `Arsip ${name} dibuat, tetapi ${why} File asli TIDAK dihapus; periksa arsipnya.`,
+    });
+    const verify = this.deps.verifyArchive;
+    if (!verify || !outputPath) return refuse('tidak dapat diuji, jadi penghapusan dibatalkan.');
+    try {
+      const verdict = await verify(outputPath);
+      if (!verdict.ok) return refuse(`uji arsip GAGAL (${verdict.message}).`);
+      return {
+        ok: true,
+        message: `Arsip ${name} sudah dibuat dan lolos uji arsip (${verdict.message}).`,
+      };
+    } catch {
+      return refuse('uji arsip tidak dapat dijalankan, jadi penghapusan dibatalkan.');
     }
   }
 
@@ -1623,9 +1922,35 @@ export class AiExecutor implements ChatExecutor {
   }
 
   private setFinal(run: Run, state: RunState, extra: Partial<RunUpdate>): void {
-    if (this.emit(run, state, extra) && isFinal(state)) {
+    // FER-576: only a SUCCEEDED step (not cancelled by the user meanwhile) hands over to the next one.
+    const next =
+      state === 'succeeded' && run.chain && run.chain.rest.length > 0 && !run.cancelRequested
+        ? this.makeChainRun(run)
+        : undefined;
+    const update = next
+      ? {
+          ...extra,
+          chainNext: {
+            runId: next.run.runId,
+            requestId: next.run.requestId,
+            userText: next.run.userText,
+          },
+        }
+      : extra;
+    if (this.emit(run, state, update) && isFinal(state)) {
       run.unsub?.();
       this.approvals.forget(run.runId);
+      if (next) {
+        void this.startChainRun(next.run, next.step).catch(() =>
+          this.fail(
+            next.run,
+            next.run.epoch,
+            'Terjadi kesalahan internal; tidak ada yang dijalankan.',
+          ),
+        );
+      }
+    } else if (next) {
+      this.runs.delete(next.run.runId);
     }
   }
 
@@ -1644,6 +1969,15 @@ export class AiExecutor implements ChatExecutor {
       runId: run.runId,
       requestId: run.requestId,
       state,
+      ...(run.chain
+        ? {
+            chain: {
+              index: run.chain.index,
+              total: run.chain.total,
+              ...(run.chain.note ? { note: run.chain.note } : {}),
+            },
+          }
+        : {}),
       ...stripUndefined(extra),
     };
     for (const l of [...this.listeners]) l(update);
@@ -1681,6 +2015,33 @@ function safeDiskUsageAvailable(port: DiskUsageQueryPort): boolean {
   } catch {
     return false; // fail closed: not offered
   }
+}
+
+function safeNavigateAvailable(port: NavigatePort): boolean {
+  try {
+    return port.available() === true;
+  } catch {
+    return false; // fail closed: not offered
+  }
+}
+
+/** FER-576: bind `activeAtSubmit` to the concrete side that was active when the request was made. */
+function bindPane(step: ChainStep, pane: 'left' | 'right'): ChainStep {
+  if (step.capability === PANE_NAVIGATE_CAPABILITY) {
+    return step.pane === 'activeAtSubmit' ? { ...step, pane } : step;
+  }
+  const sourcePane = step.sourcePane === 'activeAtSubmit' ? pane : step.sourcePane;
+  if (step.capability === 'archive.create' && step.target.kind === 'pane') {
+    return {
+      ...step,
+      sourcePane,
+      target: {
+        kind: 'pane',
+        pane: step.target.pane === 'activeAtSubmit' ? pane : step.target.pane,
+      },
+    };
+  }
+  return { ...step, sourcePane };
 }
 
 function safeAvailable(port: ActivityQueryPort): boolean {

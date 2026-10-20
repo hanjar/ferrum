@@ -449,6 +449,79 @@ pub fn delete_entries(
     Ok(report)
 }
 
+/// One path's answer of [`ai_recycle_check`].
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecycleCheck {
+    pub path: String,
+    pub ok: bool,
+    /// Stable code (`network_or_unc`, `reserved_name`, `no_recycle_bin`), never a raw OS message.
+    pub reason: Option<&'static str>,
+}
+
+/// Upper bound of one AI delete batch.
+const MAX_AI_DELETE_ITEMS: usize = 10_000;
+
+/// FER-576: read-only. Can each path go to the Recycle Bin? Used when the AI delete card is built.
+#[tauri::command]
+pub fn ai_recycle_check(paths: Vec<String>) -> Result<Vec<RecycleCheck>, FsError> {
+    if paths.is_empty() || paths.len() > MAX_AI_DELETE_ITEMS {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Invalid number of items",
+        ));
+    }
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let reason = crate::mutations::recycle_blocker(&path);
+            RecycleCheck {
+                ok: reason.is_none(),
+                reason,
+                path,
+            }
+        })
+        .collect())
+}
+
+/// FER-576: the ONLY delete the AI can reach. It goes to the Recycle Bin and nowhere else: there is
+/// no `permanent` argument and `delete_permanent` is never called from here. The same source gate as
+/// the manual Delete applies (path gate, protected folders, local-UNC). When ANY item cannot go to
+/// the Recycle Bin the whole batch is refused before anything is touched, so a mixed batch is never
+/// half-deleted and nothing falls through to a permanent delete.
+#[tauri::command]
+pub fn ai_delete_to_recycle(
+    paths: Vec<String>,
+    app: AppHandle,
+) -> Result<crate::mutations::DeleteReport, FsError> {
+    if paths.is_empty() || paths.len() > MAX_AI_DELETE_ITEMS {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Invalid number of items",
+        ));
+    }
+    let prepared = prepare_sources(&paths)?;
+    if paths
+        .iter()
+        .any(|path| crate::mutations::recycle_blocker(path).is_some())
+    {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::Unsupported,
+            "At least one item cannot be moved to the Recycle Bin; nothing was deleted",
+        ));
+    }
+    let report = crate::mutations::delete_to_trash(&prepared);
+    let failed: std::collections::HashSet<&str> =
+        report.failed.iter().map(|f| f.path.as_str()).collect();
+    let deleted: Vec<(String, Option<String>)> = prepared
+        .iter()
+        .filter(|p| !failed.contains(p.as_str()))
+        .map(|p| (p.clone(), None))
+        .collect();
+    note_activity_changes(&app, FsChangeKind::Delete, deleted);
+    Ok(report)
+}
+
 fn parse_policy(s: &str) -> Result<crate::copy_engine::ConflictPolicy, FsError> {
     match s {
         "ask" => Ok(crate::copy_engine::ConflictPolicy::Ask),

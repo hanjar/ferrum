@@ -293,7 +293,7 @@ describe('7z target naming (FER-576)', () => {
     const s = setup();
     s.host.left.all = [
       ...s.host.left.all,
-      entry('Invoice.7z', { path: 'D:\Projects\Invoice\Invoice.7z' }),
+      entry('Invoice.7z', { path: 'D:\\Projects\\Invoice\\Invoice.7z' }),
     ];
     const snap = s.svc.capture('req_1');
     const scope = scopeOf(s.resolver.resolve(snap, 'left', all));

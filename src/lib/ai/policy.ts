@@ -18,6 +18,8 @@ export const DEFAULT_PREFS: Readonly<PolicyPrefs> = Object.freeze({ autoCreate: 
 const BASE_RISK: Record<MutatingCapabilityId, Risk> = {
   'archive.create': 'create',
   'directories.sync': 'mutating',
+  // FER-576: a delete is never "create"; it can never be auto-approved (see AUTO_CREATE_ELIGIBLE).
+  'items.delete': 'mutating',
 };
 /** Capability yang boleh auto-approve bila pengguna mengaktifkan auto-create. */
 const AUTO_CREATE_ELIGIBLE = new Set<MutatingCapabilityId>(['archive.create']);
@@ -70,5 +72,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyDecision {
   }
   if (plan.capability === 'directories.sync')
     reasons.push('Sinkronisasi selalu butuh persetujuan atas dry-run.');
+  if (plan.capability === 'items.delete')
+    reasons.push('Menghapus item (ke Recycle Bin) selalu butuh persetujuan di kartu peringatan.');
   return issue({ kind: 'needsApproval', risk, reasons });
 }

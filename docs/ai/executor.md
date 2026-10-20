@@ -47,6 +47,8 @@ are rejected by `canTransition` and the executor does not emit them. `unknownOut
 
 ## Dependency steps
 
+> FER-576: multi-step requests (open a typed path, archive, delete) do not use `DependencyScheduler`: each step is its own run with its own card, see `docs/ai/chain.md`.
+
 `DependencyScheduler` releases a step only after its `dependsOn` completed; a failed step skips its dependents; `cancel()` stops scheduling derived
 steps (a running step may finish). Today the facade builds single-step plans and executes the whole plan on step 1; steps beyond the first are refused
 as `unsupported_plan` (no fake execution) until an adapter produces real multi-step plans.

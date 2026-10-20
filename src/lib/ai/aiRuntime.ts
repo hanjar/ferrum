@@ -4,7 +4,7 @@
 import { packServiceAvailable } from '../packService';
 import { activity } from '../stores/activityStore.svelte';
 import { ops } from '../stores/opsStore.svelte';
-import { refreshAllPanes } from '../stores/panesRegistry.svelte';
+import { getPane, refreshAllPanes } from '../stores/panesRegistry.svelte';
 import { ui } from '../uiState.svelte';
 import { tauriActivityQueryPort } from './activityQuery';
 import { duWorkspace } from '../diskUsage/duWorkspace.svelte';
@@ -14,6 +14,10 @@ import { copyControlSnapshot, type CopyControlState } from '../ipc/copyControl';
 import type { CopyControlPort } from './copyAdjust';
 import { indexerSetMode, indexerStatus } from '../ipc/indexer';
 import { isInTauri } from '../ipc/tauri';
+import { archiveTest } from '../ipc/archive';
+import { aiDeleteToRecycle, aiRecycleCheck } from '../ipc/mutations';
+import { pathResolve } from '../ipc/pathSuggest';
+import { createNavigatePort } from './navigatePort';
 import type { IndexerControlPort } from './indexerControl';
 import { createCommandFacade } from './adapters';
 import { SyncPreviewStore } from './adapters/sync';
@@ -122,6 +126,40 @@ function indexerControlPort(): IndexerControlPort {
   };
 }
 
+/**
+ * FER-576: refresh both panes after a step but KEEP the selection that still exists (the next step of a chain,
+ * e.g. the delete after an archive, looks at it). Panes without the incremental refresh fall back to the reset.
+ */
+function refreshPanesKeepingSelection(): void {
+  for (const id of [0, 1] as const) {
+    const pane = getPane(id);
+    if (!pane) continue;
+    if (pane.refreshExternal) pane.refreshExternal();
+    else pane.refresh();
+  }
+}
+
+/** FER-576: "Test Archive" as the gate before a chain deletes the original. Passed only if EVERY entry passed. */
+async function verifyArchiveOutput(outputPath: string): Promise<{ ok: boolean; message: string }> {
+  const report = await archiveTest(outputPath);
+  const entries = report.entries;
+  if (entries.length === 0) return { ok: false, message: 'arsip kosong' };
+  const bad = entries.filter((entry) => entry.status !== 'passed');
+  if (bad.length > 0) {
+    const status = bad[0].status;
+    return {
+      ok: false,
+      message:
+        status === 'failed'
+          ? `${bad.length} entri rusak`
+          : status === 'passwordRequired'
+            ? 'butuh kata sandi'
+            : 'tidak didukung untuk diuji',
+    };
+  }
+  return { ok: true, message: `${entries.length} entri terverifikasi` };
+}
+
 export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderSetup()): AiRuntime {
   const host = registryHost(() => (ui.activePane === 0 ? 'left' : 'right'));
   const ctx = new ContextService(host);
@@ -156,10 +194,24 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
       resolver,
       ctx,
       outputExists,
-      onCompleted: refreshAllPanes,
+      onCompleted: refreshPanesKeepingSelection,
       packAvailable: packServiceAvailable,
       locateEntity: (entityId) => activityPort.locate?.(entityId) ?? Promise.resolve(null),
     },
+    // FER-576: Recycle Bin only (no permanent option exists); desktop app only.
+    ...(isInTauri()
+      ? {
+          delete: {
+            resolver,
+            ctx,
+            onCompleted: refreshAllPanes,
+            recycle: {
+              check: (paths: readonly string[]) => aiRecycleCheck([...paths]),
+              deleteToRecycle: (paths: readonly string[]) => aiDeleteToRecycle([...paths]),
+            },
+          },
+        }
+      : {}),
     // `readJob`: the queue port the executor uses; `settleSyncRun` is the only baseline writer (FER-414).
     sync: {
       flow,
@@ -190,7 +242,7 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
     // Backend re-check right before writing (FER-410): fingerprints at preview, authorizes at execute.
     guard: createBackendGuard({
       sourcePaths: (plan) =>
-        plan.operation.kind === 'archive.create'
+        plan.operation.kind === 'archive.create' || plan.operation.kind === 'items.delete'
           ? resolver.entries(plan.operation.sourceManifest).map((entry) => entry.path)
           : undefined,
       syncScope: (plan) => syncPreviews.scopeOf(plan),
@@ -201,7 +253,8 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
     conflictViews: (plan) => syncPreviews.conflictsOf(plan),
     listItems: async (plan, offset, limit) => {
       if (plan.operation.kind === 'directories.sync') return syncPreviews.page(plan, offset, limit);
-      if (plan.operation.kind !== 'archive.create') return { rows: [], total: 0 };
+      if (plan.operation.kind !== 'archive.create' && plan.operation.kind !== 'items.delete')
+        return { rows: [], total: 0 };
       const entries = resolver.entries(plan.operation.sourceManifest);
       return {
         rows: entries.slice(offset, offset + limit).map((entry) => ({
@@ -221,6 +274,15 @@ export function createAiRuntime(setup: ProviderSetup | undefined = loadProviderS
     copyControl: opsCopyControlPort(),
     // FER-476: "is the index ready?" (read) and the privacy-mode switch (always behind a card).
     indexer: indexerControlPort(),
+    // FER-576: open a path the user typed (validated against the request text and the disk) and verify an
+    // archive before a chain deletes the original. Both desktop-only.
+    navigate: createNavigatePort({
+      available: () => isInTauri(),
+      resolvePath: (path) => pathResolve(path, ''),
+      pane: (side) => getPane(side === 'left' ? 0 : 1),
+      probe: (side) => host.probe(side),
+    }),
+    verifyArchive: verifyArchiveOutput,
     // FER-466: questions about the Disk Usage result on screen ("paling gede itu apa"). Read-only and
     // answered locally on a card; no scan data (path, name, size) is ever put in a provider request.
     diskUsage: diskUsageWorkspacePort(duWorkspace, {

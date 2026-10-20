@@ -100,3 +100,33 @@ export async function enqueueMove(
     throw FsError.fromIPC(e);
   }
 }
+
+export interface RecycleCheckRow {
+  path: string;
+  ok: boolean;
+  /** Stable backend code: `network_or_unc`, `reserved_name` or `no_recycle_bin`. */
+  reason?: string | null;
+}
+
+/** FER-576: can each path go to the Recycle Bin? Read-only. */
+export async function aiRecycleCheck(paths: string[]): Promise<RecycleCheckRow[]> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<RecycleCheckRow[]>('ai_recycle_check', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
+}
+
+/**
+ * FER-576: the ONLY delete the AI chat can reach. Recycle Bin only: the command has no `permanent` argument and
+ * refuses the whole batch when any item cannot go to the Recycle Bin.
+ */
+export async function aiDeleteToRecycle(paths: string[]): Promise<DeleteReport> {
+  if (!isInTauri()) throw unsupported();
+  try {
+    return await invoke<DeleteReport>('ai_delete_to_recycle', { paths });
+  } catch (e) {
+    throw FsError.fromIPC(e);
+  }
+}

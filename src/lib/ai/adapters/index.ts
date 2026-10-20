@@ -16,6 +16,7 @@ import {
   type EngineGate,
 } from '../commandsRegistry';
 import { createArchiveAdapter, type ArchiveAdapterDeps } from './archive';
+import { createDeleteAdapter, DELETE_UNAVAILABLE_REASON, type DeleteAdapterDeps } from './delete';
 import { createSyncAdapter, type SyncAdapterDeps } from './sync';
 
 /**
@@ -29,11 +30,18 @@ import { createSyncAdapter, type SyncAdapterDeps } from './sync';
 export const ENGINE_GATES: Record<MutatingCapabilityId, EngineGate> = {
   'archive.create': { status: 'ready' },
   'directories.sync': { status: 'ready' },
+  // FER-576: Recycle Bin only, behind a warning card; see adapters/delete.ts and docs/ai/chain.md.
+  'items.delete': { status: 'ready' },
 };
 
 export interface CapabilityWiring {
   archive: ArchiveAdapterDeps;
   sync: SyncAdapterDeps;
+  /**
+   * FER-576: Recycle Bin delete of the pane selection. Absent = the capability is closed (not offered, prepare
+   * and execute are blocked), which is what tests and non-desktop builds get.
+   */
+  delete?: DeleteAdapterDeps;
   /** Defaults to the real action registry. */
   actions?: ActionLookup;
   /** Test/integration override of the gate table. */
@@ -49,6 +57,19 @@ function packGate(gate: EngineGate, packAvailable: (() => boolean) | undefined):
   return { status: 'pending', reason: PACK_UNAVAILABLE_REASON };
 }
 
+/** Stand-in when no Recycle Bin port is wired: the gate is closed, so this is never reached. */
+function unavailableDeleteAdapter(): CommandAdapter {
+  const blocked = {
+    ok: false as const,
+    error: { code: 'blocked_capability' as const, message: DELETE_UNAVAILABLE_REASON },
+  };
+  return {
+    id: 'items.delete',
+    prepare: () => Promise.resolve(blocked),
+    run: () => Promise.resolve(blocked),
+  };
+}
+
 export function createCapabilityRegistry(wiring: CapabilityWiring): CapabilityRegistry {
   const gates = { ...ENGINE_GATES, ...wiring.gates };
   const definitions: CapabilityDefinition[] = [
@@ -59,6 +80,18 @@ export function createCapabilityRegistry(wiring: CapabilityWiring): CapabilityRe
       engine: packGate(gates['archive.create'], wiring.archive.packAvailable),
       schema: INTENT_SCHEMAS['archive.create'],
       adapter: createArchiveAdapter(wiring.archive) as CommandAdapter,
+    },
+    {
+      id: 'items.delete',
+      label: 'Pindahkan item terpilih ke Recycle Bin',
+      actionIds: ['file.delete'],
+      engine: wiring.delete
+        ? gates['items.delete']
+        : { status: 'pending', reason: DELETE_UNAVAILABLE_REASON },
+      schema: INTENT_SCHEMAS['items.delete'],
+      adapter: (wiring.delete
+        ? createDeleteAdapter(wiring.delete)
+        : unavailableDeleteAdapter()) as CommandAdapter,
     },
     {
       id: 'directories.sync',
