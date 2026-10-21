@@ -751,7 +751,7 @@
       <p>
         {d.operations}
         {d.operations === 1 ? 'operation is' : 'operations are'} still running. Quitting now cancels the
-        pending work and cleans up partial files.
+        pending work; partial files are removed where possible.
       </p>
     {:else if d.kind === 'fastScanOffer'}
       <h2 id="dlg-title">Scan lebih cepat?</h2>

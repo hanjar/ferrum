@@ -19,6 +19,7 @@ pub mod archive_zip;
 pub mod automation;
 pub mod branch_view;
 pub mod clipboard_files;
+pub mod close_guard;
 pub mod codecs;
 pub mod comments;
 pub mod compare;
@@ -108,6 +109,7 @@ pub fn run() {
             ipc::path_resolve,
             ipc::enqueue_dummy_op,
             ipc::cancel_operation,
+            close_guard::close_ack,
             ipc::list_operations,
             ipc::copy_control_snapshot,
             ipc::copy_control_adjust,
@@ -293,6 +295,11 @@ pub fn run() {
         // and the leases stay until Ferrum exits (the process probe then lets the next acquire
         // reclaim them). The hook runs on the UI thread, so it only drains the registry; the
         // guards are dropped on a blocking worker.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                close_guard::handle_close_requested(window, api);
+            }
+        })
         .on_page_load(|webview, payload| {
             use tauri::Manager;
             if payload.event() == tauri::webview::PageLoadEvent::Started

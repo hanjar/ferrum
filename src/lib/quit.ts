@@ -4,12 +4,15 @@
  * the same flow: with queued/running operations or background jobs a
  * confirmation dialog is shown; otherwise the window closes right away.
  *
- * Mechanism: the Tauri `close-requested` event is intercepted synchronously
- * (`preventDefault`) only while work is active. After the user confirms, the
- * work is cancelled (bounded wait so the backend can clean staging/partial
- * files) and the window is destroyed, which bypasses `close-requested`, so
- * there is no recursion.
+ * Mechanism: Rust (close_guard.rs) holds every native close of the main window
+ * and emits CLOSE_EVENT. The frontend acks at once (`close_ack`), then either
+ * destroys the window (idle) or shows the confirmation. No ack within ~2 s (frozen
+ * webview) or a second close without ack lets Rust close the window itself.
+ * After the user confirms, the work is cancelled (bounded wait so the backend can
+ * clean staging/partial files) and the window is destroyed.
  */
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isInTauri } from './ipc/tauri';
 import { dialogs } from './stores/dialogStore.svelte';
@@ -19,6 +22,15 @@ import { ops } from './stores/opsStore.svelte';
 /** Longest wait for the backend to finish cancelling before the window closes anyway. */
 export const QUIT_CANCEL_TIMEOUT_MS = 3000;
 const POLL_MS = 50;
+export const CLOSE_EVENT = 'ferrum-close-requested';
+
+/** Set while the window is closing: further close / quit requests are ignored. */
+let quitting = false;
+
+/** Test seam. */
+export function resetQuitState(): void {
+  quitting = false;
+}
 
 /** Queued/running operations plus background jobs (FER-578). */
 export function activeWorkCount(): number {
@@ -37,6 +49,7 @@ export async function quitApp(): Promise<void> {
 
 /** Single quit entry: confirm when work is active, quit directly otherwise. */
 export function requestQuit(): void {
+  if (quitting) return;
   const active = activeWorkCount();
   if (active > 0) {
     if (dialogs.current?.kind !== 'quitConfirm') {
@@ -47,39 +60,65 @@ export function requestQuit(): void {
   void quitApp();
 }
 
-/** Cancel jobs and queued operations, wait (bounded) until they settle, then close. */
+/**
+ * Cancel jobs and operations, wait (bounded) until the ones that really ran have settled, then
+ * close. A queued operation is cancelled in the backend without any event, so it is not awaited.
+ */
 export async function cancelAllAndQuit(timeoutMs: number = QUIT_CANCEL_TIMEOUT_MS): Promise<void> {
-  for (const job of jobs.running) {
-    try {
-      jobs.cancel(job);
-    } catch (e) {
-      console.warn('[quit] job cancel failed', e);
+  if (quitting) return;
+  quitting = true;
+  const runningOps = ops.active.filter((o) => o.state === 'running').map((o) => o.operationId);
+  const jobsToWait = jobs.running.map((j) => j.id);
+  try {
+    for (const job of jobs.running) {
+      try {
+        jobs.cancel(job);
+      } catch (e) {
+        console.warn('[quit] job cancel failed', e);
+      }
     }
-  }
-  await Promise.all(
-    ops.active.map((o) =>
-      Promise.resolve(ops.cancel(o.operationId)).catch((e) =>
-        console.warn('[quit] operation cancel failed', e),
+    await Promise.all(
+      ops.active.map((o) =>
+        Promise.resolve(ops.cancel(o.operationId)).catch((e) =>
+          console.warn('[quit] operation cancel failed', e),
+        ),
       ),
-    ),
-  );
-  const deadline = Date.now() + timeoutMs;
-  while (activeWorkCount() > 0 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    );
+    const settled = () => {
+      const activeOps = new Set(ops.active.map((o) => o.operationId));
+      const activeJobs = new Set(jobs.running.map((j) => j.id));
+      return (
+        !runningOps.some((id) => activeOps.has(id)) && !jobsToWait.some((id) => activeJobs.has(id))
+      );
+    };
+    const deadline = Date.now() + timeoutMs;
+    while (!settled() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+    }
+  } catch (e) {
+    console.warn('[quit] cancel phase failed', e);
   }
   await quitApp();
 }
 
-/**
- * Intercept window close of the main window. The handler must be synchronous:
- * Tauri only honours `preventDefault` before the handler returns. Returns the
- * unlisten function.
- */
+/** Handle one close request forwarded by Rust. Fail-open: any error closes the window. */
+export async function handleCloseRequest(): Promise<void> {
+  try {
+    await invoke('close_ack'); // the frontend is alive: stop Rust's escape-hatch timer
+  } catch (e) {
+    console.warn('[quit] close_ack failed', e);
+  }
+  try {
+    if (quitting) return;
+    requestQuit();
+  } catch (e) {
+    console.warn('[quit] close handling failed, closing', e);
+    await quitApp();
+  }
+}
+
+/** Listen for the close requests of the main window. Returns the unlisten function. */
 export async function installCloseGuard(): Promise<() => void> {
   if (!isInTauri()) return () => {};
-  return getCurrentWindow().onCloseRequested((event) => {
-    if (activeWorkCount() === 0) return; // Tauri destroys the window itself
-    event.preventDefault();
-    requestQuit();
-  });
+  return listen(CLOSE_EVENT, () => void handleCloseRequest());
 }
