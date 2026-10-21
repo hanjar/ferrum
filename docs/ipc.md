@@ -29,6 +29,13 @@ running`). Any explicit thread change turns auto mode off. Performance knobs onl
 Planned: `create_entry`, `rename_entry`, `delete_entries` (task 10),
 `enqueue_copy` / `enqueue_move`, `cancel_operation` (tasks 09–12).
 
+### Delete jobs (FER-585)
+
+`delete_start(paths, permanent, requestId)` returns at once after the usual path gates (`prepare_sources`); the job runs on a blocking thread.
+Events: `delete://progress` `{requestId, done, total, currentName?, entries}` (throttled) and one `delete://done` `{requestId, result?: {report, cancelled, notProcessed, partial}, error?}`.
+`delete_cancel(requestId)` stops at the next item or, for a permanent delete of a folder, the next entry; `partial` lists folders left partly deleted, `notProcessed` untouched items.
+`delete_entries` (no progress) stays for plain callers and now runs off the UI thread.
+
 ### File clipboard (FER-572)
 
 `clipboard_copy_files(paths, cut) -> u32`, `clipboard_read_files() -> { paths, cut, sequence } | null`,
