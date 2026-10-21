@@ -606,3 +606,205 @@ fn conflict_policies_publish_differently() {
     assert_eq!(report.written_files, 1);
     assert_eq!(std::fs::read(base.join("keep.txt")).unwrap(), b"NEW");
 }
+
+// ---- FER-584: the commit never replaces a file that appeared after the exists check ----
+
+#[cfg(windows)]
+fn roomy() -> ArchiveLimits {
+    ArchiveLimits {
+        max_entries: 8,
+        max_total_bytes: 1 << 20,
+        max_entry_bytes: 1 << 20,
+        max_depth: 8,
+    }
+}
+
+/// Extract `keep.txt` ("NEW") into `dest` under `policy`; the file `racer` is created by a third
+/// party while the member is being decoded, i.e. AFTER the exists check and BEFORE the commit.
+#[cfg(windows)]
+fn extract_with_racer(dest: &Path, policy: Policy, racer: &Path) -> archive_extract::ExtractReport {
+    let plan = preflight(&[file("keep.txt", Some(3))], &roomy()).unwrap();
+    let mut raced = false;
+    extract(
+        &plan,
+        dest,
+        &roomy(),
+        policy,
+        |_, writer| {
+            if !raced {
+                raced = true;
+                std::fs::write(racer, b"RACE").unwrap();
+            }
+            writer.write_all(b"NEW").map_err(archive_extract::io_error)
+        },
+        || false,
+    )
+    .unwrap()
+}
+
+#[cfg(windows)]
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+#[cfg(windows)]
+fn skip_does_not_overwrite_a_file_created_during_extraction() {
+    let base = TempDir::new("race-skip");
+    let report = extract_with_racer(&base, Policy::Skip, &base.join("keep.txt"));
+    assert_eq!((report.written_files, report.skipped_files), (0, 1));
+    assert_eq!(std::fs::read(base.join("keep.txt")).unwrap(), b"RACE");
+    assert_eq!(names_in(&base), ["keep.txt"], "staging must be removed");
+}
+
+#[test]
+#[cfg(windows)]
+fn rename_picks_a_new_name_for_a_file_created_during_extraction() {
+    let base = TempDir::new("race-rename");
+    let report = extract_with_racer(&base, Policy::Rename, &base.join("keep.txt"));
+    assert_eq!((report.written_files, report.skipped_files), (1, 0));
+    assert_eq!(std::fs::read(base.join("keep.txt")).unwrap(), b"RACE");
+    assert_eq!(std::fs::read(base.join("keep (2).txt")).unwrap(), b"NEW");
+    assert_eq!(names_in(&base), ["keep (2).txt", "keep.txt"]);
+}
+
+#[test]
+#[cfg(windows)]
+fn rename_skips_slots_taken_during_extraction_too() {
+    let base = TempDir::new("race-rename2");
+    std::fs::write(base.join("keep.txt"), b"OLD").unwrap();
+    // keep.txt exists up front; "keep (2).txt" appears during the decode.
+    let report = extract_with_racer(&base, Policy::Rename, &base.join("keep (2).txt"));
+    assert_eq!(report.written_files, 1);
+    assert_eq!(std::fs::read(base.join("keep.txt")).unwrap(), b"OLD");
+    assert_eq!(std::fs::read(base.join("keep (2).txt")).unwrap(), b"RACE");
+    assert_eq!(std::fs::read(base.join("keep (3).txt")).unwrap(), b"NEW");
+}
+
+#[test]
+#[cfg(windows)]
+fn chosen_overwrite_replaces_even_a_file_created_during_extraction() {
+    let base = TempDir::new("race-overwrite");
+    let report = extract_with_racer(&base, Policy::Overwrite, &base.join("keep.txt"));
+    assert_eq!(report.written_files, 1);
+    assert_eq!(std::fs::read(base.join("keep.txt")).unwrap(), b"NEW");
+    assert_eq!(names_in(&base), ["keep.txt"], "no staging or backup left");
+}
+
+/// Two extractions of the same member name run at once, both past their exists check before
+/// either commits. `a_dest`/`a_member` and `b_dest`/`b_member` must name the same file `sub/f.txt`.
+/// The handles the extractor holds on a folder may make one of two overlapping runs fail with a
+/// sharing violation (fail closed); whatever succeeds must be intact and nothing may be lost.
+#[cfg(windows)]
+fn race_two_extractions(
+    tag: &str,
+    policy: Policy,
+    nested: bool,
+) -> (u64, Vec<Vec<u8>>, Vec<String>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let base = TempDir::new(&format!("{tag}-{policy:?}"));
+    let sub = base.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    // Both decoders inside `stream` before either commits; bounded spin, no sleep.
+    let arrived = AtomicUsize::new(0);
+    let gate = || {
+        arrived.fetch_add(1, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        while arrived.load(Ordering::SeqCst) < 2 && start.elapsed().as_secs() < 2 {
+            std::thread::yield_now();
+        }
+    };
+    let run = |dest: &Path, member: &'static str, body: &'static [u8]| {
+        let plan = preflight(&[file(member, Some(1))], &roomy()).unwrap();
+        extract(
+            &plan,
+            dest,
+            &roomy(),
+            policy,
+            |_, writer| {
+                gate();
+                writer.write_all(body).map_err(archive_extract::io_error)
+            },
+            || false,
+        )
+    };
+    let (a, b) = std::thread::scope(|s| {
+        let ta = s.spawn(|| {
+            if nested {
+                run(&base, "sub/f.txt", b"A")
+            } else {
+                run(&sub, "f.txt", b"A")
+            }
+        });
+        let tb = s.spawn(|| run(&sub, "f.txt", b"B"));
+        (ta.join().unwrap(), tb.join().unwrap())
+    });
+    let mut expected: Vec<Vec<u8>> = Vec::new();
+    let mut written = 0u64;
+    for (r, body) in [(&a, b"A"), (&b, b"B")] {
+        if let Ok(rep) = r {
+            written += rep.written_files;
+            if rep.written_files == 1 {
+                expected.push(body.to_vec());
+            }
+        }
+    }
+    expected.sort();
+    let names = names_in(&sub);
+    let mut contents: Vec<Vec<u8>> = names
+        .iter()
+        .map(|n| std::fs::read(sub.join(n)).unwrap())
+        .collect();
+    contents.sort();
+    assert_eq!(
+        contents, expected,
+        "every written file survives, none is lost"
+    );
+    assert!(
+        names.iter().all(|n| !n.contains("ferrum-partial")),
+        "no staging left: {names:?}"
+    );
+    (written, contents, names)
+}
+
+#[test]
+#[cfg(windows)]
+fn parallel_extractions_into_overlapping_folders_never_overwrite_each_other() {
+    // The same folder twice, and D:\X with D:\X\sub. The folder handles may make one run fail
+    // closed with a sharing violation; the invariant checked inside is that nothing a run wrote is
+    // lost or replaced, and no staging file is left.
+    for nested in [false, true] {
+        for policy in [Policy::Rename, Policy::Skip] {
+            let (written, _, names) = race_two_extractions("par", policy, nested);
+            assert!(written >= 1, "nested={nested} {policy:?}: {names:?}");
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn long_paths_are_committed_without_replacing() {
+    let base = TempDir::new("long");
+    // canonicalize gives the verbatim form, so the path may exceed MAX_PATH.
+    let mut deep = base.canonicalize().unwrap();
+    for i in 0..5 {
+        deep.push(format!("{}{i}", "d".repeat(60)));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    assert!(deep.to_string_lossy().len() > 300);
+    let report = extract_with_racer(&deep, Policy::Skip, &deep.join("keep.txt"));
+    assert_eq!(report.skipped_files, 1);
+    assert_eq!(std::fs::read(deep.join("keep.txt")).unwrap(), b"RACE");
+    let report = extract_with_racer(&deep, Policy::Rename, &deep.join("keep.txt"));
+    assert_eq!(report.written_files, 1);
+    assert_eq!(std::fs::read(deep.join("keep (2).txt")).unwrap(), b"NEW");
+    let report = extract_with_racer(&deep, Policy::Overwrite, &deep.join("keep.txt"));
+    assert_eq!(report.written_files, 1);
+    assert_eq!(std::fs::read(deep.join("keep.txt")).unwrap(), b"NEW");
+    assert_eq!(names_in(&deep), ["keep (2).txt", "keep.txt"]);
+}

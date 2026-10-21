@@ -772,40 +772,126 @@ where
                 return Err(error(ArchiveErrorCode::Cancelled, "Extraction cancelled"));
             }
 
-            // Commit: close the staging handle (Windows rename fails with
-            // ERROR_SHARING_VIOLATION while our own handle is open), then
-            // rename staging onto the final name inside the same directory.
-            // A symlink at the final name is refused (never overwritten
-            // through). The rename is the last step, so a partial write is
-            // always under the clearly-named staging file, never under the
-            // final name.
+            // Commit (FER-584): close the staging handle (a Windows rename fails with
+            // ERROR_SHARING_VIOLATION while our own handle is open), then move the staging
+            // file to the final name in the same directory BY HANDLE and WITHOUT replacing.
+            // The earlier exists check only picks a first candidate: a file that appears
+            // between that check and this move makes the move fail with `Exists`, and the
+            // policy is applied right here, so nothing is ever overwritten silently.
             drop(file);
-            let final_full = dir_full_path(destination, &file_rel).join(&final_name);
-            if let Ok(meta) = std::fs::symlink_metadata(&final_full)
-                && meta.file_type().is_symlink()
-            {
-                remove_staging(destination, &file_rel, &staging);
-                return Err(member_error(
-                    ArchiveErrorCode::UnsafeEntry,
-                    &entry.raw_name,
-                    "Final name is a symlink at commit time",
-                ));
+            let mut final_name = final_name;
+            let mut final_attempt = attempt;
+            loop {
+                match publish::rename_file_into(dir, OsStr::new(&staging), dir, &final_name) {
+                    Ok(()) => {
+                        report.written_files += 1;
+                        continue 'entries;
+                    }
+                    Err(publish::MoveError::Exists) => match policy {
+                        ArchiveConflictPolicy::Skip => {
+                            remove_staging(destination, &file_rel, &staging);
+                            report.skipped_files += 1;
+                            continue 'entries;
+                        }
+                        ArchiveConflictPolicy::Rename => match next_rename_attempt(final_attempt) {
+                            Some(next) => {
+                                final_attempt = next;
+                                final_name = renamed_candidate(&rel, next);
+                            }
+                            None => {
+                                remove_staging(destination, &file_rel, &staging);
+                                return Err(member_error(
+                                    ArchiveErrorCode::Conflict,
+                                    &entry.raw_name,
+                                    "No free rename slot for member",
+                                ));
+                            }
+                        },
+                        ArchiveConflictPolicy::Overwrite
+                        | ArchiveConflictPolicy::OverwriteOlder => {
+                            // The user chose to replace: use the checked replace (old file held
+                            // open, moved aside, new file in without replacing, old deleted).
+                            let dest_dir = dir_full_path(destination, &file_rel);
+                            let final_full = dest_dir.join(&final_name);
+                            if policy == ArchiveConflictPolicy::OverwriteOlder {
+                                let dest_newer = publish::modified_ms(dir, &final_name)
+                                    .is_some_and(|d| entry.modified_ms.is_some_and(|src| d > src));
+                                if dest_newer {
+                                    remove_staging(destination, &file_rel, &staging);
+                                    report.skipped_files += 1;
+                                    continue 'entries;
+                                }
+                            }
+                            if std::fs::symlink_metadata(&final_full)
+                                .is_ok_and(|m| m.file_type().is_symlink())
+                            {
+                                remove_staging(destination, &file_rel, &staging);
+                                return Err(member_error(
+                                    ArchiveErrorCode::UnsafeEntry,
+                                    &entry.raw_name,
+                                    "Final name is a symlink at commit time",
+                                ));
+                            }
+                            let backup = dest_dir.join(format!("{staging}.old"));
+                            match publish::replace_file_checked(
+                                &dest_dir.join(&staging),
+                                &final_full,
+                                &backup,
+                                &|_, _, _| true,
+                            ) {
+                                Ok(publish::Replaced::Done) => {
+                                    report.written_files += 1;
+                                    continue 'entries;
+                                }
+                                // Gone, a folder or a link meanwhile: try the plain move again.
+                                Ok(publish::Replaced::Changed) => {
+                                    if std::fs::symlink_metadata(&final_full)
+                                        .is_ok_and(|m| m.is_dir() || m.file_type().is_symlink())
+                                    {
+                                        remove_staging(destination, &file_rel, &staging);
+                                        return Err(member_error(
+                                            ArchiveErrorCode::Conflict,
+                                            &entry.raw_name,
+                                            "Destination is not a replaceable file; original preserved",
+                                        ));
+                                    }
+                                }
+                                Ok(publish::Replaced::BackupLeft) => {
+                                    remove_staging(destination, &file_rel, &staging);
+                                    return Err(member_error(
+                                        ArchiveErrorCode::Conflict,
+                                        &entry.raw_name,
+                                        &format!(
+                                            "Original kept at {}; the new file was not published",
+                                            backup.display()
+                                        ),
+                                    ));
+                                }
+                                Err(e) => {
+                                    remove_staging(destination, &file_rel, &staging);
+                                    return Err(member_error(
+                                        ArchiveErrorCode::Conflict,
+                                        &entry.raw_name,
+                                        &format!("Replace failed: {e}; original preserved"),
+                                    ));
+                                }
+                            }
+                        }
+                    },
+                    Err(publish::MoveError::CrossDevice) => {
+                        remove_staging(destination, &file_rel, &staging);
+                        return Err(member_error(
+                            ArchiveErrorCode::Io,
+                            &entry.raw_name,
+                            "Commit across volumes",
+                        ));
+                    }
+                    Err(publish::MoveError::Publish(e)) => {
+                        remove_staging(destination, &file_rel, &staging);
+                        return Err(publish_err(e, &rel));
+                    }
+                }
             }
-            let staging_full = dir_full_path(destination, &file_rel).join(&staging);
-            if let Err(rename_err) = std::fs::rename(&staging_full, &final_full) {
-                let detail = format!(
-                    "Commit rename failed ({} <- {}): {rename_err}; original preserved",
-                    final_full.display(),
-                    staging_full.display()
-                );
-                remove_staging(destination, &file_rel, &staging);
-                return Err(member_error(
-                    ArchiveErrorCode::Conflict,
-                    &entry.raw_name,
-                    &detail,
-                ));
-            }
-            report.written_files += 1;
         }
         Ok(())
     })();
@@ -865,6 +951,13 @@ fn dir_full_path(destination: &Path, rel: &Path) -> PathBuf {
 
 fn file_name_of(rel: &Path) -> &OsStr {
     rel.file_name().unwrap_or_default()
+}
+
+/// Next rename slot after `attempt` (TC convention: the original counts as (1), so the first
+/// renamed file is "(2)"); `None` when the slots are used up.
+fn next_rename_attempt(attempt: u32) -> Option<u32> {
+    let next = if attempt == 0 { 2 } else { attempt + 1 };
+    (next <= 1000).then_some(next)
 }
 
 /// "name.ext" + attempt 2 -> "name (2).ext"; extensionless -> "name (2)".
