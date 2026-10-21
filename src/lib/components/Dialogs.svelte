@@ -18,7 +18,7 @@
   import { toast } from '../stores/toastStore.svelte';
   import { ops } from '../stores/opsStore.svelte';
   import { baseName, jobs, type Job } from '../stores/jobsStore.svelte';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { formatLabel, runPack, type PackFormat } from '../packService';
   import { dialog, roving } from '../dialogKit';
   import Mnemonic from './Mnemonic.svelte';
@@ -489,6 +489,11 @@
     const timer = setTimeout(() => {
       if (delJob === flow && !flow.docked) delShowProgress = true;
     }, DELETE_PROGRESS_DELAY_MS);
+    // The clicked button is disabled now and drops the focus; keep it inside the dialog so Esc
+    // (Background) works from the first moment.
+    void tick().then(() => {
+      if (delJob === flow && !flow.docked) modalEl?.focus();
+    });
     try {
       const result = await runDelete(paths, perm, requestId, (p) => {
         jobs.update(flow, {
