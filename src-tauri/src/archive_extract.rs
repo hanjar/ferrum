@@ -781,7 +781,12 @@ where
             drop(file);
             let mut final_name = final_name;
             let mut final_attempt = attempt;
+            let mut changed_retries = 0u32;
             loop {
+                if cancelled() {
+                    remove_staging(destination, &file_rel, &staging);
+                    return Err(error(ArchiveErrorCode::Cancelled, "Extraction cancelled"));
+                }
                 match publish::rename_file_into(dir, OsStr::new(&staging), dir, &final_name) {
                     Ok(()) => {
                         report.written_files += 1;
@@ -811,50 +816,83 @@ where
                         | ArchiveConflictPolicy::OverwriteOlder => {
                             // The user chose to replace: use the checked replace (old file held
                             // open, moved aside, new file in without replacing, old deleted).
-                            let dest_dir = dir_full_path(destination, &file_rel);
+                            // Paths come from the folder handle we hold (`\\?\` form, bound to
+                            // that folder), so they work beyond MAX_PATH and cannot be
+                            // redirected by a link on the way.
+                            let Some(dir_path) = publish::final_path(dir) else {
+                                remove_staging(destination, &file_rel, &staging);
+                                return Err(member_error(
+                                    ArchiveErrorCode::Io,
+                                    &entry.raw_name,
+                                    "Cannot resolve the destination folder",
+                                ));
+                            };
+                            let dest_dir = PathBuf::from(dir_path);
                             let final_full = dest_dir.join(&final_name);
-                            if policy == ArchiveConflictPolicy::OverwriteOlder {
-                                let dest_newer = publish::modified_ms(dir, &final_name)
-                                    .is_some_and(|d| entry.modified_ms.is_some_and(|src| d > src));
-                                if dest_newer {
-                                    remove_staging(destination, &file_rel, &staging);
-                                    report.skipped_files += 1;
-                                    continue 'entries;
-                                }
-                            }
+                            // A read-only target is not replaced (kept from the old behaviour).
                             if std::fs::symlink_metadata(&final_full)
-                                .is_ok_and(|m| m.file_type().is_symlink())
+                                .is_ok_and(|m| m.is_file() && m.permissions().readonly())
                             {
                                 remove_staging(destination, &file_rel, &staging);
                                 return Err(member_error(
-                                    ArchiveErrorCode::UnsafeEntry,
+                                    ArchiveErrorCode::Conflict,
                                     &entry.raw_name,
-                                    "Final name is a symlink at commit time",
+                                    "Destination file is read-only; original preserved",
                                 ));
                             }
-                            let backup = dest_dir.join(format!("{staging}.old"));
+                            let backup = dest_dir.join(format!(
+                                "ferrum-bak-{pid}-{seq}",
+                                pid = std::process::id(),
+                                seq = STAGING_SEQ.fetch_add(1, Ordering::SeqCst),
+                            ));
+                            // OverwriteOlder: the mtime is judged on the handle that is held
+                            // until the swap is done; a newer target is left alone.
+                            let kept_newer = std::cell::Cell::new(false);
+                            let src_ms = entry.modified_ms;
+                            let older_only = policy == ArchiveConflictPolicy::OverwriteOlder;
+                            let check = |_size: u64, ms: i64, _id: publish::FileId| -> bool {
+                                if older_only && src_ms.is_some_and(|src| ms > src) {
+                                    kept_newer.set(true);
+                                    return false;
+                                }
+                                true
+                            };
                             match publish::replace_file_checked(
                                 &dest_dir.join(&staging),
                                 &final_full,
                                 &backup,
-                                &|_, _, _| true,
+                                &check,
                             ) {
                                 Ok(publish::Replaced::Done) => {
                                     report.written_files += 1;
                                     continue 'entries;
                                 }
-                                // Gone, a folder or a link meanwhile: try the plain move again.
+                                Ok(publish::Replaced::Changed) if kept_newer.get() => {
+                                    remove_staging(destination, &file_rel, &staging);
+                                    report.skipped_files += 1;
+                                    continue 'entries;
+                                }
+                                // Gone, a folder or a link meanwhile.
                                 Ok(publish::Replaced::Changed) => {
-                                    if std::fs::symlink_metadata(&final_full)
-                                        .is_ok_and(|m| m.is_dir() || m.file_type().is_symlink())
-                                    {
+                                    let meta = std::fs::symlink_metadata(&final_full);
+                                    if meta.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
+                                        remove_staging(destination, &file_rel, &staging);
+                                        return Err(member_error(
+                                            ArchiveErrorCode::UnsafeEntry,
+                                            &entry.raw_name,
+                                            "Final name is a symlink at commit time",
+                                        ));
+                                    }
+                                    changed_retries += 1;
+                                    if meta.is_ok_and(|m| m.is_dir()) || changed_retries > 3 {
                                         remove_staging(destination, &file_rel, &staging);
                                         return Err(member_error(
                                             ArchiveErrorCode::Conflict,
                                             &entry.raw_name,
-                                            "Destination is not a replaceable file; original preserved",
+                                            "Destination is not a replaceable file or kept changing; original preserved",
                                         ));
                                     }
+                                    // Gone: the next round tries the plain move again.
                                 }
                                 Ok(publish::Replaced::BackupLeft) => {
                                     remove_staging(destination, &file_rel, &staging);
@@ -869,10 +907,15 @@ where
                                 }
                                 Err(e) => {
                                     remove_staging(destination, &file_rel, &staging);
+                                    let why = if e.raw_os_error() == Some(32) {
+                                        "Destination file is in use by another program".to_string()
+                                    } else {
+                                        format!("Replace failed: {e}")
+                                    };
                                     return Err(member_error(
                                         ArchiveErrorCode::Conflict,
                                         &entry.raw_name,
-                                        &format!("Replace failed: {e}; original preserved"),
+                                        &format!("{why}; original preserved"),
                                     ));
                                 }
                             }
@@ -995,6 +1038,11 @@ fn publish_err(e: PublishError, rel: &Path) -> ArchiveError {
         PublishError::Reparse => ArchiveErrorCode::UnsafeEntry,
         PublishError::WrongKind => ArchiveErrorCode::Conflict,
         PublishError::Io(m) => {
+            let m = if m.to_ascii_lowercase().contains("c0000043") {
+                "Folder is in use by another extraction or program".to_string()
+            } else {
+                m
+            };
             let mut err = error(ArchiveErrorCode::Io, m);
             err.member_path = Some(rel.to_string_lossy().into_owned());
             return err;

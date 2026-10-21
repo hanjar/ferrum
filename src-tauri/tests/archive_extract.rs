@@ -808,3 +808,184 @@ fn long_paths_are_committed_without_replacing() {
     assert_eq!(std::fs::read(deep.join("keep.txt")).unwrap(), b"NEW");
     assert_eq!(names_in(&deep), ["keep (2).txt", "keep.txt"]);
 }
+
+// ---- FER-584 R1: replace beyond MAX_PATH, OverwriteOlder race, read-only, in-use, folder ----
+
+/// `extract_with_racer` with a timeout: a hang is a failure, not a stuck test run.
+#[cfg(windows)]
+fn extract_timed(
+    dest: PathBuf,
+    policy: Policy,
+    member_ms: Option<i64>,
+    on_decode: impl FnOnce() + Send + 'static,
+) -> Result<archive_extract::ExtractReport, archive_contract::ArchiveError> {
+    extract_member_timed(dest, "keep.txt".to_string(), policy, member_ms, on_decode)
+}
+
+#[cfg(windows)]
+fn extract_member_timed(
+    dest: PathBuf,
+    member: String,
+    policy: Policy,
+    member_ms: Option<i64>,
+    on_decode: impl FnOnce() + Send + 'static,
+) -> Result<archive_extract::ExtractReport, archive_contract::ArchiveError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut entry = file(&member, Some(3));
+        entry.modified_ms = member_ms;
+        let plan = preflight(&[entry], &roomy()).unwrap();
+        let mut hook = Some(on_decode);
+        let result = extract(
+            &plan,
+            &dest,
+            &roomy(),
+            policy,
+            |_, writer| {
+                if let Some(h) = hook.take() {
+                    h();
+                }
+                writer.write_all(b"NEW").map_err(archive_extract::io_error)
+            },
+            || false,
+        );
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(60))
+        .expect("extract did not finish in time (endless loop?)")
+}
+
+#[cfg(windows)]
+fn set_mtime(path: &Path, time: std::time::SystemTime) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
+/// A short, plain destination and a member deep enough that its full path is > MAX_PATH (the
+/// extractor walks it handle-relative, so only path-based calls would fail).
+#[cfg(windows)]
+fn long_member() -> String {
+    (0..5)
+        .map(|i| format!("{}{i}", "d".repeat(60)))
+        .collect::<Vec<_>>()
+        .join("/")
+        + "/keep.txt"
+}
+
+#[test]
+#[cfg(windows)]
+fn overwrite_beyond_max_path_with_a_plain_destination_finishes() {
+    for policy in [Policy::Overwrite, Policy::OverwriteOlder] {
+        let base = TempDir::new(&format!("longplain-{policy:?}"));
+        let member = long_member();
+        let deep = base.join(member.replace('/', "\\"));
+        assert!(deep.to_string_lossy().len() > 300);
+        // Build the existing file through the verbatim form (plain std paths stop at MAX_PATH).
+        let verbatim = base.canonicalize().unwrap().join(member.replace('/', "\\"));
+        std::fs::create_dir_all(verbatim.parent().unwrap()).unwrap();
+        std::fs::write(&verbatim, b"OLD").unwrap();
+        set_mtime(&verbatim, std::time::SystemTime::UNIX_EPOCH);
+        let report =
+            extract_member_timed(base.to_path_buf(), member, policy, Some(1_000), || {}).unwrap();
+        assert_eq!(report.written_files, 1, "{policy:?}");
+        assert_eq!(std::fs::read(&verbatim).unwrap(), b"NEW");
+        assert_eq!(names_in(verbatim.parent().unwrap()), ["keep.txt"]);
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn overwrite_older_keeps_a_target_updated_during_extraction() {
+    let base = TempDir::new("older-race");
+    let keep = base.join("keep.txt");
+    std::fs::write(&keep, b"OLD").unwrap();
+    set_mtime(&keep, std::time::SystemTime::UNIX_EPOCH);
+    // The user saves the file (newer than the member) after the pre-check, before the swap.
+    let racer = keep.clone();
+    let report = extract_timed(
+        base.to_path_buf(),
+        Policy::OverwriteOlder,
+        Some(1_000),
+        move || {
+            std::fs::write(&racer, b"EDITED").unwrap();
+        },
+    )
+    .unwrap();
+    assert_eq!((report.written_files, report.skipped_files), (0, 1));
+    assert_eq!(std::fs::read(&keep).unwrap(), b"EDITED");
+    assert_eq!(names_in(&base), ["keep.txt"]);
+}
+
+#[test]
+#[cfg(windows)]
+fn overwrite_does_not_replace_a_read_only_file() {
+    let base = TempDir::new("readonly");
+    let keep = base.join("keep.txt");
+    std::fs::write(&keep, b"OLD").unwrap();
+    let mut perm = std::fs::metadata(&keep).unwrap().permissions();
+    perm.set_readonly(true);
+    std::fs::set_permissions(&keep, perm).unwrap();
+    let error =
+        extract_timed(base.to_path_buf(), Policy::Overwrite, Some(1_000), || {}).unwrap_err();
+    assert_eq!(error.code, Code::Conflict);
+    assert!(error.message.contains("read-only"), "{}", error.message);
+    assert_eq!(std::fs::read(&keep).unwrap(), b"OLD");
+    assert_eq!(names_in(&base), ["keep.txt"], "staging removed");
+    let mut perm = std::fs::metadata(&keep).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    std::fs::set_permissions(&keep, perm).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn overwrite_of_a_file_in_use_fails_clearly_and_keeps_the_original() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let base = TempDir::new("inuse");
+    let keep = base.join("keep.txt");
+    std::fs::write(&keep, b"OLD").unwrap();
+    // Open for writing and deny sharing (FILE_SHARE_READ only): the replace cannot take it.
+    let _held = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(1)
+        .open(&keep)
+        .unwrap();
+    let error =
+        extract_timed(base.to_path_buf(), Policy::Overwrite, Some(1_000), || {}).unwrap_err();
+    assert_eq!(error.code, Code::Conflict);
+    assert!(error.message.contains("in use"), "{}", error.message);
+    drop(_held);
+    assert_eq!(std::fs::read(&keep).unwrap(), b"OLD");
+    assert_eq!(names_in(&base), ["keep.txt"], "staging removed");
+}
+
+#[test]
+#[cfg(windows)]
+fn a_folder_appearing_at_the_final_name_is_never_replaced() {
+    for policy in [Policy::Skip, Policy::Rename, Policy::Overwrite] {
+        let base = TempDir::new(&format!("folder-race-{policy:?}"));
+        let racer = base.join("keep.txt");
+        let hook_path = racer.clone();
+        let result = extract_timed(base.to_path_buf(), policy, Some(1_000), move || {
+            std::fs::create_dir(&hook_path).unwrap();
+            std::fs::write(hook_path.join("inner.txt"), b"KEEP").unwrap();
+        });
+        assert!(racer.is_dir(), "{policy:?}");
+        assert_eq!(std::fs::read(racer.join("inner.txt")).unwrap(), b"KEEP");
+        match policy {
+            Policy::Skip => assert_eq!(result.unwrap().skipped_files, 1),
+            Policy::Rename => {
+                assert_eq!(result.unwrap().written_files, 1);
+                assert_eq!(std::fs::read(base.join("keep (2).txt")).unwrap(), b"NEW");
+            }
+            _ => {
+                assert_eq!(result.unwrap_err().code, Code::Conflict);
+                assert_eq!(names_in(&base), ["keep.txt"], "staging removed");
+            }
+        }
+    }
+}
