@@ -7,6 +7,8 @@
   import { onDestroy, onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import SyncProfileEditor from './SyncProfileEditor.svelte';
+  import Mnemonic from '../Mnemonic.svelte';
+  import { dialog, roving } from '../../dialogKit';
   import { syncProfiles, type SyncProfilesStore } from '../../stores/syncProfilesStore.svelte';
   import { activePane, inactivePane } from '../../stores/panesRegistry.svelte';
   import {
@@ -56,9 +58,27 @@
     store.useCurrentPanes(activePane()?.path, inactivePane()?.path);
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
-    e.preventDefault();
+  // FER-577 (B4): full-page overlay, see AutomationPage: Tab trap, access letters, Esc, focus return.
+  const pageOpts = {
+    modal: false,
+    trap: true,
+    initial: () => modalEl,
+    onEscape: () => onEsc(),
+  };
+
+  /** Enter opens the focused profile for editing; Delete asks (the inline confirmation follows). */
+  function rowKey(e: KeyboardEvent, id: string) {
+    if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void store.openEdit(id);
+    } else if (e.key === 'Delete') {
+      e.preventDefault();
+      store.askDelete(id);
+    }
+  }
+
+  function onEsc() {
     if (store.discardTarget) store.discardTarget = null;
     else if (store.runPrompt) store.cancelRunPrompt();
     else if (store.confirmDeleteId) store.cancelDelete();
@@ -93,7 +113,7 @@
   aria-label="Sync profiles"
   tabindex="-1"
   bind:this={modalEl}
-  onkeydown={onKey}
+  use:dialog={pageOpts}
 >
   <header>
     <h2>{editor ? (editor.id ? 'Edit sync profile' : 'New sync profile') : 'Sync profiles'}</h2>
@@ -103,10 +123,22 @@
   </header>
 
   {#if editor && store.discardTarget}
-    <div class="panel confirm" role="alertdialog" aria-label="Discard changes">
+    <div
+      class="panel confirm"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Discard changes"
+      use:dialog={{
+        isolate: true,
+        initial: '[data-autofocus]',
+        onEscape: () => (store.discardTarget = null),
+      }}
+    >
       <p>Discard your unsaved changes to this profile?</p>
       <div class="buttons">
-        <button type="button" onclick={() => (store.discardTarget = null)}>Keep editing</button>
+        <button type="button" data-autofocus onclick={() => (store.discardTarget = null)}
+          ><Mnemonic label="&Keep editing" /></button
+        >
         <button type="button" class="danger" onclick={discard}>Discard changes</button>
       </div>
     </div>
@@ -123,10 +155,14 @@
   {:else}
     <div class="toolbar">
       <button type="button" class="primary" onclick={() => store.openNew()}>
-        New sync profile
+        <Mnemonic label="&New sync profile" />
       </button>
-      <button type="button" onclick={useCurrentPanes}>Use current panes</button>
-      <button type="button" class="right" onclick={() => void store.load()}>Refresh</button>
+      <button type="button" onclick={useCurrentPanes}
+        ><Mnemonic label="&Use current panes" /></button
+      >
+      <button type="button" class="right" onclick={() => void store.load()}
+        ><Mnemonic label="Re&fresh" /></button
+      >
     </div>
 
     {#if store.notice}
@@ -151,11 +187,22 @@
       </div>
     {/if}
 
-    <ul class="profiles">
+    <!-- FER-577 (B4): each profile is one stop; Up/Down/Home/End walk them, Enter edits, Delete asks. -->
+    <ul
+      class="profiles"
+      use:roving={{ items: 'li.profile', orientation: 'vertical', select: false }}
+    >
       {#each store.profiles as p (p.id)}
         {@const preview = store.preview?.profileId === p.id ? store.preview : null}
         {@const run = store.run?.profileId === p.id ? store.run : null}
-        <li class="profile" data-profile={p.id}>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <li
+          class="profile"
+          data-profile={p.id}
+          tabindex="0"
+          aria-label="{p.name}, {readinessLabel(p.readiness)}"
+          onkeydown={(e) => rowKey(e, p.id)}
+        >
           <div class="head">
             <span class="name">{p.name}</span>
             <span class="rev">Revision {p.revision}</span>
@@ -224,7 +271,17 @@
 
           {#if store.runPrompt?.profileId === p.id}
             {@const rp = store.runPrompt}
-            <div class="panel confirm" role="alertdialog" aria-label="Confirm run">
+            <div
+              class="panel confirm"
+              role="alertdialog"
+              aria-modal="true"
+              aria-label="Confirm run"
+              use:dialog={{
+                isolate: true,
+                initial: '[data-autofocus]',
+                onEscape: () => store.cancelRunPrompt(),
+              }}
+            >
               {#if rp.overwrites > 0}
                 <p>
                   {rp.overwrites}
@@ -239,7 +296,9 @@
                 </p>
               {/if}
               <div class="buttons">
-                <button type="button" onclick={() => store.cancelRunPrompt()}>Cancel</button>
+                <button type="button" data-autofocus onclick={() => store.cancelRunPrompt()}
+                  ><Mnemonic label="&Cancel" /></button
+                >
                 <button type="button" class="danger" onclick={() => void store.confirmRunPrompt()}>
                   Confirm and run
                 </button>
@@ -248,13 +307,25 @@
           {/if}
 
           {#if confirmDelete && confirmDelete.id === p.id}
-            <div class="panel confirm" role="alertdialog" aria-label="Confirm delete">
+            <div
+              class="panel confirm"
+              role="alertdialog"
+              aria-modal="true"
+              aria-label="Confirm delete"
+              use:dialog={{
+                isolate: true,
+                initial: '[data-autofocus]',
+                onEscape: () => store.cancelDelete(),
+              }}
+            >
               <p>
                 Delete the profile "{p.name}"? This removes the profile only; your files are not
                 touched.
               </p>
               <div class="buttons">
-                <button type="button" onclick={() => store.cancelDelete()}>Cancel</button>
+                <button type="button" data-autofocus onclick={() => store.cancelDelete()}
+                  ><Mnemonic label="&Cancel" /></button
+                >
                 <button type="button" class="danger" onclick={() => void store.confirmDelete()}>
                   Delete profile
                 </button>

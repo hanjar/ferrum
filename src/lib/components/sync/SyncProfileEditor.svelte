@@ -4,6 +4,8 @@
    * kinds, readiness) comes from the backend; the form only edits the draft and sends it back.
    */
   import PathField from './PathField.svelte';
+  import Mnemonic from '../Mnemonic.svelte';
+  import { assignMnemonics, parseMnemonic, roving } from '../../dialogKit';
   import type { SyncProfilesStore, EditorState } from '../../stores/syncProfilesStore.svelte';
   import {
     GUARD_COUNT_WIRE_MAX,
@@ -63,6 +65,30 @@
       text: 'Deleted files are removed for good. Ferrum asks you to confirm this in a Windows dialog when you save.',
     },
   ];
+
+  // FER-577 (B4): access letters are unique inside the editor. The static letters below belong to
+  // fixed labels (Name, folders, Propagate deletions, Versioning, Compare, Filters, Safety, Save);
+  // the radio groups take the free letters. "Delete permanently" never gets one: it is reached
+  // with the arrows or Tab, never by an accelerator.
+  const STATIC_LETTERS = ['n', 'l', 'r', 'd', 'v', 'z', 'c', 'x', 'i', 'w', 'm', 'a', 's'];
+  const keysOf = (labels: string[]) => labels.map((l) => parseMnemonic(l).key ?? '');
+  const modeLabels = assignMnemonics(
+    modes.map((m) => m.label),
+    STATIC_LETTERS,
+  );
+  const dirLabels = assignMnemonics(
+    ['Left → Right', 'Right → Left'],
+    [...STATIC_LETTERS, ...keysOf(modeLabels)],
+  );
+  const policyLabels = (() => {
+    const plain = policies.map((p) => p.label);
+    const withLetters = assignMnemonics(plain, [
+      ...STATIC_LETTERS,
+      ...keysOf(modeLabels),
+      ...keysOf(dirLabels),
+    ]);
+    return withLetters.map((l, i) => (policies[i].value === 'permanent' ? plain[i] : l));
+  })();
 
   const recycleReason = $derived(recycleBinBlockReason(form, editor.kinds));
   const excludePatterns = $derived(patternsOf(form.excludeText));
@@ -129,7 +155,7 @@
     <section aria-labelledby="sec-name">
       <h3 id="sec-name">Name</h3>
       <div class="field">
-        <label for="sp-name">Profile name</label>
+        <label for="sp-name"><Mnemonic label="Profile &name" /></label>
         <input
           id="sp-name"
           type="text"
@@ -146,7 +172,7 @@
       <h3 id="sec-folders">Folders</h3>
       <PathField
         id="sp-left"
-        label="Left folder"
+        label="&Left folder"
         bind:value={form.left}
         caption={rootCaption(editor.identities.left, editor.kinds.left)}
         errors={rootProblems('left').map((e) => fieldMessage(e, form))}
@@ -155,7 +181,7 @@
       />
       <PathField
         id="sp-right"
-        label="Right folder"
+        label="&Right folder"
         bind:value={form.right}
         caption={rootCaption(editor.identities.right, editor.kinds.right)}
         errors={rootProblems('right').map((e) => fieldMessage(e, form))}
@@ -167,19 +193,19 @@
 
     <section aria-labelledby="sec-direction">
       <h3 id="sec-direction">Direction</h3>
-      <div class="segmented" role="radiogroup" aria-label="Sync mode">
-        {#each modes as m (m.value)}
+      <div class="segmented" role="radiogroup" aria-label="Sync mode" use:roving>
+        {#each modes as m, i (m.value)}
           <button
             type="button"
             role="radio"
             aria-checked={form.mode === m.value}
             class:sel={form.mode === m.value}
-            onclick={() => setMode(m.value)}>{m.label}</button
+            onclick={() => setMode(m.value)}><Mnemonic label={modeLabels[i]} /></button
           >
         {/each}
       </div>
       {#if form.mode !== 'twoWay'}
-        <div class="segmented" role="radiogroup" aria-label="Direction">
+        <div class="segmented" role="radiogroup" aria-label="Direction" use:roving>
           <button
             type="button"
             role="radio"
@@ -188,7 +214,7 @@
             onclick={() => {
               form.from = 'left';
               touch();
-            }}>Left → Right</button
+            }}><Mnemonic label={dirLabels[0]} /></button
           >
           <button
             type="button"
@@ -198,13 +224,13 @@
             onclick={() => {
               form.from = 'right';
               touch();
-            }}>Right → Left</button
+            }}><Mnemonic label={dirLabels[1]} /></button
           >
         </div>
       {:else}
         <label class="check">
           <input type="checkbox" bind:checked={form.propagateDeletes} onchange={touch} />
-          Propagate deletions
+          <Mnemonic label="Propagate &deletions" />
         </label>
       {/if}
       <p class="hint" data-testid="mode-sentence">{modeSentence(form.mode, form.from)}</p>
@@ -213,8 +239,8 @@
 
     <section aria-labelledby="sec-deletions">
       <h3 id="sec-deletions">Deletions</h3>
-      <div class="cards" role="radiogroup" aria-label="Delete policy">
-        {#each policies as p (p.value)}
+      <div class="cards" role="radiogroup" aria-label="Delete policy" use:roving>
+        {#each policies as p, i (p.value)}
           {@const blocked = p.value === 'recycleBin' ? recycleReason : null}
           <label class="card" class:sel={form.deletePolicy === p.value} class:off={!!blocked}>
             <span class="cardHead">
@@ -226,7 +252,7 @@
                 disabled={!!blocked}
                 onchange={() => setPolicy(p.value)}
               />
-              <span class="cardTitle">{p.label}</span>
+              <span class="cardTitle"><Mnemonic label={policyLabels[i]} /></span>
             </span>
             <span class="cardText">{blocked ?? p.text}</span>
           </label>
@@ -234,7 +260,7 @@
       </div>
       {#if form.deletePolicy === 'versioning'}
         <div class="field">
-          <label for="sp-versioning">Versioning folder</label>
+          <label for="sp-versioning"><Mnemonic label="&Versioning folder" /></label>
           <input
             id="sp-versioning"
             type="text"
@@ -256,7 +282,7 @@
 
     <section aria-labelledby="sec-compare">
       <h3 id="sec-compare">Compare</h3>
-      <div class="segmented" role="radiogroup" aria-label="Compare mode">
+      <div class="segmented" role="radiogroup" aria-label="Compare mode" use:roving>
         <button
           type="button"
           role="radio"
@@ -265,7 +291,7 @@
           onclick={() => {
             form.compare = 'sizeAndDate';
             touch();
-          }}>Size and date</button
+          }}><Mnemonic label="Si&ze and date" /></button
         >
         <button
           type="button"
@@ -275,7 +301,7 @@
           onclick={() => {
             form.compare = 'content';
             touch();
-          }}>Content</button
+          }}><Mnemonic label="&Content" /></button
         >
       </div>
     </section>
@@ -283,7 +309,7 @@
     <section aria-labelledby="sec-filters">
       <h3 id="sec-filters">Filters</h3>
       <div class="field">
-        <label for="sp-exclude">Exclude (one pattern per line)</label>
+        <label for="sp-exclude"><Mnemonic label="E&xclude (one pattern per line)" /></label>
         <textarea
           id="sp-exclude"
           rows="3"
@@ -296,7 +322,9 @@
         {#each msgs('exclude') as m (m)}<span class="err">{m}</span>{/each}
       </div>
       <div class="field">
-        <label for="sp-include">Include only (optional, one pattern per line)</label>
+        <label for="sp-include"
+          ><Mnemonic label="&Include only (optional, one pattern per line)" /></label
+        >
         <textarea
           id="sp-include"
           rows="2"
@@ -312,11 +340,11 @@
       <h3 id="sec-safety">Safety</h3>
       <label class="check">
         <input type="checkbox" bind:checked={form.guardEnabled} onchange={touch} />
-        Stop runs that would delete a lot
+        <Mnemonic label="Stop runs that &would delete a lot" />
       </label>
       {#if form.guardEnabled}
         <div class="guard">
-          <label for="sp-guard-count">More than (items)</label>
+          <label for="sp-guard-count"><Mnemonic label="&More than (items)" /></label>
           <input
             id="sp-guard-count"
             type="number"
@@ -328,7 +356,8 @@
               touch();
             }}
           />
-          <label for="sp-guard-percent">and more than (% of the target)</label>
+          <label for="sp-guard-percent"><Mnemonic label="and more than (% of the t&arget)" /></label
+          >
           <input
             id="sp-guard-percent"
             type="number"
@@ -425,9 +454,10 @@
     <div class="problems" aria-label="Problems" role={allMessages.length ? 'alert' : undefined}>
       {#each allMessages as m (m)}<div>{m}</div>{/each}
     </div>
+    <!-- Cancel has no access letter: Esc is Cancel. -->
     <button type="button" onclick={() => oncancel?.()}>Cancel</button>
     <button type="submit" class="primary" disabled={!nothingToFix || editor.busy === 'saving'}>
-      {editor.busy === 'saving' ? 'Saving…' : 'Save'}
+      {#if editor.busy === 'saving'}Saving…{:else}<Mnemonic label="&Save" />{/if}
     </button>
   </footer>
 </form>
