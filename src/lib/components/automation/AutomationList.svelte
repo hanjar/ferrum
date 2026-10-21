@@ -9,6 +9,7 @@
   import type { AutomationStore } from '../../stores/automationStore.svelte';
   import type { AutomationRow } from '../../ipc/automation';
   import StatusChip from './StatusChip.svelte';
+  import { roving } from '../../dialogKit';
 
   let { store }: { store: AutomationStore } = $props();
 
@@ -66,7 +67,8 @@
   </div>
 {/if}
 
-<ul class="rows">
+<!-- FER-577 (B4): Up/Down/Home/End walk the automation names; Enter opens the details. -->
+<ul class="rows" use:roving={{ items: '.namelink', orientation: 'vertical', select: false }}>
   {#each store.rows as r (r.id)}
     <li class="row" class:hl={store.highlightId === r.id} data-automation={r.id}>
       <label class="switch" title={r.enabled ? 'Enabled' : 'Disabled'}>

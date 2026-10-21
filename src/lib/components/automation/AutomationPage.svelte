@@ -15,6 +15,8 @@
   import { automation, type AutomationStore } from '../../stores/automationStore.svelte';
   import { listenAutomationChanged, listenAutomationProgress } from '../../ipc/automation';
   import { ui } from '../../uiState.svelte';
+  import { dialog, roving } from '../../dialogKit';
+  import Mnemonic from '../Mnemonic.svelte';
 
   let {
     onclose,
@@ -55,9 +57,16 @@
 
   const attention = $derived(store.attentionCount);
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
-    e.preventDefault();
+  // FER-577 (B4): the page is a full-page overlay. `use:dialog` gives it the Tab trap, Alt+letter
+  // access keys, Esc and focus return; `modal: false` keeps the full-page shortcut rules
+  // (fullPageOpen) instead of the modal gate, so Ctrl+K and friends keep working here.
+  const pageOpts = {
+    modal: false,
+    trap: true,
+    initial: () => modalEl,
+    onEscape: () => onEsc(),
+  };
+  function onEsc() {
     if (store.review?.approving) return;
     if (store.dialog) store.closeDialog();
     else if (store.discardPending) store.discardPending = false;
@@ -98,7 +107,7 @@
   aria-label="Automation"
   tabindex="-1"
   bind:this={modalEl}
-  onkeydown={onKey}
+  use:dialog={pageOpts}
 >
   <header>
     <h2>{title}</h2>
@@ -108,10 +117,22 @@
   </header>
 
   {#if store.discardPending}
-    <div class="panel confirm" role="alertdialog" aria-label="Discard changes">
+    <div
+      class="panel confirm"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Discard changes"
+      use:dialog={{
+        isolate: true,
+        initial: '[data-autofocus]',
+        onEscape: () => (store.discardPending = false),
+      }}
+    >
       <p>Discard your unsaved changes to this automation?</p>
       <div class="buttons">
-        <button type="button" onclick={() => (store.discardPending = false)}>Keep editing</button>
+        <button type="button" data-autofocus onclick={() => (store.discardPending = false)}
+          ><Mnemonic label="&Keep editing" /></button
+        >
         <button type="button" class="danger" onclick={() => store.closeEditor()}>
           Discard changes
         </button>
@@ -120,7 +141,7 @@
   {/if}
 
   {#if store.view === 'list'}
-    <div class="tabs" role="tablist">
+    <div class="tabs" role="tablist" use:roving>
       <button
         type="button"
         role="tab"
@@ -128,7 +149,7 @@
         class:on={store.tab === 'automations'}
         onclick={() => (store.tab = 'automations')}
       >
-        Automations ({store.rows.length})
+        <Mnemonic label="&Automations ({store.rows.length})" />
       </button>
       <button
         type="button"
@@ -137,7 +158,7 @@
         class:on={store.tab === 'history'}
         onclick={() => store.showHistory(store.history.filter)}
       >
-        Run history
+        <Mnemonic label="Run &history" />
         {#if attention > 0}<span class="badge" data-testid="attention-badge"
             >{attention} need attention</span
           >{/if}
@@ -145,10 +166,10 @@
       <span class="spacer"></span>
       {#if store.tab === 'automations'}
         <button type="button" class="primary" onclick={() => store.openNew()}>
-          New automation
+          <Mnemonic label="&New automation" />
         </button>
       {/if}
-      <button type="button" onclick={() => void store.load()}>Refresh</button>
+      <button type="button" onclick={() => void store.load()}><Mnemonic label="Re&fresh" /></button>
     </div>
 
     {#if store.notice}
@@ -170,12 +191,13 @@
         <button
           type="button"
           class:on={store.history.filter === 'all'}
-          onclick={() => void store.loadHistory('all')}>All runs</button
+          onclick={() => void store.loadHistory('all')}><Mnemonic label="All &runs" /></button
         >
         <button
           type="button"
           class:on={store.history.filter === 'attention'}
-          onclick={() => void store.loadHistory('attention')}>Needs attention</button
+          onclick={() => void store.loadHistory('attention')}
+          ><Mnemonic label="Needs a&ttention" /></button
         >
       </div>
       {#if store.history.error}

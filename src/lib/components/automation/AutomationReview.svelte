@@ -6,6 +6,7 @@
    * state: `canceled` leaves the user here, `stale` shows one fixed text and asks for a new test.
    */
   import { reviewLabel } from '../../ipc/automation';
+  import Mnemonic from '../Mnemonic.svelte';
   import type { AutomationStore, ReviewState } from '../../stores/automationStore.svelte';
   import {
     RUNTIME_BACKGROUND_DESC,
@@ -186,7 +187,7 @@
         disabled={review.testing || review.approving}
         onclick={() => void store.runTest()}
       >
-        {test ? 'Run test again' : 'Run test'}
+        <Mnemonic label={test ? 'Run &test again' : 'Run &test'} />
       </button>
     </div>
   </section>
@@ -222,7 +223,7 @@
       title={store.canApprove ? undefined : 'Run a test that passes first'}
       onclick={() => void store.approve()}
     >
-      {approveLabel}
+      <Mnemonic label={'&' + approveLabel.replace('&', '&&')} />
     </button>
   </footer>
 </div>
