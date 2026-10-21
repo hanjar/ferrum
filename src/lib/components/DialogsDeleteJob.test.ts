@@ -133,7 +133,7 @@ describe('FER-585: Delete as a backend job', () => {
     await vi.waitFor(() => expect(progressBar()).not.toBeNull(), { timeout: 2000 });
     expect(progressBar()?.getAttribute('aria-valuenow')).toBe('50');
     expect(modal().textContent).toContain('1 / 2');
-    expect(modal().textContent).toContain('40 entri');
+    expect(modal().textContent).toContain('40 entries');
     expect(button('Background')).toBeTruthy();
     expect(jobs.running).toHaveLength(1);
     expect(jobs.running[0]).toMatchObject({ kind: 'delete', processedEntries: 1, totalEntries: 2 });
@@ -156,7 +156,7 @@ describe('FER-585: Delete as a backend job', () => {
     job.progress({ done: 2, total: 2, entries: 9 });
     job.finish(result());
     await vi.waitFor(() => expect(jobs.docked[0]!.state).toBe('done'));
-    expect(jobs.docked[0]!.summary).toBe('Hapus selesai: 2 item');
+    expect(jobs.docked[0]!.summary).toBe('Delete finished: 2 items');
     expect(dialogs.current).toBeNull(); // a docked delete never pops a dialog
     expect(activeWorkCount()).toBe(0);
   });
@@ -217,6 +217,24 @@ describe('FER-585: Delete as a backend job', () => {
     const d = dialogs.current as unknown as { paths: string[] };
     expect(d.paths).toEqual(['C:/x/big', 'C:/x/b']);
     expect(h.noteScopeMutation).toHaveBeenCalled(); // the partly deleted folder changed the disk
+  });
+
+  it('after Cancel the focus stays in the dialog, so Esc still sends the job to the dock', async () => {
+    const job = controllable();
+    await confirm();
+    await vi.waitFor(() => expect(progressBar()).not.toBeNull(), { timeout: 2000 });
+    fireEvent.click(button('Cancel'));
+    await tick();
+    await tick();
+    expect(button('Cancel').hasAttribute('disabled')).toBe(true);
+    expect(document.activeElement).toBe(modal());
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    await tick();
+    expect(dialogs.current).toBeNull();
+    expect(jobs.docked).toHaveLength(1);
+    expect(jobs.docked[0]!.state).toBe('cancelling');
+    job.finish(result({ cancelled: true, notProcessed: [...PATHS] }, 0));
+    await vi.waitFor(() => expect(jobs.docked[0]!.state).toBe('canceled'));
   });
 
   it('a delete that holds a folder lease cannot go to the background but can be cancelled', async () => {

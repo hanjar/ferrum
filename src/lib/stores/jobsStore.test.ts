@@ -322,11 +322,11 @@ describe('FER-585: delete jobs', () => {
     jobs.cancel(job); // idempotent
     expect(hook).toHaveBeenCalledTimes(1);
 
-    jobs.finish(job, 'canceled', { summary: 'Hapus dibatalkan: 1/3 terhapus' });
+    jobs.finish(job, 'canceled', { summary: 'Delete cancelled: 1/3 deleted' });
     expect(job.state).toBe('canceled');
     expect(jobs.runningCount).toBe(0);
     expect(jobs.docked).toHaveLength(1); // stays in the dock with its outcome
-    expect(toast.message).toContain('Hapus dibatalkan');
+    expect(toast.message).toContain('Delete cancelled');
     jobs.clearFinished();
     expect(jobs.list).toHaveLength(0);
   });

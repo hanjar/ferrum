@@ -131,6 +131,9 @@ struct Walk<'a> {
     state: &'a mut DeleteProgress,
     /// Entries removed inside the current top-level item.
     removed_here: u64,
+    /// Test seam: runs after a sub-folder was enumerated and before it is opened (the window a
+    /// hostile party would use to swap the folder for a junction).
+    before_open: &'a dyn Fn(&Path),
 }
 
 impl Walk<'_> {
@@ -141,73 +144,200 @@ impl Walk<'_> {
     }
 }
 
-/// A file, symlink or junction. A read-only file is made writable once and retried.
+#[cfg(windows)]
+fn is_directory_link(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    fs::symlink_metadata(path)
+        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_directory_link(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// Clear the read-only attribute of `path` (file or folder). False when there was nothing to clear.
+fn clear_readonly(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let mut perms = meta.permissions();
+    if !perms.readonly() {
+        return false;
+    }
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(path, perms).is_ok()
+}
+
+/// A file, symlink or junction. A link is removed AS a link (never followed): a directory link with
+/// `remove_dir`, a file link with `remove_file`; the first error is the one reported. A read-only
+/// entry is made writable once and retried.
 fn remove_leaf(path: &Path, is_symlink: bool) -> std::io::Result<()> {
     let attempt = |p: &Path| {
-        if is_symlink {
-            // A directory symlink / junction is removed as a link, never followed.
-            fs::remove_file(p).or_else(|_| fs::remove_dir(p))
+        if is_symlink && is_directory_link(p) {
+            fs::remove_dir(p)
         } else {
             fs::remove_file(p)
         }
     };
     match attempt(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            if let Ok(meta) = fs::symlink_metadata(path) {
-                let mut perms = meta.permissions();
-                if perms.readonly() {
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    perms.set_readonly(false);
-                    if fs::set_permissions(path, perms).is_ok() {
-                        return attempt(path);
-                    }
-                }
-            }
-            Err(e)
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && clear_readonly(path) => {
+            attempt(path).map_err(|_| e)
         }
         other => other,
     }
 }
 
-/// Remove `dir` and everything below it, checking for a cancel before each entry.
-fn remove_tree(dir: &Path, w: &mut Walk) -> Tree {
-    let children: Vec<fs::DirEntry> = match fs::read_dir(dir) {
-        Ok(rd) => match rd.collect::<Result<Vec<_>, _>>() {
-            Ok(v) => v,
-            Err(e) => return Tree::Failed(e),
-        },
+/// An empty folder. Windows refuses to remove a folder that carries the read-only attribute
+/// (Explorer sets it on customised folders with a desktop.ini), `remove_dir_all` never minded.
+fn remove_empty_dir(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && clear_readonly(path) => {
+            fs::remove_dir(path).map_err(|_| e)
+        }
+        other => other,
+    }
+}
+
+/// One folder being emptied: its open handle and what is left to remove inside it.
+struct Frame {
+    path: std::path::PathBuf,
+    children: std::vec::IntoIter<(std::path::PathBuf, fs::FileType)>,
+    /// Held until the folder is emptied. Opened WITHOUT `FILE_SHARE_DELETE`, so while the handle
+    /// lives nobody can rename, delete or replace this folder (nor, with its parents' handles held
+    /// as well, any folder above it): the path keeps meaning the folder that was checked.
+    _handle: fs::File,
+}
+
+/// What opening a folder for deletion found.
+enum Opened {
+    Dir(Frame),
+    /// A reparse point (junction, symlink): to be removed as a link, never entered.
+    Link,
+}
+
+/// Open `path` as a directory WITHOUT following a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`,
+/// `FILE_FLAG_BACKUP_SEMANTICS` is required to open a directory at all), read its attributes from
+/// the handle itself, and refuse to enter anything that is a reparse point. This closes the
+/// check-then-use race of CVE-2022-21658: the decision is made on the opened object, not on a name
+/// that someone may swap for a junction a moment later. Safe code only (std exposes the flags).
+#[cfg(windows)]
+fn open_dir(path: &Path) -> std::io::Result<Opened> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_LIST_DIRECTORY: u32 = 0x1;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    let handle = fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let attrs = handle.metadata()?.file_attributes();
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(Opened::Link);
+    }
+    if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(std::io::Error::other("Not a directory"));
+    }
+    let children = list_children(path)?;
+    Ok(Opened::Dir(Frame {
+        path: path.to_path_buf(),
+        children,
+        _handle: handle,
+    }))
+}
+
+#[cfg(not(windows))]
+fn open_dir(path: &Path) -> std::io::Result<Opened> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Ok(Opened::Link);
+    }
+    let handle = fs::File::open(path)?;
+    let children = list_children(path)?;
+    Ok(Opened::Dir(Frame {
+        path: path.to_path_buf(),
+        children,
+        _handle: handle,
+    }))
+}
+
+fn list_children(
+    dir: &Path,
+) -> std::io::Result<std::vec::IntoIter<(std::path::PathBuf, fs::FileType)>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        out.push((entry.path(), entry.file_type()?));
+    }
+    Ok(out.into_iter())
+}
+
+/// Remove `root` and everything below it, checking for a cancel before each entry. Iterative (an
+/// explicit stack of open folders): a tree thousands of levels deep, possible with `\\?\` paths,
+/// cannot overflow the thread's stack. A junction or symlink inside the tree is removed as a link
+/// and never entered, so what it points to is never touched.
+fn remove_tree(root: &Path, w: &mut Walk) -> Tree {
+    let mut stack: Vec<Frame> = Vec::new();
+    match open_dir(root) {
+        Ok(Opened::Dir(f)) => stack.push(f),
+        // A top-level link is the item itself: gone as a link, nothing entered.
+        Ok(Opened::Link) => {
+            return match remove_leaf(root, true) {
+                Ok(()) => {
+                    w.removed_one();
+                    Tree::Done
+                }
+                Err(e) => Tree::Failed(e),
+            };
+        }
         Err(e) => return Tree::Failed(e),
-    };
-    for child in children {
+    }
+    loop {
         if (w.cancelled)() {
             return Tree::Cancelled;
         }
-        let path = child.path();
-        let ft = match child.file_type() {
-            Ok(ft) => ft,
-            Err(e) => return Tree::Failed(e),
+        let Some(top) = stack.last_mut() else {
+            return Tree::Done;
         };
-        // `is_dir` is false for a symlink / junction: those are removed as links.
-        if ft.is_dir() {
-            match remove_tree(&path, w) {
-                Tree::Done => {}
-                other => return other,
+        let Some((path, ft)) = top.children.next() else {
+            // Emptied: release the handle first (an open handle without delete sharing would
+            // block the removal), then remove the folder itself.
+            let done = stack.pop().expect("top exists");
+            let dir = done.path.clone();
+            drop(done);
+            match remove_empty_dir(&dir) {
+                Ok(()) => {
+                    w.removed_one();
+                    continue;
+                }
+                Err(e) => return Tree::Failed(e),
             }
-        } else if let Err(e) = remove_leaf(&path, ft.is_symlink()) {
-            return Tree::Failed(e);
+        };
+        if ft.is_dir() {
+            (w.before_open)(&path);
+            match open_dir(&path) {
+                Ok(Opened::Dir(f)) => stack.push(f),
+                // It was a folder when listed, but is a link now: remove the link only.
+                Ok(Opened::Link) => match remove_leaf(&path, true) {
+                    Ok(()) => w.removed_one(),
+                    Err(e) => return Tree::Failed(e),
+                },
+                Err(e) => return Tree::Failed(e),
+            }
         } else {
-            w.removed_one();
+            match remove_leaf(&path, ft.is_symlink()) {
+                Ok(()) => w.removed_one(),
+                Err(e) => return Tree::Failed(e),
+            }
         }
-    }
-    if (w.cancelled)() {
-        return Tree::Cancelled;
-    }
-    match fs::remove_dir(dir) {
-        Ok(()) => {
-            w.removed_one();
-            Tree::Done
-        }
-        Err(e) => Tree::Failed(e),
     }
 }
 
@@ -216,6 +346,16 @@ fn run(
     mode: &Mode,
     cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(&DeleteProgress),
+) -> DeleteJobResult {
+    run_with_hook(paths, mode, cancelled, progress, &|_| {})
+}
+
+fn run_with_hook(
+    paths: &[String],
+    mode: &Mode,
+    cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(&DeleteProgress),
+    before_open: &dyn Fn(&Path),
 ) -> DeleteJobResult {
     let total = paths.len();
     let mut report = DeleteReport {
@@ -226,6 +366,7 @@ fn run(
     let mut not_processed: Vec<String> = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     let mut was_cancelled = false;
+    let mut cancel_partial = 0usize;
     let mut state = DeleteProgress {
         done: 0,
         total,
@@ -299,6 +440,7 @@ fn run(
                     progress: &mut *progress,
                     state: &mut state,
                     removed_here: 0,
+                    before_open,
                 };
                 let outcome = remove_tree(path, &mut walk);
                 let removed_here = walk.removed_here;
@@ -308,6 +450,7 @@ fn run(
                         was_cancelled = true;
                         if removed_here > 0 {
                             partial.push(p.clone());
+                            cancel_partial = 1;
                         } else {
                             not_processed.push(p.clone());
                         }
@@ -325,13 +468,18 @@ fn run(
                             fe.message
                         };
                         report.failed.push(failed(p, fe.code, message));
+                        // An error in the middle of a folder leaves it partly deleted too: it is
+                        // listed as such (besides the failure that says why).
+                        if removed_here > 0 {
+                            partial.push(p.clone());
+                        }
                     }
                 }
             }
         }
     }
     state.done = if was_cancelled {
-        total - not_processed.len() - partial.len()
+        total - not_processed.len() - cancel_partial
     } else {
         total
     };
@@ -601,5 +749,193 @@ mod tests {
         let r = run_trash(&[s(&a)], &never, &mut |_| {});
         assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
         assert!(!a.exists());
+    }
+
+    // ── FER-585 R1: read-only folders, junctions, races, deep trees ─────────────────────────
+
+    /// `mklink /J` needs no privilege. A failure here is a failure of the test, not a skip: the
+    /// junction behaviour is exactly what these tests guard.
+    fn make_junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("cmd runs");
+        assert!(
+            out.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    fn outside_with_keep(root: &Path) -> (PathBuf, PathBuf) {
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        let keep = outside.join("keep.txt");
+        fs::write(&keep, b"precious").unwrap();
+        fs::write(outside.join("nested").join("deep.txt"), b"precious").unwrap();
+        (outside, keep)
+    }
+
+    fn set_readonly(p: &Path) {
+        let mut perms = fs::metadata(p).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(p, perms).unwrap();
+    }
+
+    #[test]
+    fn read_only_folders_nested_in_the_tree_and_the_top_folder_are_deleted() {
+        let fx = fixture();
+        let top = fx.root.join("proyek");
+        let aset = top.join("aset");
+        let deeper = aset.join("deeper");
+        fs::create_dir_all(&deeper).unwrap();
+        fs::write(aset.join("desktop.ini"), b"[.ShellClassInfo]").unwrap();
+        fs::write(deeper.join("f.txt"), b"x").unwrap();
+        fs::write(top.join("other.txt"), b"x").unwrap();
+        // Explorer marks a customised folder read-only (+ desktop.ini); so do copies from media.
+        set_readonly(&deeper);
+        set_readonly(&aset);
+        set_readonly(&top);
+        let r = run_permanent(&[s(&top)], &never, &mut |_| {});
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert!(r.report.failed.is_empty() && r.partial.is_empty());
+        assert!(!top.exists());
+    }
+
+    #[test]
+    fn a_junction_inside_the_tree_is_removed_as_a_link_and_its_target_is_untouched() {
+        let fx = fixture();
+        let (outside, keep) = outside_with_keep(&fx.root);
+        let tree = fx.root.join("tree");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("sub").join("f.txt"), b"x").unwrap();
+        make_junction(&tree.join("sub").join("link"), &outside);
+        let r = run_permanent(&[s(&tree)], &never, &mut |_| {});
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert!(!tree.exists());
+        assert!(keep.exists(), "the junction target must survive");
+        assert!(outside.join("nested").join("deep.txt").exists());
+    }
+
+    #[test]
+    fn a_junction_as_a_top_level_item_is_removed_as_a_link_permanent_and_to_the_bin() {
+        let fx = fixture();
+        let (outside, keep) = outside_with_keep(&fx.root);
+        let link = fx.root.join("link");
+        make_junction(&link, &outside);
+        let r = run_permanent(&[s(&link)], &never, &mut |_| {});
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert!(!link.exists() && keep.exists());
+
+        // Recycle Bin path: the item handed over is the link itself, never its target's content.
+        make_junction(&link, &outside);
+        let seen = std::cell::RefCell::new(Vec::<PathBuf>::new());
+        let r = run_trash_with(
+            &[s(&link)],
+            &|p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                fs::remove_dir(p) // a stand-in that can only remove a link or an empty folder
+            },
+            &never,
+            &mut |_| {},
+        );
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert_eq!(*seen.borrow(), vec![link.clone()]);
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_junction_after_it_was_listed_is_never_entered() {
+        let fx = fixture();
+        let (outside, keep) = outside_with_keep(&fx.root);
+        let tree = fx.root.join("tree");
+        let sub = tree.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("f.txt"), b"x").unwrap();
+        // The tree is listed with `sub` as a folder; right before it is opened it is replaced by
+        // a junction to a folder the user cares about (CVE-2022-21658 class).
+        let swapped = Cell::new(false);
+        let r = run_with_hook(&[s(&tree)], &Mode::Permanent, &never, &mut |_| {}, &|p| {
+            if p.ends_with("sub") && !swapped.get() {
+                swapped.set(true);
+                fs::remove_dir_all(p).unwrap();
+                make_junction(p, &outside);
+            }
+        });
+        assert!(swapped.get(), "the race window was exercised");
+        assert!(
+            keep.exists(),
+            "the target of the swapped-in junction survives"
+        );
+        assert!(outside.join("nested").join("deep.txt").exists());
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert!(!tree.exists());
+    }
+
+    #[test]
+    fn a_very_deep_tree_is_deleted_without_recursion() {
+        let fx = fixture();
+        let root = fx.root.join("deep");
+        // 1000 levels: far beyond MAX_PATH, so everything goes through the \\?\ spelling.
+        let mut p = PathBuf::from(format!(r"\\?\{}", s(&root)));
+        fs::create_dir_all(&p).unwrap();
+        for _ in 0..1000 {
+            p.push("d");
+            fs::create_dir(&p).unwrap();
+        }
+        fs::write(p.join("leaf.txt"), b"x").unwrap();
+        let verbatim_root = format!(r"\\?\{}", s(&root));
+        // A deliberately small stack: a recursive walk would not survive 1000 levels of it.
+        let handle = std::thread::Builder::new()
+            .stack_size(192 * 1024)
+            .spawn(move || run_permanent(&[verbatim_root], &never, &mut |_| {}))
+            .unwrap();
+        let r = handle.join().expect("no stack overflow");
+        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
+        assert!(!root.exists());
+        assert_eq!(r.report.failed.len(), 0);
+    }
+
+    #[test]
+    fn an_error_in_the_middle_of_a_folder_is_a_failure_and_a_partial_folder() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fx = fixture();
+        let dir = fx.root.join("mixed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), b"x").unwrap();
+        fs::write(dir.join("z.txt"), b"x").unwrap();
+        // Held open without delete sharing: removing it fails with a sharing violation.
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("z.txt"))
+            .unwrap();
+        let r = run_permanent(&[s(&dir)], &never, &mut |_| {});
+        assert_eq!(r.report.deleted, 0);
+        assert_eq!(r.report.failed.len(), 1);
+        assert!(r.report.failed[0].message.contains("partly deleted"));
+        assert_eq!(r.partial, vec![s(&dir)]);
+        assert!(!r.cancelled);
+        assert!(!dir.join("a.txt").exists() && dir.join("z.txt").exists());
+    }
+
+    #[test]
+    fn an_open_folder_handle_does_not_let_the_folder_be_renamed_under_the_walk() {
+        // The share mode of the walk's folder handle (no FILE_SHARE_DELETE) is what keeps the
+        // checked folder from being swapped while it is emptied.
+        let fx = fixture();
+        let dir = fx.root.join("held");
+        fs::create_dir_all(&dir).unwrap();
+        let frame = match open_dir(&dir).unwrap() {
+            Opened::Dir(f) => f,
+            Opened::Link => panic!("a plain folder"),
+        };
+        assert!(fs::rename(&dir, fx.root.join("moved")).is_err());
+        drop(frame);
+        assert!(fs::rename(&dir, fx.root.join("moved")).is_ok());
     }
 }

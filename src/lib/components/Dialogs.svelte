@@ -461,7 +461,7 @@
   }
 
   function deleteSubject(paths: string[]): string {
-    return paths.length === 1 ? baseName(paths[0]!) : `${paths.length} item`;
+    return paths.length === 1 ? baseName(paths[0]!) : `${paths.length} items`;
   }
 
   /**
@@ -501,7 +501,7 @@
           totalEntries: p.total,
           currentMember: p.currentName,
         });
-        flow.summary = `${p.entries} entri terhapus`;
+        flow.summary = `${p.entries} entries deleted`;
         if (delJob === flow) delProgress = p;
       });
       if (deleteChangedDisk(result)) {
@@ -537,7 +537,7 @@
       if (flow.docked) {
         const msg = e instanceof FsError ? e.message : String(e);
         jobs.finish(flow, cancelled ? 'canceled' : 'failed', {
-          summary: cancelled ? 'Hapus dibatalkan' : 'Hapus gagal',
+          summary: cancelled ? 'Delete cancelled' : 'Delete failed',
           result: cancelled
             ? undefined
             : {
@@ -564,11 +564,18 @@
     dialogs.endDeleteRun();
     busy = false;
     dialogs.close();
-    toast.show('Hapus berjalan di latar belakang (Alt+B)');
+    toast.show('Delete running in the background (Alt+B)');
   }
 
   function cancelDelete() {
-    if (delJob && !delJob.docked) jobs.cancel(delJob);
+    if (!delJob || delJob.docked) return;
+    jobs.cancel(delJob);
+    // The Cancel button is disabled now and drops the focus; keep it in the dialog so Esc
+    // (Background) still works while the job winds down.
+    const flow = delJob;
+    void tick().then(() => {
+      if (delJob === flow && !flow.docked) modalEl?.focus();
+    });
   }
 
   /** Esc cancels. A sync-driven delete holds the folder lease through its dialog: closing the
@@ -740,10 +747,10 @@
           <div class="job-fill" style:width={pct === null ? undefined : `${pct}%`}></div>
         </div>
         <p class="job-meta" role="status">
-          {delProgress.done} / {delProgress.total} item · {delProgress.entries} entri terhapus
+          {delProgress.done} / {delProgress.total} items · {delProgress.entries} entries deleted
         </p>
         {#if delProgress.currentName}<p class="path mono">{delProgress.currentName}</p>{/if}
-        {#if delJob.state === 'cancelling'}<p class="job-meta" role="status">Membatalkan...</p>{/if}
+        {#if delJob.state === 'cancelling'}<p class="job-meta" role="status">Cancelling...</p>{/if}
       {/if}
     {:else if d.kind === 'password'}
       <h2 id="dlg-title">Password required</h2>
@@ -1166,7 +1173,7 @@
             <button
               class="primary"
               data-testid="job-background"
-              title="Lanjutkan di latar belakang (Esc)"
+              title="Continue in the background (Esc)"
               onclick={() => deleteToBackground()}
             >
               <Mnemonic label="Back&ground" />

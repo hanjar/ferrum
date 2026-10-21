@@ -35,6 +35,8 @@ Planned: `create_entry`, `rename_entry`, `delete_entries` (task 10),
 Events: `delete://progress` `{requestId, done, total, currentName?, entries}` (throttled) and one `delete://done` `{requestId, result?: {report, cancelled, notProcessed, partial}, error?}`.
 `delete_cancel(requestId)` stops at the next item or, for a permanent delete of a folder, the next entry; `partial` lists folders left partly deleted, `notProcessed` untouched items.
 `delete_entries` (no progress) stays for plain callers and now runs off the UI thread.
+A permanent delete never enters a junction or symlink: each folder is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and checked on the handle (no `FILE_SHARE_DELETE`, so it cannot be swapped while it is emptied); links are removed as links. The walk is iterative, so very deep trees are safe.
+Known limit: the Recycle Bin call (`trash` crate, `FOF_WANTNUKEWARNING`) now runs on a worker thread without an owner window; the shell's "too large for the Recycle Bin" prompt may appear behind the main window (manual check, FER-581).
 
 ### File clipboard (FER-572)
 

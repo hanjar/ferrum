@@ -135,14 +135,14 @@ test.describe('async delete (FER-585)', () => {
     // Only a delete that takes a moment shows its progress.
     const bar = deleteDlg().getByTestId('delete-progress');
     await expect(bar).toBeVisible();
-    await expect(deleteDlg()).toContainText('1200 entri');
+    await expect(deleteDlg()).toContainText('1200 entries');
     await expect(deleteDlg()).toContainText('bigfolder');
 
     const listCalls = (await calls(page, 'list_dir')).length;
     await page.keyboard.press('Escape');
     await expect(page.locator('[role="dialog"]')).toHaveCount(0);
     expect(await calls(page, 'delete_cancel')).toHaveLength(0);
-    await expect(page.getByTestId('toast')).toContainText('latar belakang');
+    await expect(page.getByTestId('toast')).toContainText('background');
     await expect(page.getByTestId('ops-badge')).toHaveText('1');
     await expect(left().locator('[data-pane-list]')).toBeFocused();
 
@@ -157,7 +157,7 @@ test.describe('async delete (FER-585)', () => {
       currentName: 'bigfolder',
       entries: 5000,
     });
-    await expect(job).toContainText('5000 entri');
+    await expect(job).toContainText('5000 entries');
     await page.keyboard.press('Escape');
 
     await emit(page, 'delete://done', {
@@ -169,7 +169,7 @@ test.describe('async delete (FER-585)', () => {
         partial: [],
       },
     });
-    await expect(page.getByTestId('toast')).toContainText('Hapus selesai');
+    await expect(page.getByTestId('toast')).toContainText('Delete finished');
     await expect(page.locator('[role="dialog"]')).toHaveCount(0);
     await expect(page.getByTestId('ops-badge')).toHaveCount(0);
     await expect
@@ -192,7 +192,7 @@ test.describe('async delete (FER-585)', () => {
     await deleteDlg().getByRole('button', { name: 'Cancel' }).click();
     await expect.poll(async () => (await calls(page, 'delete_cancel')).length).toBe(1);
     expect((await calls(page, 'delete_cancel'))[0]!.args['requestId']).toBe(requestId);
-    await expect(deleteDlg()).toContainText('Membatalkan');
+    await expect(deleteDlg()).toContainText('Cancelling');
 
     await emit(page, 'delete://done', {
       requestId,

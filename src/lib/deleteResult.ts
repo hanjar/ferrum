@@ -21,7 +21,7 @@ export function deleteChangedDisk(r: DeleteJobResult): boolean {
 
 /** The paths that still exist because the job was cancelled: a retry continues with these. */
 export function deleteRemaining(r: DeleteJobResult): string[] {
-  return [...r.partial, ...r.notProcessed];
+  return [...new Set([...r.partial, ...r.notProcessed])];
 }
 
 /** Dialog text for a job that did not end cleanly. Empty when everything was deleted. */
@@ -29,10 +29,13 @@ export function deleteProblemText(r: DeleteJobResult): string {
   const parts: string[] = [];
   const { requested, deleted, failed } = r.report;
   if (r.cancelled) parts.push(`Cancelled: ${deleted} of ${requested} deleted.`);
-  if (r.partial.length > 0) {
-    const one = r.partial.length === 1;
+  // A folder that failed in the middle already says so in its failure text.
+  const failedPaths = new Set(failed.map((f) => f.path));
+  const partial = r.partial.filter((p) => !failedPaths.has(p));
+  if (partial.length > 0) {
+    const one = partial.length === 1;
     parts.push(
-      `${one ? '1 folder was' : `${r.partial.length} folders were`} only partly deleted and ${one ? 'still exists' : 'still exist'}: ${names(r.partial)}.`,
+      `${one ? '1 folder was' : `${partial.length} folders were`} only partly deleted and ${one ? 'still exists' : 'still exist'}: ${names(partial)}.`,
     );
   }
   if (r.notProcessed.length > 0) {
@@ -52,11 +55,11 @@ export function deleteProblemText(r: DeleteJobResult): string {
 export function deleteSummary(r: DeleteJobResult): string {
   const { requested, deleted, failed } = r.report;
   if (r.cancelled) {
-    const partial = r.partial.length > 0 ? `, ${r.partial.length} folder sebagian terhapus` : '';
-    return `Hapus dibatalkan: ${deleted}/${requested} terhapus${partial}`;
+    const partial = r.partial.length > 0 ? `, ${r.partial.length} folder partly deleted` : '';
+    return `Delete cancelled: ${deleted}/${requested} deleted${partial}`;
   }
-  if (failed.length > 0) return `Hapus gagal: ${failed.length} dari ${requested} item`;
-  return `Hapus selesai: ${deleted} item`;
+  if (failed.length > 0) return `Delete failed: ${failed.length} of ${requested} items`;
+  return `Delete finished: ${deleted} items`;
 }
 
 export function deleteOutcome(r: DeleteJobResult): 'done' | 'failed' | 'canceled' {

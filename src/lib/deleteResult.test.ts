@@ -18,11 +18,11 @@ const make = (over: Partial<DeleteJobResult> = {}, report = {}): DeleteJobResult
 });
 
 describe('deleteResult', () => {
-  it('a clean job has no problem text and a "selesai" summary', () => {
+  it('a clean job has no problem text and a "finished" summary', () => {
     const r = make();
     expect(deleteHasProblems(r)).toBe(false);
     expect(deleteProblemText(r)).toBe('');
-    expect(deleteSummary(r)).toBe('Hapus selesai: 3 item');
+    expect(deleteSummary(r)).toBe('Delete finished: 3 items');
     expect(deleteOutcome(r)).toBe('done');
   });
 
@@ -39,7 +39,7 @@ describe('deleteResult', () => {
     );
     expect(deleteProblemText(r)).toBe('2 of 3 could not be deleted: locked; gone');
     expect(deleteOutcome(r)).toBe('failed');
-    expect(deleteSummary(r)).toBe('Hapus gagal: 2 dari 3 item');
+    expect(deleteSummary(r)).toBe('Delete failed: 2 of 3 items');
   });
 
   it('a cancel reports deleted, partly deleted and untouched items and what to retry', () => {
@@ -52,7 +52,7 @@ describe('deleteResult', () => {
     expect(text).toContain('1 folder was only partly deleted and still exists: big.');
     expect(text).toContain('2 items were not touched.');
     expect(deleteOutcome(r)).toBe('canceled');
-    expect(deleteSummary(r)).toBe('Hapus dibatalkan: 1/3 terhapus, 1 folder sebagian terhapus');
+    expect(deleteSummary(r)).toBe('Delete cancelled: 1/3 deleted, 1 folder partly deleted');
     expect(deleteRemaining(r)).toEqual(['C:\\data\\big', 'C:\\data\\x', 'C:\\data\\y']);
   });
 
@@ -62,6 +62,20 @@ describe('deleteResult', () => {
     expect(
       deleteChangedDisk(make({ cancelled: true, notProcessed: ['C:\\d'] }, { deleted: 0 })),
     ).toBe(false);
+  });
+
+  it('a folder that failed in the middle is not listed twice', () => {
+    const r = make(
+      { partial: ['C:/d/mixed'] },
+      {
+        deleted: 0,
+        failed: [{ path: 'C:/d/mixed', code: 'io', message: 'locked (partly deleted)' }],
+      },
+    );
+    const text = deleteProblemText(r);
+    expect(text).not.toContain('only partly deleted');
+    expect(text).toContain('locked');
+    expect(deleteRemaining(make({ partial: ['a'], notProcessed: ['a', 'b'] }))).toEqual(['a', 'b']);
   });
 
   it('long lists are shortened', () => {
