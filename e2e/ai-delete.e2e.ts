@@ -186,4 +186,25 @@ test.describe('FER-576 AI delete card (mock IPC, mock provider)', () => {
       expect(sent, leak).not.toContain(leak);
     }
   });
+
+  test('FER-577 B4 keyboard: access letters reach the composer, none approves the delete; Esc returns to the opener', async () => {
+    await askToDelete();
+    await expect(chat(page).getByTestId('delete-warning')).toBeVisible();
+    const input = chat(page).getByRole('textbox', { name: 'Message to AI assistant' });
+    await page.keyboard.press('Alt+m');
+    await expect(input).toBeFocused();
+    // Every other letter and digit, except the plan's own Cancel (l) and Close (c).
+    for (const k of 'abdefghijknopqrstuvwxyz0123456789') await page.keyboard.press(`Alt+${k}`);
+    await expect(chat(page).getByTestId('delete-warning')).toBeVisible();
+    const confirm = chat(page).getByTestId('confirm-delete');
+    await expect(confirm).toBeEnabled();
+    await expect(confirm).not.toHaveAttribute('aria-keyshortcuts', /.+/);
+    const ran = await calls(page);
+    expect(ran).not.toContain('ai_authorize_execute');
+    expect(ran).not.toContain('ai_delete_to_recycle');
+    expect(ran).not.toContain('delete_entries');
+    await page.keyboard.press('Escape');
+    await expect(chat(page)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'AI assistant', exact: true })).toBeFocused();
+  });
 });

@@ -4,7 +4,7 @@
    * opens the editor, and offers Preview sync / Run now. Everything decided about a profile (its
    * readiness, validation, the delete guard, native confirmations) comes from the backend.
    */
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import Icon from '../Icon.svelte';
   import SyncProfileEditor from './SyncProfileEditor.svelte';
   import Mnemonic from '../Mnemonic.svelte';
@@ -50,6 +50,21 @@
   });
 
   const editor = $derived(store.editor);
+
+  // FER-577 (B4): a view change removes the focused button (New, Save, a confirmation) and the
+  // browser drops focus to <body>, where the access letters (they listen on this page) are dead.
+  // Put it back: the name field of a fresh editor, else the page itself.
+  $effect(() => {
+    void editor;
+    void store.discardTarget;
+    void store.runPrompt;
+    void store.confirmDeleteId;
+    void tick().then(() => {
+      if (!modalEl || modalEl.contains(document.activeElement)) return;
+      (editor ? modalEl.querySelector<HTMLElement>('#sp-name') : null)?.focus();
+      if (!modalEl.contains(document.activeElement)) modalEl.focus();
+    });
+  });
   const confirmDelete = $derived(
     store.confirmDeleteId ? store.summary(store.confirmDeleteId) : undefined,
   );

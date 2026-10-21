@@ -4,7 +4,7 @@
    * "Run history", the list, the schedule editor and the review screen. Shown only when the
    * automation UI feature flag is on (see featureFlags.ts).
    */
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import Icon from '../Icon.svelte';
   import AutomationList from './AutomationList.svelte';
   import AutomationEditor from './AutomationEditor.svelte';
@@ -56,6 +56,24 @@
   });
 
   const attention = $derived(store.attentionCount);
+
+  // FER-577 (B4): a view change removes the focused button and the browser drops focus to
+  // <body>, where the access letters (they listen on this page) are dead. Put it back: the
+  // name field of an editor, else the page itself.
+  $effect(() => {
+    void store.view;
+    void store.tab;
+    void store.discardPending;
+    void store.dialog;
+    void tick().then(() => {
+      if (!modalEl || modalEl.contains(document.activeElement)) return;
+      (store.view === 'editor'
+        ? modalEl.querySelector<HTMLElement>('input[aria-label="Name"]')
+        : null
+      )?.focus();
+      if (!modalEl.contains(document.activeElement)) modalEl.focus();
+    });
+  });
 
   // FER-577 (B4): the page is a full-page overlay. `use:dialog` gives it the Tab trap, Alt+letter
   // access keys, Esc and focus return; `modal: false` keeps the full-page shortcut rules

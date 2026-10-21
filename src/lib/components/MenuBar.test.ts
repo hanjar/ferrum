@@ -428,4 +428,25 @@ describe('FER-577: Alt+letter opens a menu', () => {
     modal.destroy();
     host.remove();
   });
+
+  it('a swallowed Alt+letter (access letter of a docked page) does not count as Alt alone', async () => {
+    render(MenuBar);
+    const host = document.createElement('button');
+    document.body.append(host);
+    host.focus();
+    // The page's own listener swallows Alt+O, as `use:dialog` does for an access letter.
+    host.addEventListener('keydown', (e) => e.key !== 'Alt' && e.stopPropagation());
+    fireEvent.keyDown(host, { key: 'Alt', altKey: true });
+    fireEvent.keyDown(host, { key: 'o', altKey: true });
+    fireEvent.keyUp(host, { key: 'o', altKey: true });
+    fireEvent.keyUp(host, { key: 'Alt' });
+    await tick();
+    expect(document.activeElement).toBe(host);
+    // A real Alt tap still focuses the menu bar.
+    fireEvent.keyDown(window, { key: 'Alt', altKey: true });
+    fireEvent.keyUp(window, { key: 'Alt' });
+    await tick();
+    expect(screen.getByRole('menubar').contains(document.activeElement)).toBe(true);
+    host.remove();
+  });
 });

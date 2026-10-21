@@ -60,6 +60,21 @@
     const scan = rootEl.querySelector<HTMLButtonElement>('[data-du-scan]');
     return scan && !scan.disabled ? scan : rootEl.querySelector<HTMLElement>('input');
   }
+  function focusTree(): void {
+    rootEl?.querySelector<HTMLElement>('[role="tree"]')?.focus();
+  }
+  // Keyboard users must never be left on <body>: a button that gets disabled (Scan while it
+  // runs, Cancel when it ends) or an address field that closes hands focus back to the tree,
+  // so the access letters (they listen on this section) keep working.
+  function onFocusOut(e: FocusEvent): void {
+    if (e.relatedTarget) return;
+    queueMicrotask(() => {
+      if (!duWorkspace.open || dialogs.current || !rootEl?.isConnected) return;
+      const a = document.activeElement;
+      if (a === document.body || a === null) focusTree();
+    });
+  }
+
   // Exit hands the keyboard back to the pane the workspace was entered from.
   onMount(() => {
     const pane = duWorkspace.entryPane;
@@ -181,6 +196,12 @@
     store.rootInput = val;
   }
 
+  /** The root field is done (Enter / Esc): back to the tree, not to <body>. */
+  function leaveAddress(e: Event): void {
+    (e.target as HTMLElement)?.blur();
+    focusTree();
+  }
+
   async function onAddressKeyDown(e: KeyboardEvent): Promise<void> {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -193,27 +214,27 @@
           const ok = await store.focusPathIfScanned(target);
           if (ok) {
             isEditingAddress = false;
-            (e.target as HTMLElement)?.blur();
+            leaveAddress(e);
             return;
           }
           // Path is within root scan, but not found in scan results!
           store.notice = 'tidak ditemukan di hasil scan';
           isEditingAddress = false;
           addressText = currentFocusPath;
-          (e.target as HTMLElement)?.blur();
+          leaveAddress(e);
           return;
         }
       }
       // Outside scan results or no data: trigger scan
       store.rootInput = target;
       isEditingAddress = false;
-      (e.target as HTMLElement)?.blur();
+      leaveAddress(e);
       void requestScan();
     } else if (e.key === 'Escape') {
       e.preventDefault(); // cancel the edit only; the next Esc exits the workspace
       isEditingAddress = false;
       addressText = currentFocusPath;
-      (e.target as HTMLElement)?.blur();
+      leaveAddress(e);
     }
   }
 
@@ -248,6 +269,7 @@
 <section
   class="duws"
   bind:this={rootEl}
+  onfocusout={onFocusOut}
   use:dialog={{ modal: false, trap: false, returnFocus: false, initial: initialFocus }}
   data-testid="du-workspace"
   aria-label="Disk usage — tree kiri, Treemap/Files kanan"

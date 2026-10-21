@@ -3,7 +3,7 @@
   // - Keyboard di dalam panel tidak diteruskan ke shortcut file manager (stopPropagation).
   // - Escape menutup via onclose; fokus kembali ke elemen pemicu saat panel dilepas.
   import { onDestroy, onMount, tick } from 'svelte';
-  import { dialog } from '../../dialogKit';
+  import { dialog, modalDepth } from '../../dialogKit';
   import Mnemonic from '../Mnemonic.svelte';
   import type { ChatStore } from '../../ai/chatStore.svelte';
   import { describeConnection } from '../../ai/providerErrors';
@@ -141,6 +141,18 @@
   }
   function send() {
     store.send(store.draft);
+    inputEl?.focus(); // Send (or any button) may get disabled: never strand the keyboard on <body>
+  }
+
+  // A button that becomes disabled (Send while busy, a card's Cancel) drops the focus to <body>,
+  // where the access letters (they listen on this panel) and Esc are dead. Take it back.
+  function onFocusOut(e: FocusEvent) {
+    if (e.relatedTarget) return;
+    queueMicrotask(() => {
+      const a = document.activeElement;
+      if ((a === document.body || a === null) && inputEl?.isConnected && modalDepth() === 0)
+        inputEl.focus();
+    });
   }
 
   /** FER-486: apa yang benar-benar dikirim untuk satu lampiran (teks aplikasi, tanpa isi). */
@@ -189,7 +201,13 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="chat" aria-label="AI assistant" onkeydown={onKeydown} use:dialog={panelOpts}>
+<aside
+  class="chat"
+  aria-label="AI assistant"
+  onkeydown={onKeydown}
+  onfocusout={onFocusOut}
+  use:dialog={panelOpts}
+>
   <header>
     <h2>AI assistant</h2>
     {#if configured}

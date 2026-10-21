@@ -90,6 +90,17 @@ describe('AI panel keyboard (FER-577 B4)', () => {
     expect(ex.submitted.map((s) => s.text)).toEqual(['two']);
   });
 
+  it('after Alt+S the keyboard stays in the composer (the Send button disables itself)', async () => {
+    const ex = new FakeExecutor();
+    const store = new ChatStore(ex);
+    render(ChatPanel, { store, onclose: vi.fn() });
+    const input = screen.getByLabelText('Message to AI assistant') as HTMLTextAreaElement;
+    await fireEvent.input(input, { target: { value: 'three' } });
+    await alt(input, 's');
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
   it('the delete confirm button has NO access letter, is not focused, and no Alt key approves it', async () => {
     const plan = samplePlan({
       capability: 'items.delete',

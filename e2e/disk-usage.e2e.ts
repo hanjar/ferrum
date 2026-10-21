@@ -1148,6 +1148,51 @@ test.describe('DSK-11 disk usage E2E — ONE session across the dual-pane grid (
     await expect(tm.locator('.tile').filter({ hasText: 'helix-engine' })).toBeVisible();
   });
 
+  test('FER-577 B4 keyboard only: enter, scan, tabs, zoom up, exit and back to the pane', async () => {
+    await page.locator('[data-pane="0"] [data-pane-list]').focus();
+    await page.keyboard.press('Alt+Shift+D');
+    await expect(workspace()).toBeVisible();
+    // No data yet: focus lands on Scan, so Enter would scan the suggested root.
+    await expect(workspace().getByRole('button', { name: 'Scan', exact: true })).toBeFocused();
+    await page.keyboard.press('Alt+o'); // access letter of the Root field
+    await expect(rootInput()).toBeFocused();
+    await rootInput().fill('D:\\');
+    await page.keyboard.press('Enter');
+    await expect(chip()).toHaveText('Complete', { timeout: 5_000 });
+    // Focus is never left on <body>: it is back on the tree.
+    await expect(tree().locator('.tree')).toBeFocused();
+
+    // Treemap | Files tabs: access letter selects, arrows rove.
+    await page.keyboard.press('Alt+f');
+    await expect(tablist().getByRole('tab', { name: 'Files' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await page.keyboard.press('ArrowLeft');
+    await expect(tablist().getByRole('tab', { name: 'Treemap' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(tablist().getByRole('tab', { name: 'Treemap' })).toBeFocused();
+
+    // Tree: Home, Down, Right (expand), Right (into the folder); Backspace climbs one level.
+    await tree().locator('.tree').focus();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    const crumbs = workspace().locator('.crumbs');
+    await expect(crumbs).toContainText('helix-engine');
+    await page.keyboard.press('Backspace');
+    await expect(crumbs).not.toContainText('helix-engine');
+    await expect(crumbs).toContainText('Projects');
+
+    // Alt+X = Exit; the entry pane's list gets the keyboard back.
+    await page.keyboard.press('Alt+x');
+    await expect(workspace()).toBeHidden();
+    await expect(page.locator('[data-pane="0"] [data-pane-list]')).toBeFocused();
+  });
+
   // Visual evidence for the FER-499 review: set DU_SHOT_DIR to a folder to capture.
   test('FER-499 screenshots (env DU_SHOT_DIR) dark + light', async ({ browser }) => {
     const dir = process.env.DU_SHOT_DIR;
