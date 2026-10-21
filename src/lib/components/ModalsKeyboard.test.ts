@@ -226,6 +226,20 @@ describe('Background Transfer Manager keyboard', () => {
     opener.remove();
   });
 
+  it('FER-577 N8: initial focus is searched inside the panel, not in the whole document', async () => {
+    const decoy = document.createElement('div');
+    decoy.className = 'panel';
+    decoy.innerHTML = '<div class="job" tabindex="0" data-decoy="1"></div>';
+    document.body.prepend(decoy);
+    render(OpsPanel);
+    seed();
+    await tick();
+    const real = document.querySelector<HTMLElement>('aside.panel .job')!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(real));
+    expect(document.activeElement?.getAttribute('data-decoy')).toBeNull();
+    decoy.remove();
+  });
+
   it('Alt+B (the opener, muted globally while a modal is open) closes it; Tab wraps', async () => {
     render(OpsPanel);
     seed();

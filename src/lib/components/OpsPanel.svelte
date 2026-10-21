@@ -68,13 +68,13 @@
   /** Remove a finished row and keep the keyboard inside the panel: focus goes to the neighbour
    *  row (or the panel itself when none is left), never to the body. */
   async function dismissJob(job: Job) {
-    const rows = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const rows = Array.from(panelEl?.querySelectorAll<HTMLElement>('.job') ?? []);
     const at = rows.findIndex((r) => r.dataset.jobId === job.id);
     jobs.remove(job);
     await tick();
-    const left = Array.from(document.querySelectorAll<HTMLElement>('.panel .job'));
+    const left = Array.from(panelEl?.querySelectorAll<HTMLElement>('.job') ?? []);
     const next = left[Math.min(Math.max(at, 0), left.length - 1)];
-    (next ?? document.querySelector<HTMLElement>('.panel'))?.focus();
+    (next ?? panelEl)?.focus();
   }
 
   function jobKey(e: KeyboardEvent, job: Job) {
@@ -100,11 +100,22 @@
 
   // FER-577: the panel is a modal. Esc and Alt+B (its own opener, muted globally while a modal
   // is open) close it; focus starts on the first job so the arrows work immediately.
+  // FER-577 (N8): queries are scoped to THIS panel node (not the document), captured by the
+  // `grab` action, which runs before `use:dialog` asks for the initial focus.
+  let panelEl: HTMLElement | undefined;
+  function grab(node: HTMLElement) {
+    panelEl = node;
+    return {
+      destroy() {
+        if (panelEl === node) panelEl = undefined;
+      },
+    };
+  }
   const dialogOpts = {
     onEscape: () => (ops.panelOpen = false),
     initial: () =>
-      document.querySelector<HTMLElement>('.panel .job') ??
-      document.querySelector<HTMLElement>('.panel button:not([disabled])'),
+      panelEl?.querySelector<HTMLElement>('.job') ??
+      panelEl?.querySelector<HTMLElement>('button:not([disabled])'),
   };
 
   function onPanelKey(e: KeyboardEvent) {
@@ -140,6 +151,7 @@
     aria-modal="true"
     aria-label="Background Transfer Manager"
     tabindex="-1"
+    use:grab
     use:dialog={dialogOpts}
     onkeydown={onPanelKey}
   >

@@ -506,9 +506,21 @@
     else if (
       (d?.kind === 'copy' || d?.kind === 'move') &&
       !(d.conflicts.length > 0 && policy === 'ask')
-    )
+    ) {
+      // FER-577 (N6): with conflicts and an overwriting policy (preference), a bare Enter on
+      // the dialog itself must not replace files at once. It only moves focus onto the chosen
+      // policy radio, so the user sees what will be overwritten; a second Enter (from the
+      // radio) or the Copy/Move button confirms.
+      if (
+        d.conflicts.length > 0 &&
+        (policy === 'overwrite' || policy === 'overwriteOlder') &&
+        t === modalEl
+      ) {
+        modalEl?.querySelector<HTMLElement>('input[name="policy"]:checked')?.focus();
+        return;
+      }
       void submitCopy(d.kind, d.paths, d.target, d.clipboardSequence);
-    else if (d?.kind === 'multipart') {
+    } else if (d?.kind === 'multipart') {
       if (d.info.kind === 'notFirst' && d.info.firstExists) dialogs.openFirstPart();
       else dialogs.close();
     }
