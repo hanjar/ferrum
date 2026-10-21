@@ -39,6 +39,17 @@ const mutMocks = vi.hoisted(() => ({
 }));
 vi.mock('../ipc/mutations', () => mutMocks);
 
+// FER-585: the dialog deletes through the async job; the mock above stands for its backend result.
+vi.mock('../ipc/deleteJobs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ipc/deleteJobs')>()),
+  runDelete: async (paths: string[], permanent: boolean) => ({
+    report: await mutMocks.deleteEntries(paths, permanent),
+    cancelled: false,
+    notProcessed: [],
+    partial: [],
+  }),
+}));
+
 // DSK-11: invalidation walks the ONE workspace store; this file exercises it
 // (a foreign instance built below proves the isolation).
 const { duWorkspace } = await import('./duWorkspace.svelte');

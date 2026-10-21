@@ -300,3 +300,41 @@ describe('FER-578 R1: one extract per destination folder', () => {
     expect(startC).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('FER-585: delete jobs', () => {
+  it('a delete job is counted while it runs, cancels through its own hook and docks with its outcome', () => {
+    const job = jobs.begin({ kind: 'delete', title: 'Delete', subject: '3 item' });
+    jobs.attempt(job, 'del-1');
+    const hook = vi.fn();
+    jobs.setCancelHook(job, hook);
+    jobs.update(job, { processedEntries: 1, totalEntries: 3, currentMember: 'big' });
+    expect(jobs.runningCount).toBe(1);
+    expect(jobPercent(job)).toBe(33);
+
+    jobs.dock(job);
+    expect(jobs.docked).toHaveLength(1);
+
+    jobs.cancel(job);
+    expect(job.state).toBe('cancelling');
+    expect(hook).toHaveBeenCalledTimes(1);
+    // The delete cancel is not an archive request.
+    expect(cancelMock).not.toHaveBeenCalled();
+    jobs.cancel(job); // idempotent
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    jobs.finish(job, 'canceled', { summary: 'Hapus dibatalkan: 1/3 terhapus' });
+    expect(job.state).toBe('canceled');
+    expect(jobs.runningCount).toBe(0);
+    expect(jobs.docked).toHaveLength(1); // stays in the dock with its outcome
+    expect(toast.message).toContain('Hapus dibatalkan');
+    jobs.clearFinished();
+    expect(jobs.list).toHaveLength(0);
+  });
+
+  it('a foreground delete that finishes leaves no trace', () => {
+    const job = jobs.begin({ kind: 'delete', title: 'Delete', subject: 'a.txt' });
+    jobs.attempt(job, 'del-2');
+    jobs.finish(job, 'done', { silent: true });
+    expect(jobs.list).toHaveLength(0);
+  });
+});

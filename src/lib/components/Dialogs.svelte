@@ -1,14 +1,23 @@
 <script lang="ts">
-  import {
-    createEntry,
-    deleteEntries,
-    enqueueCopy,
-    enqueueMove,
-    renameEntry,
-  } from '../ipc/mutations';
+  import { createEntry, enqueueCopy, enqueueMove, renameEntry } from '../ipc/mutations';
   import { clipboardFinishCut } from '../ipc/clipboardFiles';
+  import {
+    deleteCancel,
+    newDeleteRequestId,
+    runDelete,
+    type DeleteProgress,
+  } from '../ipc/deleteJobs';
+  import {
+    deleteChangedDisk,
+    deleteHasProblems,
+    deleteOutcome,
+    deleteProblemText,
+    deleteRemaining,
+    deleteSummary,
+  } from '../deleteResult';
+  import { toast } from '../stores/toastStore.svelte';
   import { ops } from '../stores/opsStore.svelte';
-  import { baseName, jobs } from '../stores/jobsStore.svelte';
+  import { baseName, jobs, type Job } from '../stores/jobsStore.svelte';
   import { untrack } from 'svelte';
   import { formatLabel, runPack, type PackFormat } from '../packService';
   import { dialog, roving } from '../dialogKit';
@@ -64,6 +73,13 @@
   // FER-510: true while the WinRAR probe is still running — the RAR option must never show
   // before the probe finished, even when the dialog opens directly with format 'rar'.
   let rarProbing = $state(false);
+
+  // FER-585: the delete this dialog confirmed. The job is a jobsStore entry; the dialog shows its
+  // progress only when it runs longer than DELETE_PROGRESS_DELAY_MS (a small delete never flashes).
+  const DELETE_PROGRESS_DELAY_MS = 300;
+  let delJob = $state<Job | null>(null);
+  let delProgress = $state<DeleteProgress | null>(null);
+  let delShowProgress = $state(false);
 
   /** The target path for format `fmt`: swap (or append) the archive extension. */
   function withArchiveExt(current: string, fmt: PackFormat): string {
@@ -126,6 +142,9 @@
       untrack(() => {
         error = '';
         busy = false;
+        delJob = null;
+        delProgress = null;
+        delShowProgress = false;
         permanent = d.kind === 'delete' ? d.permanent : false;
         const preferred = prefs.fileOperations.conflictPolicy;
         policy =
@@ -441,38 +460,124 @@
       });
   }
 
+  function deleteSubject(paths: string[]): string {
+    return paths.length === 1 ? baseName(paths[0]!) : `${paths.length} item`;
+  }
+
+  /**
+   * FER-585: the confirmed delete runs as a backend job (progress, cancel) registered in jobsStore.
+   * The confirmation and the permanent / Recycle Bin choice are already made. Esc / Background
+   * docks the job; its outcome is then kept in the dock instead of opening a dialog.
+   */
   async function submitDelete(paths: string[]) {
     busy = true;
-    if (d?.kind === 'delete') dialogs.beginDeleteRun(d);
+    const dlg = d;
+    if (dlg?.kind === 'delete') dialogs.beginDeleteRun(dlg);
+    const perm = permanent;
+    const requestId = newDeleteRequestId();
+    const flow = jobs.begin({
+      kind: 'delete',
+      title: perm ? 'Delete permanently' : 'Delete',
+      subject: deleteSubject(paths),
+    });
+    jobs.attempt(flow, requestId);
+    jobs.setCancelHook(flow, () => void deleteCancel(requestId));
+    jobs.update(flow, { totalEntries: paths.length });
+    delJob = flow;
+    delProgress = { done: 0, total: paths.length, entries: 0 };
+    delShowProgress = false;
+    const timer = setTimeout(() => {
+      if (delJob === flow && !flow.docked) delShowProgress = true;
+    }, DELETE_PROGRESS_DELAY_MS);
     try {
-      const report = await deleteEntries(paths, permanent);
-      if (report.failed.length < report.requested) {
-        // DSK-06.3: at least one path was deleted — a touching scan is stale.
+      const result = await runDelete(paths, perm, requestId, (p) => {
+        jobs.update(flow, {
+          processedEntries: p.done,
+          totalEntries: p.total,
+          currentMember: p.currentName,
+        });
+        flow.summary = `${p.entries} entri terhapus`;
+        if (delJob === flow) delProgress = p;
+      });
+      if (deleteChangedDisk(result)) {
+        // DSK-06.3: something was deleted - a touching scan is stale.
         noteScopeMutation(paths);
         activity.noteFsChange();
       }
-      if (report.failed.length > 0) {
-        error =
-          `${report.failed.length} of ${report.requested} could not be deleted: ` +
-          report.failed.map((f) => `${f.message}`).join('; ');
+      activePane()?.refresh();
+      const problems = deleteProblemText(result);
+      if (flow.docked) {
+        jobs.finish(flow, deleteOutcome(result), {
+          summary: deleteSummary(result),
+          result: deleteHasProblems(result)
+            ? {
+                label: 'Lihat hasil',
+                open: () => dialogs.open({ kind: 'error', title: 'Delete', message: problems }),
+              }
+            : undefined,
+        });
+        return;
+      }
+      jobs.finish(flow, deleteOutcome(result), { silent: true });
+      if (problems) {
+        error = problems;
         busy = false;
-        activePane()?.refresh();
+        // A cancel left items behind: another Delete continues with exactly those.
+        if (result.cancelled && dlg?.kind === 'delete') dlg.paths = deleteRemaining(result);
         return;
       }
       dialogs.close();
-      activePane()?.refresh();
     } catch (e) {
-      fail(e);
+      const cancelled = isCancelledError(e);
+      if (flow.docked) {
+        const msg = e instanceof FsError ? e.message : String(e);
+        jobs.finish(flow, cancelled ? 'canceled' : 'failed', {
+          summary: cancelled ? 'Hapus dibatalkan' : 'Hapus gagal',
+          result: cancelled
+            ? undefined
+            : {
+                label: 'Lihat galat',
+                open: () => dialogs.open({ kind: 'error', title: 'Delete', message: msg }),
+              },
+        });
+      } else {
+        jobs.finish(flow, cancelled ? 'canceled' : 'failed', { silent: true });
+        fail(e);
+      }
     } finally {
-      dialogs.endDeleteRun();
+      clearTimeout(timer);
+      if (delJob === flow) delShowProgress = false;
+      if (!flow.docked) dialogs.endDeleteRun();
     }
+  }
+
+  /** Esc / Background on a running delete: it carries on in the dock (Alt+B). */
+  function deleteToBackground() {
+    const flow = delJob;
+    if (!flow || flow.docked) return;
+    jobs.dock(flow);
+    dialogs.endDeleteRun();
+    busy = false;
+    dialogs.close();
+    toast.show('Hapus berjalan di latar belakang (Alt+B)');
+  }
+
+  function cancelDelete() {
+    if (delJob && !delJob.docked) jobs.cancel(delJob);
   }
 
   /** Esc cancels. A sync-driven delete holds the folder lease through its dialog: closing the
    *  dialog settles it and releases the lease while the delete is still running (FER-549
    *  R2-P3-3), so Esc is ignored while it runs. Other dialogs close on Escape as before. */
   function onEscape() {
-    if (busy && d?.kind === 'delete' && d.onSettled) return;
+    if (busy && d?.kind === 'delete') {
+      if (d.onSettled) return;
+      // FER-585: a running delete goes to the background (FER-578 convention); it does not stop.
+      if (delJob && !delJob.docked) {
+        deleteToBackground();
+        return;
+      }
+    }
     dialogs.close();
   }
 
@@ -614,6 +719,27 @@
         />
         <Mnemonic label="&Permanently (skip Recycle Bin)" />
       </label>
+      {#if busy && delJob && delShowProgress && delProgress}
+        <!-- FER-585: shown only when the delete takes longer than a moment. -->
+        {@const pct =
+          delProgress.total > 0 ? Math.round((delProgress.done / delProgress.total) * 100) : null}
+        <div
+          class="job-bar"
+          role="progressbar"
+          aria-label="Delete progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={pct ?? undefined}
+          data-testid="delete-progress"
+        >
+          <div class="job-fill" style:width={pct === null ? undefined : `${pct}%`}></div>
+        </div>
+        <p class="job-meta" role="status">
+          {delProgress.done} / {delProgress.total} item · {delProgress.entries} entri terhapus
+        </p>
+        {#if delProgress.currentName}<p class="path mono">{delProgress.currentName}</p>{/if}
+        {#if delJob.state === 'cancelling'}<p class="job-meta" role="status">Membatalkan...</p>{/if}
+      {/if}
     {:else if d.kind === 'password'}
       <h2 id="dlg-title">Password required</h2>
       <p class="path mono">{d.archivePath}</p>
@@ -928,8 +1054,9 @@
         <button
           class="ghost"
           data-autofocus={d.kind === 'quitConfirm' ? '' : undefined}
-          onclick={() => dialogs.close()}
-          disabled={busy}>Cancel</button
+          onclick={() => (d.kind === 'delete' && busy && delJob ? cancelDelete() : dialogs.close())}
+          disabled={(busy && !(d.kind === 'delete' && delJob && delShowProgress)) ||
+            delJob?.state === 'cancelling'}>Cancel</button
         >
         {#if d.kind === 'mkdir'}
           <button
@@ -1030,6 +1157,16 @@
             </button>
           {/if}
         {:else}
+          {#if d.kind === 'delete' && busy && delJob && delShowProgress && !d.onSettled}
+            <button
+              class="primary"
+              data-testid="job-background"
+              title="Lanjutkan di latar belakang (Esc)"
+              onclick={() => deleteToBackground()}
+            >
+              <Mnemonic label="Back&ground" />
+            </button>
+          {/if}
           <button class="primary danger" onclick={() => void submitDelete(d.paths)} disabled={busy}>
             {permanent ? 'Delete permanently' : 'Delete'}
           </button>
