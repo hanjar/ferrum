@@ -381,6 +381,13 @@
         });
       },
       newTab: () => void store.newTab(),
+      cycleTab: (delta) => {
+        const n = store.tabs.length;
+        if (n < 2) return;
+        selected.clear();
+        cursor = undefined;
+        store.selectTab((store.current + delta + n) % n);
+      },
       closeCurrentTab: () => void store.closeTab(store.current),
       goUp: () => void store.goUp(),
       openCursorEntry: () => {

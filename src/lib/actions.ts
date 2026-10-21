@@ -247,6 +247,24 @@ export const actions: Action[] = [
     run: () => activePane()?.newTab(),
   },
   {
+    // FER-577 (B4): tab switching from the keyboard. Ctrl+Tab does not clash with the plain Tab
+    // pane switch (pane.switch needs no Ctrl).
+    id: 'tab.next',
+    label: 'Next tab',
+    group: 'Tabs',
+    shortcut: { key: 'Tab', ctrlOrCmd: true },
+    available: () => activePane()?.cycleTab !== undefined,
+    run: () => activePane()?.cycleTab?.(1),
+  },
+  {
+    id: 'tab.prev',
+    label: 'Previous tab',
+    group: 'Tabs',
+    shortcut: { key: 'Tab', ctrlOrCmd: true, shift: true },
+    available: () => activePane()?.cycleTab !== undefined,
+    run: () => activePane()?.cycleTab?.(-1),
+  },
+  {
     id: 'tab.close',
     label: 'Close tab',
     group: 'Tabs',
@@ -1443,6 +1461,8 @@ export const menuGroups: {
       'show.selectedOnly',
       MENU_SEPARATOR,
       'tab.new',
+      'tab.next',
+      'tab.prev',
       MENU_SEPARATOR,
       'view.aiChat',
     ],
