@@ -145,9 +145,7 @@ describe('type-to-select', () => {
     await tick();
     fireEvent.keyDown(window, { key: 'r' });
     await tick();
-    expect(left.container.querySelector('.row.cursor')?.getAttribute('data-path')).not.toBe(
-      before,
-    );
+    expect(left.container.querySelector('.row.cursor')?.getAttribute('data-path')).not.toBe(before);
   });
 
   it('ignores modified keys and text input targets', async () => {

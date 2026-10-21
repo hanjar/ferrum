@@ -36,6 +36,9 @@
   import { cacheWarning, ageLabel } from './cacheAge';
   import { ui } from '../uiState.svelte';
   import { chooseScanMode, type OfferAnswer } from './fastScanOffer';
+  import { onMount, tick } from 'svelte';
+  import { dialog, roving } from '../dialogKit';
+  import Mnemonic from '../components/Mnemonic.svelte';
 
   const store = duWorkspace.store;
 
@@ -47,6 +50,23 @@
     e.preventDefault();
     duWorkspace.exit();
   }
+
+  // FER-577 (B4): where focus lands on entry. The tree when there is data to walk, else the
+  // Scan button (Enter starts the scan), else the root field. The panes are hidden meanwhile.
+  let rootEl: HTMLElement | undefined = $state();
+  function initialFocus(): HTMLElement | null {
+    if (!rootEl) return null;
+    if (hasData) return rootEl.querySelector<HTMLElement>('[role="tree"]');
+    const scan = rootEl.querySelector<HTMLButtonElement>('[data-du-scan]');
+    return scan && !scan.disabled ? scan : rootEl.querySelector<HTMLElement>('input');
+  }
+  // Exit hands the keyboard back to the pane the workspace was entered from.
+  onMount(() => {
+    const pane = duWorkspace.entryPane;
+    return () => {
+      void tick().then(() => paneById(pane)?.focusList?.());
+    };
+  });
 
   /** DSK-04.3 Reveal: leave the workspace, send the ENTRY pane's Files view
    *  to the entry's parent folder and select it there (the existing pane
@@ -190,6 +210,7 @@
       (e.target as HTMLElement)?.blur();
       void requestScan();
     } else if (e.key === 'Escape') {
+      e.preventDefault(); // cancel the edit only; the next Esc exits the workspace
       isEditingAddress = false;
       addressText = currentFocusPath;
       (e.target as HTMLElement)?.blur();
@@ -226,6 +247,8 @@
 
 <section
   class="duws"
+  bind:this={rootEl}
+  use:dialog={{ modal: false, trap: false, returnFocus: false, initial: initialFocus }}
   data-testid="du-workspace"
   aria-label="Disk usage — tree kiri, Treemap/Files kanan"
 >
@@ -243,7 +266,7 @@
       </button>
     {/if}
     <label class="root">
-      <span class="rlab">{hasData ? 'Path' : 'Root'}</span>
+      <span class="rlab"><Mnemonic label={hasData ? 'Pat&h' : 'R&oot'} /></span>
       <input
         class="mono"
         value={addressText}
@@ -267,8 +290,8 @@
     >
       ↑
     </button>
-    <button class="btn" disabled={!canScan} onclick={() => handleScanClick()}>
-      {hasData ? 'Rescan' : 'Scan'}
+    <button class="btn" data-du-scan disabled={!canScan} onclick={() => handleScanClick()}>
+      <Mnemonic label={hasData ? 'Re&scan' : '&Scan'} />
     </button>
     <button
       class="btn"
@@ -276,13 +299,13 @@
       title="Pilih sendiri: scan biasa, scan cepat (admin), atau Instan (indeks)"
       onclick={() => handleScanClick(true)}
     >
-      Pilihan scan…
+      <Mnemonic label="&Pilihan scan…" />
     </button>
     <button class="btn danger" disabled={!scanning} onclick={() => void store.cancel()}>
-      Cancel
+      <Mnemonic label="&Cancel" />
     </button>
     <span class="sep" aria-hidden="true"></span>
-    <div class="seg" role="group" aria-label="Metric ukuran">
+    <div class="seg" role="group" aria-label="Metric ukuran" use:roving={{ items: 'button' }}>
       <button
         class:sel={store.metric === 'logical'}
         disabled={scanning}
@@ -290,7 +313,7 @@
         title="Logical bytes — panjang konten menurut metadata (hardlink dihitung per path)"
         onclick={() => store.setMetric('logical')}
       >
-        Logical
+        <Mnemonic label="&Logical" />
       </button>
       <button
         class:sel={store.metric === 'allocated'}
@@ -299,7 +322,7 @@
         title="Allocated bytes — alokasi on-disk; tak tersedia = null, tidak diganti logical"
         onclick={() => store.setMetric('allocated')}
       >
-        Allocated
+        <Mnemonic label="&Allocated" />
       </button>
     </div>
     <!-- DSK-06.4: logical size is NOT recoverable space — standing note. -->
@@ -322,7 +345,7 @@
       onclick={() => duWorkspace.exit()}
       title="Kembali ke dual-pane Files (hasil scan dipertahankan)"
     >
-      Exit ke Files
+      <Mnemonic label="E&xit ke Files" />
     </button>
   </div>
 
@@ -383,14 +406,14 @@
     </div>
     <!-- Slot B (right pane): the Treemap|Files tabs, full size. -->
     <div class="slotRight" data-testid="du-slot-right">
-      <div class="tabs" role="tablist" aria-label="Tampilan kanan">
+      <div class="tabs" role="tablist" aria-label="Tampilan kanan" use:roving>
         <button
           role="tab"
           aria-selected={store.rightTab === 'treemap'}
           class:sel={store.rightTab === 'treemap'}
           onclick={() => setTab('treemap')}
         >
-          Treemap
+          <Mnemonic label="&Treemap" />
         </button>
         <button
           role="tab"
@@ -398,7 +421,7 @@
           class:sel={store.rightTab === 'files'}
           onclick={() => setTab('files')}
         >
-          Files
+          <Mnemonic label="&Files" />
         </button>
         <div class="crumbs" aria-label="Scope zoom">
           {#each store.crumbs() as crumb, i (crumb.id)}

@@ -255,7 +255,8 @@
     if (ui.activePane !== paneId || e.defaultPrevented) return;
     // FER-577 (N4): a dialog, the palette or a full page owns the keyboard; the list behind
     // it must not move its cursor while the user types an accelerator or a name.
-    if (modalDepth() > 0 || dialogs.current || ui.paletteOpen || fullPageOpen()) return;
+    if (modalDepth() > 0 || dialogs.current || ui.paletteOpen || fullPageOpen() || duWorkspace.open)
+      return;
     const target = e.target;
     if (
       e.ctrlKey ||

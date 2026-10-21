@@ -498,6 +498,11 @@
         }
         break;
       }
+      case 'Backspace':
+        // FER-577 (B4): Backspace = one level up (zoom out), like Backspace in the file list.
+        e.preventDefault();
+        if (store.zoomStack.length > 0 && store.phase !== 'scanning') store.zoomOut();
+        break;
       case 'Tab':
         // Native Tab order: keep the App-level FER-489 pane switch from pulling
         // focus away from the tree. Browser default (focus leaves the tree) stays.
