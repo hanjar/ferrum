@@ -34,7 +34,7 @@
   import { requiresDeleteConfirmation } from '../ipc/prefs';
   import { viewState } from '../stores/viewStateStore.svelte';
   import { comments } from '../stores/commentStore.svelte';
-  import { quitApp } from '../quit';
+  import { cancelAllAndQuit } from '../quit';
   // DSK-06.3: completed mutations mark a touching Disk usage scan stale —
   // observation only; the flows themselves are unchanged.
   import { noteScopeMutation, recordQueuedMove } from '../diskUsage/invalidation';
@@ -344,7 +344,7 @@
 
   /** F2-27: confirmed quit — closes the (last) window, ending the app. */
   function confirmQuit() {
-    void quitApp();
+    void cancelAllAndQuit();
     dialogs.close();
   }
 
@@ -763,7 +763,7 @@
       <p>
         {d.operations}
         {d.operations === 1 ? 'operation is' : 'operations are'} still running. Quitting now cancels the
-        pending work.
+        pending work; partial files are removed where possible.
       </p>
     {:else if d.kind === 'fastScanOffer'}
       <h2 id="dlg-title">Scan lebih cepat?</h2>
@@ -1009,7 +1009,7 @@
             <Mnemonic label="&Save" />
           </button>
         {:else if d.kind === 'quitConfirm'}
-          <button class="primary danger" onclick={confirmQuit}>Quit anyway</button>
+          <button class="primary danger" onclick={confirmQuit}>Quit &amp; cancel</button>
         {:else if d.kind === 'fastScanOffer'}
           <button
             class="ghost"

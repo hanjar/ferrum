@@ -4,7 +4,6 @@ import { modalDepth } from './dialogKit';
 import { activePane, inactivePane } from './stores/panesRegistry.svelte';
 import { dialogs } from './stores/dialogStore.svelte';
 import { ops } from './stores/opsStore.svelte';
-import { jobs } from './stores/jobsStore.svelte';
 import { baseName } from './stores/paneStore.svelte';
 import { restoreSelection, saveSelection } from './stores/selectionMemory.svelte';
 import { viewState } from './stores/viewStateStore.svelte';
@@ -64,7 +63,7 @@ import { columns } from './stores/columnsStore.svelte';
 import { separateTree } from './stores/separateTreeStore.svelte';
 import { duWorkspace } from './diskUsage/duWorkspace.svelte';
 import { openSearchSeparate } from './searchSeparate';
-import { quitApp } from './quit';
+import { requestQuit } from './quit';
 import { recentCommands } from './stores/recentCommands.svelte';
 import { aiChatHost } from './ai/aiChatHost.svelte';
 import { addSelectionToChat, addToChatTargets, askAgentAboutSelection } from './ai/addToChat';
@@ -464,13 +463,8 @@ export const actions: Action[] = [
     label: 'Quit',
     group: 'File',
     run: () => {
-      // FER-578: background jobs (extract, pack, test, verify) count like queued operations.
-      const active = ops.active.length + jobs.runningCount;
-      if (active > 0) {
-        dialogs.open({ kind: 'quitConfirm', operations: active });
-        return;
-      }
-      void quitApp();
+      // FER-583: same flow as the window close button / Alt+F4 (see quit.ts).
+      requestQuit();
     },
   },
   // ── F2-12 archive operations (TC parity) ───────────────────────────────
