@@ -9,6 +9,7 @@
    */
   import { onMount } from 'svelte';
   import { dialog as dialogAction } from '../../dialogKit';
+  import Mnemonic from '../Mnemonic.svelte';
   import type { AutomationStore, DialogState } from '../../stores/automationStore.svelte';
 
   let { store, dialog }: { store: AutomationStore; dialog: DialogState } = $props();
@@ -25,7 +26,11 @@
 
   // FER-577: Esc / Tab trap / modalDepth from the shared dialog action. The safe default button
   // keeps the initial focus (onMount above); Esc stays local so it cannot reach a page behind.
-  const dialogOpts = { onEscape: () => store.closeDialog(), initial: () => defaultBtn };
+  const dialogOpts = {
+    isolate: true,
+    onEscape: () => store.closeDialog(),
+    initial: () => defaultBtn,
+  };
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -47,7 +52,9 @@
         rerun.
       </p>
       <div class="buttons">
-        <button type="button" disabled={busy} onclick={() => store.closeDialog()}>Cancel</button>
+        <button type="button" disabled={busy} onclick={() => store.closeDialog()}
+          ><Mnemonic label="&Cancel" /></button
+        >
         <button
           type="button"
           class="danger"
@@ -63,7 +70,7 @@
           disabled={busy}
           onclick={() => void store.pauseWith('finish')}
         >
-          Pause &amp; let it finish
+          <Mnemonic label="Pause && let it &finish" />
         </button>
       </div>
     {:else}
@@ -81,7 +88,7 @@
           disabled={busy}
           onclick={() => store.closeDialog()}
         >
-          Keep running
+          <Mnemonic label="&Keep running" />
         </button>
         <button
           type="button"

@@ -227,6 +227,21 @@ describe('AutomationDetail (MH-5)', () => {
     );
   });
 
+  it('FER-577 B4 R1: Alt+letters under an open Stop dialog never reach the page behind; Run now has no access letter', async () => {
+    const { store, backend } = setup({
+      stopRun: vi.fn(async () => ({ status: 'requested' as const })),
+    });
+    const view = within(await openDetail(store));
+    expect(view.getByRole('button', { name: 'Run now' }).hasAttribute('data-mnemonic')).toBe(false);
+    await fireEvent.click(view.getByRole('button', { name: 'Stop current run' }));
+    const dlg = await screen.findByRole('alertdialog');
+    for (const k of 'abcdefghijklmnopqrstuvwxyz')
+      await fireEvent.keyDown(dlg, { key: k, altKey: true });
+    expect(backend.runNow).not.toHaveBeenCalled();
+    expect(backend.stopRun).not.toHaveBeenCalled();
+    expect(store.view).toBe('detail');
+  });
+
   it('Stop current run opens the Stop dialog with the no-rollback note; Stop run sends stop_run', async () => {
     const { store, backend } = setup({
       stopRun: vi.fn(async () => ({ status: 'requested' as const })),

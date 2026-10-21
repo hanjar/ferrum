@@ -484,3 +484,42 @@ describe('FER-577 B3 additions', () => {
     act.destroy();
   });
 });
+
+describe('FER-577 B4 R1: nested modals', () => {
+  it('a page dialog ignores access letters from a nested aria-modal (even without isolate)', () => {
+    const host = html(
+      '<div tabindex="-1"><button data-mnemonic="n" id="page">Run now</button>' +
+        '<div role="alertdialog" aria-modal="true" tabindex="-1"><button id="inner">Cancel</button></div></div>',
+    );
+    const page = host.firstElementChild as HTMLElement;
+    const click = vi.fn();
+    page.querySelector('#page')!.addEventListener('click', click);
+    const action = dialog(page, { modal: false });
+    page
+      .querySelector<HTMLElement>('#inner')!
+      .dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'n', altKey: true, bubbles: true, cancelable: true }),
+      );
+    expect(click).not.toHaveBeenCalled();
+    page.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'n', altKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(click).toHaveBeenCalledTimes(1);
+    action.destroy();
+  });
+
+  it('roving ignores arrows pressed inside a nested aria-modal', () => {
+    const host = html(
+      '<ul><li class="row" tabindex="0"><div role="alertdialog" aria-modal="true"><button id="c">Cancel</button></div></li><li class="row" tabindex="-1"></li></ul>',
+    );
+    const ul = host.firstElementChild as HTMLElement;
+    const r = roving(ul, { items: 'li.row', orientation: 'vertical', select: false });
+    const cancel = ul.querySelector<HTMLElement>('#c')!;
+    cancel.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+    cancel.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(cancel);
+    r.destroy();
+  });
+});

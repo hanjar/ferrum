@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { roving } from '../dialogKit';
   import type { TabState } from '../stores/paneStore.svelte';
   import type { TabWidth } from '../uiState.svelte';
 
@@ -24,7 +25,9 @@
   } = $props();
 </script>
 
-<div class="tabs" role="tablist" class:fixed={tabWidth === 'fixed'}>
+<!-- FER-577 (B4): arrows / Home / End move between tabs and select them (one tab stop); Ctrl+Tab,
+     Ctrl+Shift+Tab and Ctrl+W are registry shortcuts (tab.next, tab.prev, tab.close). -->
+<div class="tabs" role="tablist" class:fixed={tabWidth === 'fixed'} use:roving>
   {#each tabs as t, i (i)}
     <button
       role="tab"
@@ -46,6 +49,7 @@
       <span class="label">{t.label}</span>
       <span
         class="close"
+        aria-hidden="true"
         title="Close tab"
         onclick={(e) => {
           e.stopPropagation();

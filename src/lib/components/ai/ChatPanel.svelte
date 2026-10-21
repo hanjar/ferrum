@@ -3,6 +3,8 @@
   // - Keyboard di dalam panel tidak diteruskan ke shortcut file manager (stopPropagation).
   // - Escape menutup via onclose; fokus kembali ke elemen pemicu saat panel dilepas.
   import { onDestroy, onMount, tick } from 'svelte';
+  import { dialog, modalDepth } from '../../dialogKit';
+  import Mnemonic from '../Mnemonic.svelte';
   import type { ChatStore } from '../../ai/chatStore.svelte';
   import { describeConnection } from '../../ai/providerErrors';
   import { providerStatus, type ProviderStatus } from '../../ai/providerStatus.svelte';
@@ -76,10 +78,13 @@
 
   let inputEl = $state<HTMLTextAreaElement | undefined>();
   let logEl = $state<HTMLDivElement | undefined>();
-  let trigger: HTMLElement | null = null;
+  // Captured while the component is created: `use:dialog` moves focus into the panel before onMount runs.
+  // svelte-ignore state_referenced_locally
+  let trigger: HTMLElement | null =
+    returnFocus ??
+    (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null);
 
   onMount(() => {
-    trigger = returnFocus ?? (document.activeElement as HTMLElement | null);
     inputEl?.focus();
     // FER-490: daftar agent CLI (deteksi sekali di backend) untuk pilihan tujuan.
     if (store.canUseAgents) void agentCli.load();
@@ -112,11 +117,19 @@
     store.runs.some((r) => r.state === 'planning' || r.state === 'resolving'),
   );
 
+  // FER-577 (B4): docked, non-modal panel. `use:dialog` adds Alt+letter access keys (they never
+  // reach the file-manager shortcuts) and Esc; Tab is NOT trapped, so Tab walks the composer,
+  // the cards and then leaves the panel like any other docked pane. The panel hands focus back
+  // itself (onDestroy), hence returnFocus: false.
+  const panelOpts = {
+    modal: false,
+    trap: false,
+    returnFocus: false,
+    initial: () => inputEl ?? null,
+    onEscape: () => onclose(),
+  };
+
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onclose();
-    }
     // Shortcut file manager tidak boleh tertrigger dari dalam panel chat.
     e.stopPropagation();
   }
@@ -128,6 +141,22 @@
   }
   function send() {
     store.send(store.draft);
+    inputEl?.focus(); // Send (or any button) may get disabled: never strand the keyboard on <body>
+  }
+
+  // A button that becomes disabled (Send while busy, a card's Cancel) drops the focus to <body>,
+  // where the access letters (they listen on this panel) and Esc are dead. Take it back.
+  function onFocusOut(e: FocusEvent) {
+    if (e.relatedTarget) return;
+    const lost = e.target as HTMLElement | null;
+    queueMicrotask(() => {
+      // Only when the control that had focus vanished or got disabled; a click on some other
+      // non-focusable area is the user's choice and must not pull focus back.
+      if (lost?.isConnected && !(lost as HTMLButtonElement).disabled) return;
+      const a = document.activeElement;
+      if ((a === document.body || a === null) && inputEl?.isConnected && modalDepth() === 0)
+        inputEl.focus();
+    });
   }
 
   /** FER-486: apa yang benar-benar dikirim untuk satu lampiran (teks aplikasi, tanpa isi). */
@@ -176,7 +205,13 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="chat" aria-label="AI assistant" onkeydown={onKeydown}>
+<aside
+  class="chat"
+  aria-label="AI assistant"
+  onkeydown={onKeydown}
+  onfocusout={onFocusOut}
+  use:dialog={panelOpts}
+>
   <header>
     <h2>AI assistant</h2>
     {#if configured}
@@ -189,14 +224,16 @@
       ></span>
     {/if}
     <button type="button" class="ghost" aria-label="Close AI assistant" onclick={onclose}
-      >Close</button
+      ><Mnemonic label="&Close" /></button
     >
   </header>
 
   {#if !configured && onopensettings}
     <div class="setup" role="status" data-testid="provider-unconfigured">
       <span>The AI provider is not configured yet.</span>
-      <button type="button" class="ghost" onclick={onopensettings}>Open settings</button>
+      <button type="button" class="ghost" onclick={onopensettings}
+        ><Mnemonic label="&Open settings" /></button
+      >
     </div>
   {/if}
 
@@ -233,7 +270,9 @@
           {#if m.pending && m.agent}
             <div class="agentStatus" role="status" data-testid="agent-status">
               <span>{m.status ?? 'agent sedang membaca…'}</span>
-              <button type="button" class="ghost" onclick={() => store.cancelAsk()}>Batal</button>
+              <button type="button" class="ghost" onclick={() => store.cancelAsk()}
+                ><Mnemonic label="Ba&tal" /></button
+              >
             </div>
             {#if m.text}<MarkdownText text={m.text} />{/if}
           {:else if m.pending}
@@ -351,6 +390,8 @@
       bind:value={store.draft}
       rows="2"
       aria-label="Message to AI assistant"
+      data-mnemonic="m"
+      aria-keyshortcuts="Alt+M"
       placeholder={targetAgent
         ? store.attachments.length
           ? `Tanya ${targetAgent.name} tentang lampiran…`
@@ -366,9 +407,13 @@
       onkeydown={onInputKey}
     ></textarea>
     {#if store.asking}
-      <button type="button" class="ghost" onclick={() => store.cancelAsk()}>Cancel</button>
+      <button type="button" class="ghost" onclick={() => store.cancelAsk()}
+        ><Mnemonic label="Ca&ncel" /></button
+      >
     {/if}
-    <button type="submit" class="primary" disabled={!store.canSend(store.draft)}> Send </button>
+    <button type="submit" class="primary" disabled={!store.canSend(store.draft)}
+      ><Mnemonic label="&Send" /></button
+    >
   </form>
 </aside>
 

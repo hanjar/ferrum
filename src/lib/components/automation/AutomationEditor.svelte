@@ -9,6 +9,8 @@
    */
   import ProfilePicker from '../sync/ProfilePicker.svelte';
   import WatchPreview from './WatchPreview.svelte';
+  import Mnemonic from '../Mnemonic.svelte';
+  import { roving } from '../../dialogKit';
   import type { AutomationStore, EditorState } from '../../stores/automationStore.svelte';
   import {
     IDLE_MAX,
@@ -99,7 +101,7 @@
 <div class="editor" data-testid="automation-editor">
   <section>
     <label class="field">
-      <span class="lbl">Name</span>
+      <span class="lbl"><Mnemonic label="&Name" /></span>
       <input
         type="text"
         value={form.name}
@@ -135,8 +137,8 @@
 
   <section>
     <div class="lbl">Trigger</div>
-    <div class="seg" role="radiogroup" aria-label="Trigger">
-      {#each [['schedule', 'On a schedule'], ['watch', 'When files change']] as [value, text] (value)}
+    <div class="seg" role="radiogroup" aria-label="Trigger" use:roving>
+      {#each [['schedule', 'On a &schedule'], ['watch', 'When &files change']] as [value, text] (value)}
         <button
           type="button"
           role="radio"
@@ -145,7 +147,7 @@
           disabled={!!editor.id && form.kind !== value}
           onclick={() => store.changeForm({ kind: value as 'schedule' | 'watch' })}
         >
-          {text}
+          <Mnemonic label={text} />
         </button>
       {/each}
     </div>
@@ -155,14 +157,14 @@
     <section data-testid="watch-fields">
       <div class="lbl">Watched folders</div>
       <div class="checks-col">
-        {#each [{ side: 'left' as const, text: 'Watch the left folder', path: chosen?.left, on: form.watchLeft }, { side: 'right' as const, text: 'Watch the right folder', path: chosen?.right, on: form.watchRight }] as r (r.side)}
+        {#each [{ side: 'left' as const, text: 'Watch the &left folder', path: chosen?.left, on: form.watchLeft }, { side: 'right' as const, text: 'Watch the &right folder', path: chosen?.right, on: form.watchRight }] as r (r.side)}
           {@const off = unsupported[r.side]}
           <label class="chk" class:off data-root={r.side}>
             <input
               type="checkbox"
               checked={r.on}
               disabled={off}
-              aria-label={r.text}
+              aria-label={r.text.replace('&', '')}
               onchange={(e) =>
                 store.changeForm(
                   r.side === 'left'
@@ -171,7 +173,7 @@
                 )}
             />
             <span class="chk-main">
-              <span>{r.text}</span>
+              <span><Mnemonic label={r.text} /></span>
               {#if r.path}<span class="path" title={r.path}>{r.path}</span>{/if}
               {#if off}<span class="reason" data-testid="unsupported-{r.side}"
                   >{UNSUPPORTED_ROOT_NOTE}</span
@@ -205,7 +207,7 @@
 
       <div class="grid">
         <div class="field" role="group" aria-label="Idle delay">
-          <span class="lbl">Idle delay (seconds)</span>
+          <span class="lbl"><Mnemonic label="&Idle delay (seconds)" /></span>
           <span class="stepper">
             <button
               type="button"
@@ -233,7 +235,7 @@
           <span class="hint">{IDLE_MIN} to {IDLE_MAX} s of quiet before a run starts</span>
         </div>
         <div class="field" role="group" aria-label="Longest wait">
-          <span class="lbl">Longest wait (minutes)</span>
+          <span class="lbl"><Mnemonic label="Longest &wait (minutes)" /></span>
           <span class="stepper">
             <button
               type="button"
@@ -270,8 +272,8 @@
   {#if !watch}
     <section>
       <div class="lbl">Schedule</div>
-      <div class="seg" role="radiogroup" aria-label="Frequency">
-        {#each [['once', 'Once'], ['daily', 'Daily'], ['weekly', 'Weekly']] as [value, text] (value)}
+      <div class="seg" role="radiogroup" aria-label="Frequency" use:roving>
+        {#each [['once', '&Once'], ['daily', '&Daily'], ['weekly', 'Wee&kly']] as [value, text] (value)}
           <button
             type="button"
             role="radio"
@@ -279,7 +281,7 @@
             class:on={form.freq === value}
             onclick={() => store.changeForm({ freq: value as 'once' | 'daily' | 'weekly' })}
           >
-            {text}
+            <Mnemonic label={text} />
           </button>
         {/each}
       </div>
@@ -287,7 +289,7 @@
       <div class="grid">
         {#if form.freq === 'once'}
           <label class="field">
-            <span class="lbl">Date</span>
+            <span class="lbl"><Mnemonic label="D&ate" /></span>
             <input
               type="date"
               value={form.date}
@@ -299,7 +301,7 @@
           </label>
         {/if}
         <label class="field">
-          <span class="lbl">Time (24 hours)</span>
+          <span class="lbl"><Mnemonic label="&Time (24 hours)" /></span>
           <input
             type="time"
             value={form.time}
@@ -308,7 +310,7 @@
           />
         </label>
         <label class="field">
-          <span class="lbl">Time zone</span>
+          <span class="lbl"><Mnemonic label="Time &zone" /></span>
           <input
             type="text"
             value={form.tz}
@@ -364,7 +366,7 @@
 
   <section>
     <div class="lbl">Runtime</div>
-    <div class="cards" role="radiogroup" aria-label="Runtime">
+    <div class="cards" role="radiogroup" aria-label="Runtime" use:roving>
       <button
         type="button"
         role="radio"
@@ -410,7 +412,7 @@
             checked={form.missed === 'skip'}
             onchange={() => store.changeForm({ missed: 'skip' })}
           />
-          Skip it (default)
+          <Mnemonic label="Ski&p it (default)" />
         </label>
         <label>
           <input
@@ -419,7 +421,7 @@
             checked={form.missed === 'runOnce'}
             onchange={() => store.changeForm({ missed: 'runOnce' })}
           />
-          Run once when available again
+          <Mnemonic label="Run once when a&vailable again" />
         </label>
       </div>
     </section>
@@ -489,6 +491,7 @@
   {/if}
 
   <footer class="footer">
+    <!-- Cancel has no access letter: Esc is Cancel. -->
     <button type="button" onclick={() => store.leaveEditor()}>Cancel</button>
     <button
       type="button"
@@ -496,7 +499,7 @@
       disabled={!store.canContinue}
       onclick={() => store.continueToReview()}
     >
-      Continue to review
+      <Mnemonic label="&Continue to review" />
     </button>
   </footer>
 </div>

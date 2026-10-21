@@ -15,6 +15,7 @@
   import { describeConnection } from '../../ai/providerErrors';
   import { providerStatus, type ProviderStatus } from '../../ai/providerStatus.svelte';
   import MarkdownText from './MarkdownText.svelte';
+  import Mnemonic from '../Mnemonic.svelte';
 
   let {
     run,
@@ -53,6 +54,12 @@
 
   let conflictPage = $state(0);
   let showItems = $state(false);
+
+  // FER-577 (B4): access letters only on the card that is still waiting for the user (the live
+  // run), so history cards never duplicate them. The delete confirm button NEVER has one
+  // (FER-576): it is reachable with Tab only and is not the default focus.
+  const live = $derived(store.activeRun?.runId === run.runId);
+  const mn = (label: string) => (live ? label : label.replace('&', ''));
 
   const plan = $derived(run.plan);
   // FER-576: a delete card is a WARNING card (never auto-approved; Recycle Bin only).
@@ -162,7 +169,9 @@
   {#if providerActions.length}
     <div class="actions" data-testid="provider-error-actions">
       {#if providerActions.includes('retry')}
-        <button type="button" onclick={() => store.retry(run.runId)}>Coba lagi</button>
+        <button type="button" onclick={() => store.retry(run.runId)}
+          ><Mnemonic label={mn('Coba lag&i')} /></button
+        >
       {/if}
       {#if providerActions.includes('settings')}
         <button type="button" class="ghost" onclick={() => aiChatHost.openSettings()}
@@ -428,7 +437,7 @@
         aria-busy={run.checking}
         onclick={() => void store.checkResult(run.runId)}
       >
-        {run.checking ? 'Checking…' : 'Check result'}
+        {#if run.checking}Checking…{:else}<Mnemonic label={mn('Chec&k result')} />{/if}
       </button>
     </div>
   {/if}
@@ -446,7 +455,7 @@
           disabled={run.cancelRequested}
           onclick={() => store.cancel(run.runId)}
         >
-          Cancel
+          <Mnemonic label={mn('Cance&l')} />
         </button>
       {/if}
       {#if run.state === 'awaitingApproval'}
@@ -457,11 +466,13 @@
           disabled={!run.canApprove || (isDelete && !namesShown)}
           onclick={() => store.approve(run.runId)}
         >
-          {isDelete ? 'Pindahkan ke Recycle Bin' : 'Run'}
+          {#if isDelete}Pindahkan ke Recycle Bin{:else}<Mnemonic label={mn('&Run')} />{/if}
         </button>
       {/if}
       {#if editable && !isDelete}
-        <button type="button" class="ghost" onclick={() => store.edit(run.runId)}>Edit</button>
+        <button type="button" class="ghost" onclick={() => store.edit(run.runId)}
+          ><Mnemonic label={mn('&Edit')} /></button
+        >
       {/if}
       {#if !isDelete || active}
         <button
@@ -470,7 +481,7 @@
           disabled={run.cancelRequested}
           onclick={() => store.cancel(run.runId)}
         >
-          {active ? 'Stop' : 'Cancel'}
+          <Mnemonic label={mn(active ? 'Sto&p' : 'Cance&l')} />
         </button>
       {/if}
     </div>

@@ -41,6 +41,7 @@ vi.mock('../ipc/diskUsage', () => ({
 import DiskUsageWorkspace from './DiskUsageWorkspace.svelte';
 import { duWorkspace } from './duWorkspace.svelte';
 import { ui } from '../uiState.svelte';
+import { duplicateMnemonics } from '../dialogKit';
 import { dialogs } from '../stores/dialogStore.svelte';
 import { registerPane } from '../stores/panesRegistry.svelte';
 import type { DiskUsageChildItem, DiskUsageSnapshot } from '../ipc/types';
@@ -980,5 +981,125 @@ describe('DiskUsageWorkspace — FER-574 entry follows the ACTIVE pane', () => {
     expect(duWorkspace.store.root).toBe('C:\\left');
     expect(duWorkspace.store.rootInput).toBe('D:\\right');
     expect(duMocks.cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe('DiskUsageWorkspace — keyboard (FER-577 B4)', () => {
+  function seed(): void {
+    const store = duWorkspace.store;
+    store.testData('s1', 'complete', 'C:\\left');
+    store.snapshot = snapshotFixture('s1', 'C:\\left');
+    store.treeNodes['C:\\left'] = {
+      items: [childItem('C:\\left\\docs'), childItem('C:\\left\\pics')],
+      total: 2,
+      loading: false,
+      loadingMore: false,
+      error: null,
+      loadId: 1,
+    };
+  }
+  const key = (el: Element | Window, k: string, init: KeyboardEventInit = {}) =>
+    fireEvent.keyDown(el, { key: k, ...init });
+
+  it('focuses the tree on entry when there is data, the Scan button when there is none', async () => {
+    seed();
+    const withData = render(DiskUsageWorkspace);
+    await tick();
+    expect(document.activeElement?.getAttribute('role')).toBe('tree');
+    withData.unmount();
+    duWorkspace.store.reset();
+    duWorkspace.store.rootInput = 'C:\\left';
+    const empty = render(DiskUsageWorkspace);
+    await tick();
+    expect(document.activeElement?.textContent?.trim()).toBe('Scan');
+    empty.unmount();
+  });
+
+  it('every header control has a unique access letter', () => {
+    seed();
+    const { getByTestId } = render(DiskUsageWorkspace);
+    const ws = getByTestId('du-workspace');
+    expect(duplicateMnemonics(ws)).toEqual([]);
+    const keys = [...ws.querySelectorAll<HTMLElement>('[data-mnemonic]')].map((e) => ({
+      k: e.dataset.mnemonic,
+      t: e.textContent?.trim(),
+    }));
+    expect(keys.map((e) => e.t)).toEqual(
+      expect.arrayContaining([
+        'Path',
+        'Rescan',
+        'Pilihan scan…',
+        'Cancel',
+        'Logical',
+        'Allocated',
+        'Exit ke Files',
+        'Treemap',
+        'Files',
+      ]),
+    );
+  });
+
+  it('Alt+X exits, Alt+F selects the Files tab, Alt+S starts a (re)scan', async () => {
+    seed();
+    const { getByTestId, getByRole } = render(DiskUsageWorkspace);
+    const ws = getByTestId('du-workspace');
+    const tree = ws.querySelector('[role="tree"]') as HTMLElement;
+    key(tree, 'f', { altKey: true });
+    await tick();
+    expect(getByRole('tab', { name: 'Files' }).getAttribute('aria-selected')).toBe('true');
+    key(tree, 'x', { altKey: true });
+    expect(duWorkspace.open).toBe(false);
+  });
+
+  it('the Treemap|Files tabs rove with arrows, Home and End', async () => {
+    seed();
+    const { getByRole } = render(DiskUsageWorkspace);
+    const treemap = getByRole('tab', { name: 'Treemap' });
+    const files = getByRole('tab', { name: 'Files' });
+    treemap.focus();
+    key(treemap, 'ArrowRight');
+    await tick();
+    expect(document.activeElement).toBe(files);
+    expect(duWorkspace.store.rightTab).toBe('files');
+    expect(files.tabIndex).toBe(0);
+    expect(treemap.tabIndex).toBe(-1);
+    key(files, 'Home');
+    await tick();
+    expect(duWorkspace.store.rightTab).toBe('treemap');
+    key(treemap, 'End');
+    await tick();
+    expect(duWorkspace.store.rightTab).toBe('files');
+  });
+
+  it('Backspace in the tree zooms one level up; Esc in the root field only cancels the edit', async () => {
+    seed();
+    duWorkspace.open = true;
+    const store = duWorkspace.store;
+    const { getByTestId, getByLabelText } = render(DiskUsageWorkspace);
+    const tree = getByTestId('du-workspace').querySelector('[role="tree"]') as HTMLElement;
+    store.zoomIn('C:\\left\\docs');
+    await tick();
+    expect(store.zoomStack.length).toBe(1);
+    key(tree, 'Backspace');
+    await tick();
+    expect(store.zoomStack.length).toBe(0);
+
+    const input = getByLabelText('Path root scan disk usage') as HTMLInputElement;
+    input.focus();
+    key(input, 'Escape');
+    await tick();
+    expect(duWorkspace.open).toBe(true);
+  });
+
+  it('exit returns the keyboard to the entry pane list', async () => {
+    seed();
+    const focusList = vi.fn();
+    registerPane(0, { ...paneOf('C:\\left'), focusList });
+    duWorkspace.entryPane = 0;
+    const { unmount } = render(DiskUsageWorkspace);
+    unmount();
+    await tick();
+    await flush();
+    expect(focusList).toHaveBeenCalled();
   });
 });

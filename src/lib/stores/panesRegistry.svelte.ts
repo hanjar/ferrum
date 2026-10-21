@@ -42,6 +42,8 @@ export interface PaneApi {
    *  without it fall back to the reset behaviour of `refresh`. */
   refreshExternal?(): void;
   newTab(): void;
+  /** FER-577 (B4): select the next (+1) or previous (-1) tab of this pane, wrapping around. */
+  cycleTab?(delta: 1 | -1): void;
   closeCurrentTab(): void;
   goUp(): void;
   /** Enter behaviour: open the cursor entry when it is a directory. */

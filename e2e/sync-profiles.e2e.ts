@@ -520,6 +520,78 @@ test.describe('FER-521 Sync profiles page (mock IPC)', () => {
 });
 
 const shotsDir = process.env.FER_521_SHOTS;
+test.describe('FER-577 B4 Sync profiles keyboard only (mock IPC)', () => {
+  let page: Page;
+  test.beforeEach(async ({ browser }) => {
+    page = await browser.newPage();
+  });
+  test.afterEach(async () => {
+    await page.close();
+  });
+
+  test('create with access letters, walk the list with arrows, Enter edits, Delete asks with Cancel focused', async () => {
+    await boot(page, [
+      { id: 'seed-a', name: 'Docs', left: 'D:\\Docs', right: 'E:\\Docs' },
+      { id: 'seed-b', name: 'Music', left: 'D:\\Music', right: 'E:\\Music' },
+    ]);
+    await openPage(page);
+    const modal = page.getByRole('dialog', { name: 'Sync profiles' });
+    await page.keyboard.press('Alt+n'); // New sync profile
+    const form = page.getByRole('form', { name: 'New sync profile' });
+    await expect(form).toBeVisible();
+    await page.keyboard.press('Alt+n'); // Profile name
+    await expect(form.getByLabel('Profile name')).toBeFocused();
+    await page.keyboard.type('Keyboard made');
+    await page.keyboard.press('Alt+l'); // Left folder
+    await expect(form.getByLabel('Left folder')).toBeFocused();
+    await page.keyboard.type('D:\\Photos');
+    await page.keyboard.press('Alt+r'); // Right folder
+    await expect(form.getByLabel('Right folder')).toBeFocused();
+    await page.keyboard.type('E:\\Backups\\Photos');
+    // Direction radios rove with the arrows (Update -> Mirror) and select.
+    await form.getByRole('radio', { name: 'Update' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(form.getByRole('radio', { name: 'Mirror' })).toBeFocused();
+    await expect(form.getByRole('radio', { name: 'Mirror' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(form.getByLabel('Problems')).toHaveText('');
+    await page.keyboard.press('Alt+s'); // Save
+    const row = page.locator('li.profile', { hasText: 'Keyboard made' });
+    await expect(row).toContainText('Revision 1');
+
+    // List rows are one tab stop each; arrows / Home / End walk them.
+    const rows = page.locator('li.profile');
+    await expect(rows).toHaveCount(3);
+    await rows.first().focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(rows.nth(1)).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(rows.nth(2)).toBeFocused();
+    await page.keyboard.press('Home');
+    await expect(rows.first()).toBeFocused();
+
+    // Enter edits, Esc comes back to the list.
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('form', { name: 'Edit sync profile' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('form', { name: 'Edit sync profile' })).toHaveCount(0);
+
+    // Delete asks first: Cancel has the focus, Enter there deletes nothing, Esc closes it.
+    await rows.first().focus();
+    await page.keyboard.press('Delete');
+    const confirm = modal.getByRole('alertdialog', { name: 'Confirm delete' });
+    await expect(confirm).toBeVisible();
+    await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await expect(confirm.getByRole('button', { name: 'Delete profile' })).not.toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(confirm).toHaveCount(0);
+    await expect(rows).toHaveCount(3);
+    expect(await calls(page, 'sync_profile_delete')).toHaveLength(0);
+  });
+});
+
 test.describe('FER-521 Sync profiles screenshots', () => {
   test.skip(!shotsDir, 'FER_521_SHOTS not set');
   for (const theme of ['dark', 'light']) {

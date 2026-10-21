@@ -206,6 +206,16 @@
     }
   }
 
+  /**
+   * FER-577 (B4): a key pressed while Alt is down means Alt was NOT tapped alone, even when a
+   * dialog's access letter swallowed that key (stopPropagation) before the bubble handler
+   * above ever saw it. Without this, Alt+O in a docked page ended with the menu bar stealing
+   * the focus on Alt release.
+   */
+  function onWindowKeydownCapture(event: KeyboardEvent) {
+    if (event.key !== 'Alt') altAlone = false;
+  }
+
   function onWindowKeyup(event: KeyboardEvent) {
     if (event.key !== 'Alt') return;
     const alone = altAlone;
@@ -403,6 +413,7 @@
 
 <svelte:window
   onpointerdown={onWindowPointerDown}
+  onkeydowncapture={onWindowKeydownCapture}
   onkeydown={onWindowKeydown}
   onkeyup={onWindowKeyup}
 />

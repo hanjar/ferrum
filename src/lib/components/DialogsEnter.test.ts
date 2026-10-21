@@ -155,4 +155,27 @@ describe('FER-577 X2: buttons keep native Enter in the other dialogs', () => {
     await vi.waitFor(() => expect(mutMocks.enqueueCopy).toHaveBeenCalled());
     expect(mutMocks.enqueueCopy.mock.calls[0][2]).toBe('skip');
   });
+
+  it('FER-577 N6: with an overwriting preference a bare Enter does not overwrite; a second Enter on the policy radio does', async () => {
+    prefs.fileOperations.conflictPolicy = 'overwrite';
+    render(Dialogs);
+    dialogs.open({
+      kind: 'copy',
+      paths: ['C:/x/a.txt'],
+      target: 'D:/t',
+      totalFiles: 1,
+      totalBytes: 1,
+      conflicts: [{ dest: 'D:/t/a.txt' }],
+    } as never);
+    await tick();
+    const checked = modal().querySelector<HTMLInputElement>('input[name="policy"]:checked')!;
+    expect(checked.value).toBe('overwrite');
+    expect(enterOn(modal())).toBe(false); // handled by the dialog...
+    expect(mutMocks.enqueueCopy).not.toHaveBeenCalled(); // ...without copying
+    expect(document.activeElement).toBe(checked); // focus now shows the chosen policy
+    fireEvent.keyDown(checked, { key: 'Enter' });
+    await vi.waitFor(() => expect(mutMocks.enqueueCopy).toHaveBeenCalled());
+    expect(mutMocks.enqueueCopy.mock.calls[0][2]).toBe('overwrite');
+    prefs.fileOperations.conflictPolicy = 'ask';
+  });
 });

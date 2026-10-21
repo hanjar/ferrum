@@ -6,9 +6,10 @@
   import FileList from './FileList.svelte';
   import PaneStatusBar from './PaneStatusBar.svelte';
   import { mockFetcher, mockHome } from '../mockData';
-  import { ui, type PaneId } from '../uiState.svelte';
+  import { ui, fullPageOpen, type PaneId } from '../uiState.svelte';
+  import { modalDepth } from '../dialogKit';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { PaneStore, type Row } from '../stores/paneStore.svelte';
   import {
     filterRows,
@@ -252,6 +253,10 @@
 
   function onTypeToSelect(e: KeyboardEvent) {
     if (ui.activePane !== paneId || e.defaultPrevented) return;
+    // FER-577 (N4): a dialog, the palette or a full page owns the keyboard; the list behind
+    // it must not move its cursor while the user types an accelerator or a name.
+    if (modalDepth() > 0 || dialogs.current || ui.paletteOpen || fullPageOpen() || duWorkspace.open)
+      return;
     const target = e.target;
     if (
       e.ctrlKey ||
@@ -376,6 +381,20 @@
         });
       },
       newTab: () => void store.newTab(),
+      cycleTab: (delta) => {
+        const n = store.tabs.length;
+        if (n < 2) return;
+        selected.clear();
+        cursor = undefined;
+        const next = (store.current + delta + n) % n;
+        store.selectTab(next);
+        // Focus sat on a tab button: follow the selection instead of staying on the old tab.
+        if (document.activeElement?.closest('[role="tablist"]')) {
+          void tick().then(() =>
+            paneEl?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus(),
+          );
+        }
+      },
       closeCurrentTab: () => void store.closeTab(store.current),
       goUp: () => void store.goUp(),
       openCursorEntry: () => {

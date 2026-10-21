@@ -129,6 +129,25 @@ describe('type-to-select', () => {
     expect(rowByName(right, 'restore.log').classList.contains('cursor')).toBe(false);
   });
 
+  it('does not move the cursor while a modal is open (FER-577 N4)', async () => {
+    await boot();
+    const body = left.container.querySelector('.body') as HTMLElement;
+    fireEvent.keyDown(body, { key: 'ArrowDown' });
+    await tick();
+    const before = left.container.querySelector('.row.cursor')?.getAttribute('data-path');
+    dialogs.beginMkdir();
+    await tick();
+    // The key arrives at the window from inside the dialog (focus is on the modal itself).
+    fireEvent.keyDown(dialogHost.container.querySelector('.modal') as HTMLElement, { key: 'r' });
+    await tick();
+    expect(left.container.querySelector('.row.cursor')?.getAttribute('data-path')).toBe(before);
+    dialogs.close();
+    await tick();
+    fireEvent.keyDown(window, { key: 'r' });
+    await tick();
+    expect(left.container.querySelector('.row.cursor')?.getAttribute('data-path')).not.toBe(before);
+  });
+
   it('ignores modified keys and text input targets', async () => {
     await boot();
 

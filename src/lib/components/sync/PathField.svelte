@@ -5,6 +5,7 @@
    * "Browse…" is intentionally absent: the app has no native folder picker yet (no dialog plugin).
    */
   import { pathSuggest, type PathSuggestion } from '../../ipc/pathSuggest';
+  import Mnemonic from '../Mnemonic.svelte';
 
   let {
     id,
@@ -78,7 +79,7 @@
 </script>
 
 <div class="field">
-  <label for={id}>{label}</label>
+  <label for={id}><Mnemonic {label} /></label>
   <div class="inputRow">
     <input
       {id}
@@ -97,7 +98,7 @@
     </button>
   </div>
   {#if items.length > 0}
-    <ul class="suggest" role="listbox" aria-label={`${label} suggestions`}>
+    <ul class="suggest" role="listbox" aria-label={`${label.replace('&', '')} suggestions`}>
       {#each items as item (item.path)}
         <li role="option" aria-selected="false">
           <button type="button" onclick={() => pick(item)}>{item.path}</button>

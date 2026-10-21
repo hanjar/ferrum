@@ -8,6 +8,7 @@
   import { onMount } from 'svelte';
   import type { AutomationStore, DetailState } from '../../stores/automationStore.svelte';
   import StatusChip from './StatusChip.svelte';
+  import Mnemonic from '../Mnemonic.svelte';
   import RunHistory from './RunHistory.svelte';
   import RunOps from './RunOps.svelte';
   import {
@@ -77,7 +78,9 @@
 
 <div class="detail" data-testid="automation-detail">
   <div class="top">
-    <button type="button" onclick={() => store.closeDetail()}>← Automations</button>
+    <button type="button" onclick={() => store.closeDetail()}
+      >← <Mnemonic label="&Automations" /></button
+    >
   </div>
 
   {#if detail.error}
@@ -114,7 +117,7 @@
           disabled={!!store.pending[`pause:${row.id}`]}
           onclick={() => void store.toggleEnabled(row)}
         >
-          {row.enabled ? 'Pause' : 'Resume'}
+          <Mnemonic label={row.enabled ? '&Pause' : '&Resume'} />
         </button>
         <button
           type="button"
@@ -122,6 +125,7 @@
           title={row.runNowReason}
           onclick={() => void store.runNow(row)}
         >
+          <!-- Run now queues a sync at once: no access letter, Tab only (FER-577 B4 R1). -->
           Run now
         </button>
         {#if run}
@@ -134,13 +138,17 @@
             Stop current run
           </button>
         {/if}
-        <button type="button" onclick={() => void store.openEdit(row.id)}>Edit</button>
+        <button type="button" onclick={() => void store.openEdit(row.id)}
+          ><Mnemonic label="&Edit" /></button
+        >
         {#if row.showReview}
           <button type="button" class="primary" onclick={() => void store.openReview(row)}>
-            Review changes
+            <Mnemonic label="Re&view changes" />
           </button>
         {:else if row.attention}
-          <button type="button" class="primary" onclick={resolveHeld}>Resolve held run</button>
+          <button type="button" class="primary" onclick={resolveHeld}
+            ><Mnemonic label="Resolve &held run" /></button
+          >
         {/if}
       </div>
       {#if !row.canRunNow && row.runNowReason}

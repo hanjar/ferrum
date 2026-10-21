@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { roving } from '../../dialogKit';
   /**
    * Profile picker (Automation P0.5, reused by P1.5): one card per sync profile. A Ready profile
    * can be chosen; a Not-ready or still-checking one is shown disabled with the backend's reason.
@@ -20,7 +21,7 @@
   } = $props();
 </script>
 
-<div class="picker" role="radiogroup" aria-label={label}>
+<div class="picker" role="radiogroup" aria-label={label} use:roving>
   {#each profiles as p (p.id)}
     {@const ready = p.readiness.status === 'ready'}
     <button

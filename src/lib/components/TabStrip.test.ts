@@ -86,3 +86,25 @@ describe('FER-395 middle-click close', () => {
     expect(onclose).not.toHaveBeenCalled();
   });
 });
+
+describe('FER-577 B4 keyboard', () => {
+  it('arrows, Home and End move between tabs and select them; one tab stop', async () => {
+    const { onselect, tab } = setup();
+    expect([0, 1, 2].map((i) => tab(i).tabIndex)).toEqual([-1, 0, -1]);
+    tab(1).focus();
+    await fireEvent.keyDown(tab(1), { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(tab(2));
+    expect(onselect).toHaveBeenLastCalledWith(2);
+    await fireEvent.keyDown(tab(2), { key: 'ArrowRight' });
+    expect(onselect).toHaveBeenLastCalledWith(0);
+    await fireEvent.keyDown(tab(0), { key: 'End' });
+    expect(onselect).toHaveBeenLastCalledWith(2);
+    await fireEvent.keyDown(tab(2), { key: 'Home' });
+    expect(onselect).toHaveBeenLastCalledWith(0);
+  });
+
+  it('the close glyph is not a tab stop for assistive tech (Ctrl+W closes from the keyboard)', () => {
+    const { tab } = setup();
+    expect(tab(0).querySelector('.close')?.getAttribute('aria-hidden')).toBe('true');
+  });
+});

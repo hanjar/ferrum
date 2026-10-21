@@ -691,3 +691,36 @@ describe('full-page shortcut guard (FER-561)', () => {
     for (const id of FULL_PAGE_SHORTCUT_IDS) expect(getAction(id)).toBeDefined();
   });
 });
+
+describe('FER-577 B4 tab shortcuts', () => {
+  it('Ctrl+Tab and Ctrl+Shift+Tab cycle tabs; plain Tab stays the pane switch', () => {
+    const cycleTab = vi.fn();
+    const off = registerPane(0, {
+      path: 'C:/',
+      selectedPaths: () => [],
+      cursorEntry: () => undefined,
+      refresh: () => {},
+      newTab: () => {},
+      closeCurrentTab: () => {},
+      goUp: () => {},
+      openCursorEntry: () => {},
+      cycleTab,
+    });
+    const ev = (shift: boolean, ctrl = true) => ({
+      key: 'Tab',
+      ctrlKey: ctrl,
+      metaKey: false,
+      shiftKey: shift,
+      altKey: false,
+    });
+    const next = actionForEvent(ev(false), actions, 'Win32');
+    const prev = actionForEvent(ev(true), actions, 'Win32');
+    expect(next?.id).toBe('tab.next');
+    expect(prev?.id).toBe('tab.prev');
+    next?.run?.();
+    prev?.run?.();
+    expect(cycleTab.mock.calls).toEqual([[1], [-1]]);
+    expect(actionForEvent(ev(false, false), actions, 'Win32')?.id).toBe('pane.switch');
+    off();
+  });
+});
