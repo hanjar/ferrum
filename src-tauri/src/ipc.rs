@@ -424,29 +424,177 @@ fn note_activity_changes(
     }
 }
 
+/// Files that are fully gone: every requested path except the ones that failed, were never reached
+/// by a cancel, or are folders a cancel left partly deleted. Only these are Activity receipts.
+fn deleted_receipts(
+    paths: &[String],
+    report: &crate::mutations::DeleteReport,
+    not_processed: &[String],
+    partial: &[String],
+) -> Vec<(String, Option<String>)> {
+    let skip: std::collections::HashSet<&str> = report
+        .failed
+        .iter()
+        .map(|f| f.path.as_str())
+        .chain(not_processed.iter().map(String::as_str))
+        .chain(partial.iter().map(String::as_str))
+        .collect();
+    paths
+        .iter()
+        .filter(|p| !skip.contains(p.as_str()))
+        .map(|p| (p.clone(), None))
+        .collect()
+}
+
+/// Small / non-interactive delete without progress. The file manager's dialogs use
+/// [`delete_start`] (FER-585); this stays as the plain contract, but runs off the UI thread so a
+/// large tree can no longer freeze the window.
 #[tauri::command]
-pub fn delete_entries(
+pub async fn delete_entries(
     paths: Vec<String>,
     permanent: bool,
     app: AppHandle,
 ) -> Result<crate::mutations::DeleteReport, FsError> {
     let paths = prepare_sources(&paths)?;
-    let report = if permanent {
-        crate::mutations::delete_permanent(&paths)
-    } else {
-        crate::mutations::delete_to_trash(&paths)
-    };
-    // Only items that did not fail are receipts (Recycle Bin counts: the
-    // locator is gone either way).
-    let failed: std::collections::HashSet<&str> =
-        report.failed.iter().map(|f| f.path.as_str()).collect();
-    let deleted: Vec<(String, Option<String>)> = paths
-        .iter()
-        .filter(|p| !failed.contains(p.as_str()))
-        .map(|p| (p.clone(), None))
-        .collect();
-    note_activity_changes(&app, FsChangeKind::Delete, deleted);
-    Ok(report)
+    spawn_blocking(move || {
+        let report = if permanent {
+            crate::mutations::delete_permanent(&paths)
+        } else {
+            crate::mutations::delete_to_trash(&paths)
+        };
+        // Only items that did not fail are receipts (Recycle Bin counts: the
+        // locator is gone either way).
+        let deleted = deleted_receipts(&paths, &report, &[], &[]);
+        note_activity_changes(&app, FsChangeKind::Delete, deleted);
+        report
+    })
+    .await
+    .map_err(blocking_failed)
+}
+
+/// Event: throttled progress of a delete job (`DeleteProgress` plus `requestId`).
+const DELETE_PROGRESS_EVENT: &str = "delete://progress";
+/// Event: the delete job ended (`DeleteDoneEvent`).
+const DELETE_DONE_EVENT: &str = "delete://done";
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProgressEvent<'a> {
+    request_id: &'a str,
+    #[serde(flatten)]
+    progress: &'a crate::delete_jobs::DeleteProgress,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DeleteDoneEvent<'a> {
+    request_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a crate::delete_jobs::DeleteJobResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a FsError>,
+}
+
+/// Everything `delete_start` checks before a job exists: the path gates (identical to the old
+/// synchronous delete) and a usable, not yet running request id. Nothing is touched on a refusal.
+fn gate_delete_job(
+    paths: &[String],
+    request_id: &str,
+) -> Result<(Vec<String>, crate::archive_cancel::Registration), FsError> {
+    let prepared = prepare_sources(paths)?;
+    if request_id.is_empty() || request_id.len() > 128 {
+        return Err(FsError::new(
+            crate::domain::ErrorCode::InvalidPath,
+            "Invalid request id",
+        ));
+    }
+    let registration = crate::archive_cancel::begin_unique(Some(request_id))
+        .map_err(|m| FsError::new(crate::domain::ErrorCode::InvalidPath, m))?;
+    Ok((prepared, registration))
+}
+
+/// FER-585: start a delete job and return at once. Same gates as ever (`prepare_sources`: string
+/// gate, protected folders, reserved names), checked BEFORE anything starts; a refused path fails
+/// this call and nothing runs. The job works on a blocking thread, reports `delete://progress`
+/// (throttled) and ends with one `delete://done` carrying the [`DeleteJobResult`]. `request_id` is
+/// what [`delete_cancel`] targets. The confirmation (and the permanent/Recycle Bin choice) happens
+/// in the UI before this is called, unchanged.
+#[tauri::command]
+pub fn delete_start(
+    paths: Vec<String>,
+    permanent: bool,
+    request_id: String,
+    app: AppHandle,
+) -> Result<(), FsError> {
+    let (paths, registration) = gate_delete_job(&paths, &request_id)?;
+    let job_app = app.clone();
+    let job_id = request_id.clone();
+    let handle = spawn_blocking(move || {
+        let cancelled = || registration.token().is_cancelled();
+        let mut throttle =
+            crate::archive_jobs::Throttle::new(crate::archive_jobs::PROGRESS_INTERVAL);
+        let mut last_sent_done = usize::MAX;
+        let mut emit = |p: &crate::delete_jobs::DeleteProgress| {
+            // Item boundaries always go out (the first and the last in particular); the inside of
+            // a big folder is throttled.
+            if p.done != last_sent_done || throttle.due() {
+                last_sent_done = p.done;
+                let _ = job_app.emit(
+                    DELETE_PROGRESS_EVENT,
+                    DeleteProgressEvent {
+                        request_id: &job_id,
+                        progress: p,
+                    },
+                );
+            }
+        };
+        let result = if permanent {
+            crate::delete_jobs::run_permanent(&paths, &cancelled, &mut emit)
+        } else {
+            crate::delete_jobs::run_trash(&paths, &cancelled, &mut emit)
+        };
+        let receipts = deleted_receipts(
+            &paths,
+            &result.report,
+            &result.not_processed,
+            &result.partial,
+        );
+        note_activity_changes(&job_app, FsChangeKind::Delete, receipts);
+        result
+    });
+    tauri::async_runtime::spawn(async move {
+        match handle.await {
+            Ok(result) => {
+                let _ = app.emit(
+                    DELETE_DONE_EVENT,
+                    DeleteDoneEvent {
+                        request_id: &request_id,
+                        result: Some(&result),
+                        error: None,
+                    },
+                );
+            }
+            Err(e) => {
+                let err = blocking_failed(e);
+                let _ = app.emit(
+                    DELETE_DONE_EVENT,
+                    DeleteDoneEvent {
+                        request_id: &request_id,
+                        result: None,
+                        error: Some(&err),
+                    },
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
+/// FER-585: ask a running delete job to stop (idempotent; unknown ids are harmless). The job stops
+/// at the next item (and, in a permanent delete of a folder, the next entry) and says what is left.
+#[tauri::command]
+pub fn delete_cancel(request_id: String) {
+    crate::archive_cancel::cancel(&request_id);
 }
 
 /// One path's answer of [`ai_recycle_check`].
@@ -3970,6 +4118,99 @@ mod fer512_ipc_gate_tests {
         }
         crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// FER-585: the async delete starts behind the same gates as the old synchronous one.
+    #[test]
+    fn delete_job_gate_keeps_the_path_guards() {
+        let _guard = crate::protected_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for bad in [
+            r"\\.\pipe\x",
+            r"\\?\GLOBALROOT\Device\NamedPipe\x",
+            r"C:\x:ads",
+            "relative",
+            r"\\localhost\C$\x",
+        ] {
+            assert!(
+                super::gate_delete_job(&[bad.to_string()], "t-gate-bad").is_err(),
+                "{bad}"
+            );
+        }
+        // One refused path refuses the whole job, even behind valid ones.
+        assert!(
+            super::gate_delete_job(
+                &[r"C:\Users\u\a.txt".to_string(), "relative".to_string()],
+                "t-gate-mixed"
+            )
+            .is_err()
+        );
+        // A reserved device name that is not a plain existing entry is the device: refused.
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().to_string_lossy().into_owned();
+        assert!(
+            super::gate_delete_job(&[format!(r"{plain}\prn")], "t-gate-prn").is_err(),
+            "reserved name that is not a plain entry"
+        );
+        // The app's own state folders are protected: neither inside nor containing them.
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir_all(cfg.join("sub")).unwrap();
+        crate::protected_dirs::register(vec![cfg.clone()]);
+        let inside = cfg.join("sub").to_string_lossy().into_owned();
+        let own = cfg.to_string_lossy().into_owned();
+        let refused =
+            [inside, own, plain].map(|p| super::gate_delete_job(&[p], "t-gate-prot").is_err());
+        crate::protected_dirs::register(Vec::<std::path::PathBuf>::new());
+        assert_eq!(refused, [true, true, true]);
+    }
+
+    /// The wire shape the frontend listens for.
+    #[test]
+    fn delete_events_have_the_documented_shape() {
+        let progress = crate::delete_jobs::DeleteProgress {
+            done: 1,
+            total: 4,
+            current_name: Some("big".into()),
+            entries: 7,
+        };
+        let v = serde_json::to_value(super::DeleteProgressEvent {
+            request_id: "del-1",
+            progress: &progress,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"requestId":"del-1","done":1,"total":4,"currentName":"big","entries":7})
+        );
+        let result = crate::delete_jobs::run_permanent(&[], &|| false, &mut |_| {});
+        let v = serde_json::to_value(super::DeleteDoneEvent {
+            request_id: "del-1",
+            result: Some(&result),
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(v["requestId"], "del-1");
+        assert_eq!(v["result"]["cancelled"], false);
+        assert_eq!(v["result"]["report"]["requested"], 0);
+        assert!(v["result"]["notProcessed"].is_array() && v["result"]["partial"].is_array());
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn delete_job_gate_refuses_a_request_id_that_is_in_use_or_unusable() {
+        let ok = tempfile::tempdir().unwrap();
+        let path = ok.path().join("x.txt").to_string_lossy().into_owned();
+        let first =
+            super::gate_delete_job(std::slice::from_ref(&path), "t-gate-dup").expect("free id");
+        assert!(super::gate_delete_job(std::slice::from_ref(&path), "t-gate-dup").is_err());
+        // Cancel reaches the registered job.
+        super::delete_cancel("t-gate-dup".to_string());
+        assert!(first.1.token().is_cancelled());
+        drop(first);
+        assert!(super::gate_delete_job(std::slice::from_ref(&path), "t-gate-dup").is_ok());
+        assert!(super::gate_delete_job(std::slice::from_ref(&path), "").is_err());
+        assert!(super::gate_delete_job(std::slice::from_ref(&path), &"x".repeat(129)).is_err());
     }
 
     /// Rework point 1: pipes, device namespaces, ADS and GLOBALROOT are refused for every source
