@@ -173,6 +173,7 @@ test.describe('FER-576 AI delete card (mock IPC, mock provider)', () => {
     expect(ran).not.toContain('ai_authorize_execute');
     expect(ran).not.toContain('ai_delete_to_recycle');
     expect(ran).not.toContain('delete_entries');
+    expect(ran).not.toContain('delete_start');
   });
 
   test('the provider is offered the delete capability and never sees a file name', async () => {
@@ -203,6 +204,7 @@ test.describe('FER-576 AI delete card (mock IPC, mock provider)', () => {
     expect(ran).not.toContain('ai_authorize_execute');
     expect(ran).not.toContain('ai_delete_to_recycle');
     expect(ran).not.toContain('delete_entries');
+    expect(ran).not.toContain('delete_start');
     await page.keyboard.press('Escape');
     await expect(chat(page)).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'AI assistant', exact: true })).toBeFocused();

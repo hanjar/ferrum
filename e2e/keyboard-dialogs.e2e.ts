@@ -24,6 +24,7 @@ function injectTauriMock(page: Page) {
     };
     const calls: { cmd: string; args: unknown }[] = [];
     (window as unknown as { __calls: typeof calls }).__calls = calls;
+    const listeners: Record<string, number[]> = {};
     window.__TAURI_INTERNALS__ = {
       metadata: {
         currentWindow: { label: 'main' },
@@ -38,7 +39,11 @@ function injectTauriMock(page: Page) {
       invoke: (cmd, args) => {
         calls.push({ cmd, args });
         if (cmd === 'plugin:path|resolve_directory') return Promise.resolve(home);
-        if (cmd === 'plugin:event|listen') return Promise.resolve(Math.floor(Math.random() * 1e9));
+        if (cmd === 'plugin:event|listen') {
+          const a = args as { event: string; handler: number };
+          (listeners[a.event] ??= []).push(Number(a.handler));
+          return Promise.resolve(Math.floor(Math.random() * 1e9));
+        }
         if (cmd === 'watch_start' || cmd === 'watch_stop') return Promise.resolve(1);
         if (cmd === 'list_dir') {
           const raw = String((args as { path: string }).path).replace(/\\$/, '');
@@ -53,9 +58,27 @@ function injectTauriMock(page: Page) {
         }
         if (cmd === 'archive_rar_tool_probe') return Promise.resolve({ ok: true, version: 'x' });
         if (cmd === 'archive_create') return Promise.resolve('C:\\Users\\demo\\notes.7z');
-        if (cmd === 'delete_entries') {
-          const { paths } = args as { paths: string[] };
-          return Promise.resolve({ requested: paths.length, failed: [] });
+        if (cmd === 'delete_start') {
+          // FER-585: the job starts at once and ends with a `delete://done` event.
+          const { paths, requestId } = args as { paths: string[]; requestId: string };
+          setTimeout(() => {
+            for (const id of listeners['delete://done'] ?? []) {
+              (window as unknown as Record<string, (e: unknown) => void>)[`_${id}`]!({
+                event: 'delete://done',
+                id,
+                payload: {
+                  requestId,
+                  result: {
+                    report: { requested: paths.length, deleted: paths.length, failed: [] },
+                    cancelled: false,
+                    notProcessed: [],
+                    partial: [],
+                  },
+                },
+              });
+            }
+          }, 0);
+          return Promise.resolve();
         }
         return Promise.reject(new Error(`Unknown command: ${cmd}`));
       },
@@ -104,7 +127,7 @@ test.describe('Keyboard-first dialogs (FER-577)', () => {
     await expect(dlg.getByRole('button', { name: 'Cancel' })).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(dlg).toHaveCount(0);
-    expect(await callsOf(page, 'delete_entries')).toHaveLength(0);
+    expect(await callsOf(page, 'delete_start')).toHaveLength(0);
     // Focus is back on the file list.
     await expect(left().locator('[data-pane-list]')).toBeFocused();
 
@@ -113,11 +136,11 @@ test.describe('Keyboard-first dialogs (FER-577)', () => {
     await expect(dlg).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(dlg).toHaveCount(0);
-    expect(await callsOf(page, 'delete_entries')).toHaveLength(0);
+    expect(await callsOf(page, 'delete_start')).toHaveLength(0);
     await page.keyboard.press('F8');
     await page.keyboard.press('Enter');
     await expect(dlg).toHaveCount(0);
-    expect(await callsOf(page, 'delete_entries')).toHaveLength(1);
+    expect(await callsOf(page, 'delete_start')).toHaveLength(1);
   });
 
   test('Pack: choose 7Z + Maximum and Pack with the keyboard only', async () => {
