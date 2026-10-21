@@ -62,6 +62,7 @@
   import DiskUsageWorkspace from './lib/diskUsage/DiskUsageWorkspace.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { isInTauri } from './lib/ipc/tauri';
+  import { installCloseGuard } from './lib/quit';
   import { GOTO_EVENT } from './lib/searchSeparate';
 
   $effect(() => {
@@ -80,6 +81,13 @@
         if (typeof dir === 'string' && dir) activePane()?.openPath?.(dir);
       });
     }
+  });
+
+  // FER-583: every close path of the main window (X, Alt+F4, taskbar) asks first while work runs.
+  onMount(() => {
+    if (!isInTauri() || isSearchWindow()) return;
+    const guard = installCloseGuard();
+    return () => void guard.then((un) => un());
   });
 
   onMount(async () => {
