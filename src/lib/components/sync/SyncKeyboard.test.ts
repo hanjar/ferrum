@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 
 vi.mock('../../stores/panesRegistry.svelte', () => ({
-  activePane: () => ({ path: 'D:\Work' }),
-  inactivePane: () => ({ path: 'E:\Backup' }),
+  activePane: () => ({ path: 'D:\\Work' }),
+  inactivePane: () => ({ path: 'E:\\Backup' }),
 }));
 vi.mock('../../ipc/pathSuggest', () => ({
   pathSuggest: vi.fn(async () => ({
@@ -30,8 +30,8 @@ const summary = (id: string, name: string): ProfileSummary => ({
   id,
   name,
   revision: 1,
-  left: 'D:\A',
-  right: 'E:\B',
+  left: 'D:\\A',
+  right: 'E:\\B',
   modeLabel: 'Mirror left → right',
   deleteLabel: 'Recycle Bin',
   readiness: { status: 'ready' },
