@@ -6,7 +6,8 @@
   import FileList from './FileList.svelte';
   import PaneStatusBar from './PaneStatusBar.svelte';
   import { mockFetcher, mockHome } from '../mockData';
-  import { ui, type PaneId } from '../uiState.svelte';
+  import { ui, fullPageOpen, type PaneId } from '../uiState.svelte';
+  import { modalDepth } from '../dialogKit';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { onMount, untrack } from 'svelte';
   import { PaneStore, type Row } from '../stores/paneStore.svelte';
@@ -252,6 +253,9 @@
 
   function onTypeToSelect(e: KeyboardEvent) {
     if (ui.activePane !== paneId || e.defaultPrevented) return;
+    // FER-577 (N4): a dialog, the palette or a full page owns the keyboard; the list behind
+    // it must not move its cursor while the user types an accelerator or a name.
+    if (modalDepth() > 0 || dialogs.current || ui.paletteOpen || fullPageOpen()) return;
     const target = e.target;
     if (
       e.ctrlKey ||
