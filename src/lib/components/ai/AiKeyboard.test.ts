@@ -1,6 +1,6 @@
 // FER-577 B4: keyboard of the AI panel. Access letters, Esc, no mnemonic on the delete confirm.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ChatPanel from './ChatPanel.svelte';
 import { ChatStore } from '../../ai/chatStore.svelte';
@@ -12,8 +12,9 @@ afterEach(() => {
   resetModalDepth();
 });
 
-async function panelWithPlan(plan = samplePlan()) {
+async function panelWithPlan(plan = samplePlan(), itemTotal = 0) {
   const ex = new FakeExecutor();
+  ex.itemTotal = itemTotal;
   const store = new ChatStore(ex);
   const onclose = vi.fn();
   const view = render(ChatPanel, { store, onclose });
@@ -108,11 +109,13 @@ describe('AI panel keyboard (FER-577 B4)', () => {
       preview: { itemCount: 1, conflictCount: 0, totalBytes: 0 },
       steps: [{ id: 's1', capability: 'items.delete', dependsOn: [] }],
     });
-    const { ex, store } = await panelWithPlan(plan);
+    const { ex, store } = await panelWithPlan(plan, 1);
     const confirm = screen.getByTestId('confirm-delete');
     expect(confirm.hasAttribute('data-mnemonic')).toBe(false);
     expect(confirm.hasAttribute('aria-keyshortcuts')).toBe(false);
     expect(document.activeElement).not.toBe(confirm);
+    // The button must be ENABLED (item names loaded) so that "not approved" below is meaningful.
+    await waitFor(() => expect((confirm as HTMLButtonElement).disabled).toBe(false));
     const input = screen.getByLabelText('Message to AI assistant');
     for (const k of 'abdefghijkmnopqrstuvwxyz0123456789') {
       await alt(input, k);
