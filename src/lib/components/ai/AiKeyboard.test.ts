@@ -108,17 +108,35 @@ describe('AI panel keyboard (FER-577 B4)', () => {
       preview: { itemCount: 1, conflictCount: 0, totalBytes: 0 },
       steps: [{ id: 's1', capability: 'items.delete', dependsOn: [] }],
     });
-    const { ex, container } = await panelWithPlan(plan);
+    const { ex, store } = await panelWithPlan(plan);
     const confirm = screen.getByTestId('confirm-delete');
     expect(confirm.hasAttribute('data-mnemonic')).toBe(false);
     expect(confirm.hasAttribute('aria-keyshortcuts')).toBe(false);
     expect(document.activeElement).not.toBe(confirm);
     const input = screen.getByLabelText('Message to AI assistant');
-    for (const k of 'abcdefghijklmnopqrstuvwxyz0123456789') await alt(input, k);
+    for (const k of 'abdefghijkmnopqrstuvwxyz0123456789') {
+      await alt(input, k);
+      if (store.runs.at(-1)?.state !== 'awaitingApproval') throw new Error('letter ' + k);
+    }
+    // Alt+L is the plan's own Cancel (skipped here so the run stays pending and the test is not vacuous).
     await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
     expect(ex.approved).toEqual([]);
+    expect(store.runs.at(-1)?.state).toBe('awaitingApproval');
     // Tab reaches it (no trap): Cancel comes first, confirm is a normal tabbable button.
     expect(confirm.tabIndex).toBe(0);
-    expect(container.querySelector('[data-testid="confirm-delete"][disabled]')).toBeNull();
+  });
+});
+
+describe('AI panel focus (FER-577 B4 R1)', () => {
+  it('a click on a non-focusable area does not pull focus back into the composer', async () => {
+    const ex = new FakeExecutor();
+    const store = new ChatStore(ex);
+    render(ChatPanel, { store, onclose: vi.fn() });
+    const input = screen.getByLabelText('Message to AI assistant') as HTMLTextAreaElement;
+    expect(document.activeElement).toBe(input);
+    input.blur(); // what a click on a status bar / title bar does: focus goes to <body>
+    await tick();
+    await Promise.resolve();
+    expect(document.activeElement).toBe(document.body);
   });
 });

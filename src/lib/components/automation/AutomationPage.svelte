@@ -66,7 +66,7 @@
     void store.discardPending;
     void store.dialog;
     void tick().then(() => {
-      if (!modalEl || modalEl.contains(document.activeElement)) return;
+      if (!modalEl || modalEl.contains(document.activeElement) || ui.paletteOpen) return;
       (store.view === 'editor'
         ? modalEl.querySelector<HTMLElement>('input[aria-label="Name"]')
         : null

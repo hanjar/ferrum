@@ -303,7 +303,14 @@ export function dialog(node: HTMLElement, initialOpts: DialogOptions = {}) {
       e.location !== 3 && // FER-577 (N2): Alt+Numpad digits are Alt-codes, not accelerators
       accessKey(e) !== null
     ) {
-      const hit = findMnemonic(node, accessKey(e)!);
+      // FER-577 (B4 R1): an event from inside a NESTED modal (an inline confirmation, a Pause/Stop
+      // dialog) belongs to that modal; this dialog's access letters must not click controls
+      // behind it, even when the nested dialog forgot `isolate`.
+      const nested = t?.closest('[aria-modal="true"]');
+      const hit =
+        nested && nested !== node && node.contains(nested)
+          ? null
+          : findMnemonic(node, accessKey(e)!);
       if (hit) {
         e.preventDefault();
         e.stopPropagation();
@@ -397,6 +404,9 @@ export function roving(node: HTMLElement, initial: RovingOptions = {}) {
     else return;
     const list = items();
     if (list.length === 0) return;
+    // FER-577 (B4 R1): keys inside a nested modal (inline confirmation) are not ours.
+    const nestedModal = (e.target as HTMLElement | null)?.closest?.('[aria-modal="true"]');
+    if (nestedModal && nestedModal !== node && node.contains(nestedModal)) return;
     let at = list.findIndex((el) => el === e.target || el.contains(e.target as Node));
     // The group itself has focus (a click on its gap): continue from the selected item.
     if (at < 0 && e.target === node) at = Math.max(0, list.findIndex(isSelected));

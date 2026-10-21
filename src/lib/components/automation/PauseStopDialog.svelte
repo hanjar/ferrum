@@ -26,7 +26,11 @@
 
   // FER-577: Esc / Tab trap / modalDepth from the shared dialog action. The safe default button
   // keeps the initial focus (onMount above); Esc stays local so it cannot reach a page behind.
-  const dialogOpts = { onEscape: () => store.closeDialog(), initial: () => defaultBtn };
+  const dialogOpts = {
+    isolate: true,
+    onEscape: () => store.closeDialog(),
+    initial: () => defaultBtn,
+  };
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->

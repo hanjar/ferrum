@@ -9,7 +9,7 @@
   import { ui, fullPageOpen, type PaneId } from '../uiState.svelte';
   import { modalDepth } from '../dialogKit';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { PaneStore, type Row } from '../stores/paneStore.svelte';
   import {
     filterRows,
@@ -386,7 +386,14 @@
         if (n < 2) return;
         selected.clear();
         cursor = undefined;
-        store.selectTab((store.current + delta + n) % n);
+        const next = (store.current + delta + n) % n;
+        store.selectTab(next);
+        // Focus sat on a tab button: follow the selection instead of staying on the old tab.
+        if (document.activeElement?.closest('[role="tablist"]')) {
+          void tick().then(() =>
+            paneEl?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus(),
+          );
+        }
       },
       closeCurrentTab: () => void store.closeTab(store.current),
       goUp: () => void store.goUp(),

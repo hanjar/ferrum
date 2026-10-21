@@ -68,7 +68,10 @@
   // so the access letters (they listen on this section) keep working.
   function onFocusOut(e: FocusEvent): void {
     if (e.relatedTarget) return;
+    const lost = e.target as HTMLElement | null;
     queueMicrotask(() => {
+      // Only when the control that had focus vanished or got disabled (not on a plain click elsewhere).
+      if (lost?.isConnected && !(lost as HTMLButtonElement).disabled) return;
       if (!duWorkspace.open || dialogs.current || !rootEl?.isConnected) return;
       const a = document.activeElement;
       if (a === document.body || a === null) focusTree();

@@ -125,7 +125,8 @@
           title={row.runNowReason}
           onclick={() => void store.runNow(row)}
         >
-          <Mnemonic label="Run &now" />
+          <!-- Run now queues a sync at once: no access letter, Tab only (FER-577 B4 R1). -->
+          Run now
         </button>
         {#if run}
           <button

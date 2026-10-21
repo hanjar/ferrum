@@ -10,6 +10,7 @@
   import Mnemonic from '../Mnemonic.svelte';
   import { dialog, roving } from '../../dialogKit';
   import { syncProfiles, type SyncProfilesStore } from '../../stores/syncProfilesStore.svelte';
+  import { ui } from '../../uiState.svelte';
   import { activePane, inactivePane } from '../../stores/panesRegistry.svelte';
   import {
     blockerMessage,
@@ -60,7 +61,7 @@
     void store.runPrompt;
     void store.confirmDeleteId;
     void tick().then(() => {
-      if (!modalEl || modalEl.contains(document.activeElement)) return;
+      if (!modalEl || modalEl.contains(document.activeElement) || ui.paletteOpen) return;
       (editor ? modalEl.querySelector<HTMLElement>('#sp-name') : null)?.focus();
       if (!modalEl.contains(document.activeElement)) modalEl.focus();
     });

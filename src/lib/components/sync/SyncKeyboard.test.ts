@@ -122,4 +122,20 @@ describe('Sync profiles keyboard (FER-577 B4)', () => {
     await key(document.activeElement!, 'Home');
     expect(document.activeElement).toBe(screen.getByRole('radio', { name: /Update/ }));
   });
+
+  it('FER-577 B4 R1: arrows and Enter inside the Delete confirmation stay in it', async () => {
+    const { store, backend } = setup([summary('p1', 'Photos'), summary('p2', 'Docs')]);
+    await screen.findByText('Docs');
+    const row = document.querySelector<HTMLElement>('li.profile')!;
+    row.focus();
+    await key(row, 'Delete');
+    await waitFor(() => expect(store.confirmDeleteId).toBe('p1'));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+    for (const k of ['ArrowDown', 'ArrowUp', 'End', 'Home']) {
+      await key(cancel, k);
+      expect(document.activeElement).toBe(cancel);
+    }
+    expect(backend.get).not.toHaveBeenCalled();
+  });
 });

@@ -96,6 +96,15 @@ test.describe('Keyboard B4', () => {
     await expect(tabs()).toHaveCount(2);
   });
 
+  test('Ctrl+Tab from a focused tab button moves focus to the newly selected tab', async () => {
+    await page.keyboard.press('Control+t');
+    await expect(tabs()).toHaveCount(2);
+    await tabs().nth(1).focus();
+    await page.keyboard.press('Control+Tab');
+    await expect(tabs().nth(0)).toHaveAttribute('aria-selected', 'true');
+    await expect(tabs().nth(0)).toBeFocused();
+  });
+
   test('N4: typing a letter behind an open dialog does not move the file cursor', async () => {
     const list = left().locator('[data-pane-list]');
     await list.focus();

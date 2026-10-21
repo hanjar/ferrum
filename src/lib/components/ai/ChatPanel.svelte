@@ -148,7 +148,11 @@
   // where the access letters (they listen on this panel) and Esc are dead. Take it back.
   function onFocusOut(e: FocusEvent) {
     if (e.relatedTarget) return;
+    const lost = e.target as HTMLElement | null;
     queueMicrotask(() => {
+      // Only when the control that had focus vanished or got disabled; a click on some other
+      // non-focusable area is the user's choice and must not pull focus back.
+      if (lost?.isConnected && !(lost as HTMLButtonElement).disabled) return;
       const a = document.activeElement;
       if ((a === document.body || a === null) && inputEl?.isConnected && modalDepth() === 0)
         inputEl.focus();

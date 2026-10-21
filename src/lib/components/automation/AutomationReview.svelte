@@ -223,7 +223,7 @@
       title={store.canApprove ? undefined : 'Run a test that passes first'}
       onclick={() => void store.approve()}
     >
-      <Mnemonic label={'&' + approveLabel.replace('&', '&&')} />
+      <Mnemonic label={'Appr&ove ' + approveLabel.slice('Approve '.length).replace('&', '&&')} />
     </button>
   </footer>
 </div>
