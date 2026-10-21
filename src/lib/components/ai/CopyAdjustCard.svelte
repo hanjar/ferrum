@@ -5,7 +5,12 @@
   import type { ChatStore, RunView } from '../../ai/chatStore.svelte';
   import { describeSettings } from '../../ai/copyAdjust';
 
+  import Mnemonic from '../Mnemonic.svelte';
+
   let { run, store }: { run: RunView; store: ChatStore } = $props();
+  // FER-577 (B4): access letters only while this card is the live (waiting) run.
+  const live = $derived(store.activeRun?.runId === run.runId);
+  const mn = (label: string) => (live ? label : label.replace('&', ''));
 
   const view = $derived(run.copyAdjust);
   const waiting = $derived(run.state === 'awaitingApproval');
@@ -58,9 +63,11 @@
         disabled={!run.canApprove}
         onclick={() => store.approve(run.runId)}
       >
-        Terapkan
+        <Mnemonic label={mn('Te&rapkan')} />
       </button>
-      <button type="button" class="ghost" onclick={() => store.cancel(run.runId)}>Batal</button>
+      <button type="button" class="ghost" onclick={() => store.cancel(run.runId)}
+        ><Mnemonic label={mn('Bata&l')} /></button
+      >
     </div>
   {/if}
 </section>

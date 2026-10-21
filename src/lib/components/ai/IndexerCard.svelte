@@ -7,7 +7,12 @@
   import type { ChatStore, RunView } from '../../ai/chatStore.svelte';
   import { MODE_LABEL } from '../../ai/indexerControl';
 
+  import Mnemonic from '../Mnemonic.svelte';
+
   let { run, store }: { run: RunView; store: ChatStore } = $props();
+  // FER-577 (B4): access letters only while this card is the live (waiting) run.
+  const live = $derived(store.activeRun?.runId === run.runId);
+  const mn = (label: string) => (live ? label : label.replace('&', ''));
 
   const view = $derived(run.indexer);
   const waiting = $derived(run.state === 'awaitingApproval' && !run.approvalSent);
@@ -117,9 +122,11 @@
           disabled={!canConfirm}
           onclick={confirm}
         >
-          Ganti mode
+          <Mnemonic label={mn('&Ganti mode')} />
         </button>
-        <button type="button" class="ghost" onclick={() => store.cancel(run.runId)}>Batal</button>
+        <button type="button" class="ghost" onclick={() => store.cancel(run.runId)}
+          ><Mnemonic label={mn('Bata&l')} /></button
+        >
       </div>
     {/if}
   {:else if run.blockedReason}

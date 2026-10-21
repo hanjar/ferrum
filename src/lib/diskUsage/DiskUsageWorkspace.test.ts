@@ -987,10 +987,10 @@ describe('DiskUsageWorkspace — FER-574 entry follows the ACTIVE pane', () => {
 describe('DiskUsageWorkspace — keyboard (FER-577 B4)', () => {
   function seed(): void {
     const store = duWorkspace.store;
-    store.testData('s1', 'complete', 'C:\left');
-    store.snapshot = snapshotFixture('s1', 'C:\left');
-    store.treeNodes['C:\left'] = {
-      items: [childItem('C:\left\docs'), childItem('C:\left\pics')],
+    store.testData('s1', 'complete', 'C:\\left');
+    store.snapshot = snapshotFixture('s1', 'C:\\left');
+    store.treeNodes['C:\\left'] = {
+      items: [childItem('C:\\left\\docs'), childItem('C:\\left\\pics')],
       total: 2,
       loading: false,
       loadingMore: false,
@@ -1008,7 +1008,7 @@ describe('DiskUsageWorkspace — keyboard (FER-577 B4)', () => {
     expect(document.activeElement?.getAttribute('role')).toBe('tree');
     withData.unmount();
     duWorkspace.store.reset();
-    duWorkspace.store.rootInput = 'C:\left';
+    duWorkspace.store.rootInput = 'C:\\left';
     const empty = render(DiskUsageWorkspace);
     await tick();
     expect(document.activeElement?.textContent?.trim()).toBe('Scan');
@@ -1077,7 +1077,7 @@ describe('DiskUsageWorkspace — keyboard (FER-577 B4)', () => {
     const store = duWorkspace.store;
     const { getByTestId, getByLabelText } = render(DiskUsageWorkspace);
     const tree = getByTestId('du-workspace').querySelector('[role="tree"]') as HTMLElement;
-    store.zoomIn('C:\left\docs');
+    store.zoomIn('C:\\left\\docs');
     await tick();
     expect(store.zoomStack.length).toBe(1);
     key(tree, 'Backspace');
@@ -1094,7 +1094,7 @@ describe('DiskUsageWorkspace — keyboard (FER-577 B4)', () => {
   it('exit returns the keyboard to the entry pane list', async () => {
     seed();
     const focusList = vi.fn();
-    registerPane(0, { ...paneOf('C:\left'), focusList });
+    registerPane(0, { ...paneOf('C:\\left'), focusList });
     duWorkspace.entryPane = 0;
     const { unmount } = render(DiskUsageWorkspace);
     unmount();
