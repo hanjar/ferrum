@@ -157,7 +157,17 @@ describe('quit flow', () => {
     requestQuit();
     expect(dialogs.current).toBeNull();
     await p;
-    expect(h.invoke).toHaveBeenCalledWith('close_ack');
+    expect(h.invoke).not.toHaveBeenCalled(); // no ack while closing: Rust's escape hatch stays live
     expect(h.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed destroy does not lock the user in: the next close still works', async () => {
+    h.destroy.mockRejectedValueOnce(new Error('denied'));
+    jobs.list = [];
+    await cancelAllAndQuit(100);
+    expect(h.destroy).toHaveBeenCalledTimes(1);
+    await close();
+    expect(h.invoke).toHaveBeenCalledWith('close_ack');
+    expect(h.destroy).toHaveBeenCalledTimes(2);
   });
 });

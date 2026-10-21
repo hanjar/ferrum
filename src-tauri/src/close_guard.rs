@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 pub const CLOSE_EVENT: &str = "ferrum-close-requested";
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(2);
+/// A second close before the ack only passes after this long (double clicks and Alt+F4 auto-repeat must not skip the confirmation).
+pub const MIN_REPEAT_GAP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
 pub struct GuardState {
@@ -23,6 +25,8 @@ pub enum CloseDecision {
     Allow,
     /// Close is held; ask the frontend (seq identifies the request for the timeout).
     Hold { seq: u64 },
+    /// Repeat of a still-unanswered request: keep holding, no new event or timer.
+    HoldSilently,
 }
 
 impl GuardState {
@@ -35,9 +39,13 @@ impl GuardState {
 
     /// A native close request arrived at `now`.
     pub fn on_close_requested(&mut self, now: Instant) -> CloseDecision {
-        if self.pending.take().is_some() {
-            // Unanswered request: the user pressed close again. Never trap them.
-            return CloseDecision::Allow;
+        if let Some((_, since)) = self.pending {
+            if now.saturating_duration_since(since) >= MIN_REPEAT_GAP {
+                // Unanswered for a while and the user insists: never trap them.
+                self.pending = None;
+                return CloseDecision::Allow;
+            }
+            return CloseDecision::HoldSilently;
         }
         self.next_seq += 1;
         let seq = self.next_seq;
@@ -80,14 +88,14 @@ pub fn handle_close_requested<R: tauri::Runtime>(
     }
     match with_state(|s| s.on_close_requested(Instant::now())) {
         CloseDecision::Allow => {}
+        CloseDecision::HoldSilently => api.prevent_close(),
         CloseDecision::Hold { seq } => {
-            api.prevent_close();
             if window.emit_to("main", CLOSE_EVENT, ()).is_err() {
-                // Cannot even notify the frontend: do not trap the user.
+                // Cannot even notify the frontend: do not trap the user (close proceeds natively).
                 with_state(|s| s.on_ack());
-                let _ = window.destroy();
                 return;
             }
+            api.prevent_close();
             let w = window.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(ACK_TIMEOUT);
@@ -101,7 +109,10 @@ pub fn handle_close_requested<R: tauri::Runtime>(
 
 /// The frontend received the close request and takes over (dialog or destroy).
 #[tauri::command]
-pub fn close_ack() {
+pub fn close_ack<R: tauri::Runtime>(webview: tauri::Webview<R>) {
+    if webview.label() != "main" {
+        return;
+    }
     with_state(|s| s.on_ack());
 }
 
@@ -139,13 +150,26 @@ mod tests {
     }
 
     #[test]
-    fn second_close_without_ack_is_allowed() {
+    fn quick_second_close_is_held_silently() {
         let mut s = GuardState::new();
         let t = Instant::now();
         let CloseDecision::Hold { seq } = s.on_close_requested(t) else {
             panic!()
         };
-        assert_eq!(s.on_close_requested(t), CloseDecision::Allow);
+        let soon = t + Duration::from_millis(200);
+        assert_eq!(s.on_close_requested(soon), CloseDecision::HoldSilently);
+        assert!(s.on_timeout(seq)); // same request is still pending
+    }
+
+    #[test]
+    fn late_second_close_without_ack_is_allowed() {
+        let mut s = GuardState::new();
+        let t = Instant::now();
+        let CloseDecision::Hold { seq } = s.on_close_requested(t) else {
+            panic!()
+        };
+        let later = t + Duration::from_millis(1500);
+        assert_eq!(s.on_close_requested(later), CloseDecision::Allow);
         assert!(!s.on_timeout(seq)); // stale timer must not fire afterwards
     }
 

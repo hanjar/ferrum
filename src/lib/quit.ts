@@ -6,7 +6,7 @@
  *
  * Mechanism: Rust (close_guard.rs) holds every native close of the main window
  * and emits CLOSE_EVENT. The frontend acks at once (`close_ack`), then either
- * destroys the window (idle) or shows the confirmation. No ack within ~2 s (frozen
+ * destroys the window (idle) or shows the confirmation. No ack within ACK_TIMEOUT (close_guard.rs; frozen
  * webview) or a second close without ack lets Rust close the window itself.
  * After the user confirms, the work is cancelled (bounded wait so the backend can
  * clean staging/partial files) and the window is destroyed.
@@ -44,6 +44,7 @@ export async function quitApp(): Promise<void> {
     await getCurrentWindow().destroy();
   } catch (e) {
     console.warn('[quit] window destroy failed', e);
+    quitting = false; // never lock the user in: a later close / file.quit may try again
   }
 }
 
@@ -103,13 +104,14 @@ export async function cancelAllAndQuit(timeoutMs: number = QUIT_CANCEL_TIMEOUT_M
 
 /** Handle one close request forwarded by Rust. Fail-open: any error closes the window. */
 export async function handleCloseRequest(): Promise<void> {
+  // While closing, stay silent: without an ack Rust's escape hatch (timer / second close) still applies.
+  if (quitting) return;
   try {
     await invoke('close_ack'); // the frontend is alive: stop Rust's escape-hatch timer
   } catch (e) {
     console.warn('[quit] close_ack failed', e);
   }
   try {
-    if (quitting) return;
     requestQuit();
   } catch (e) {
     console.warn('[quit] close handling failed, closing', e);
