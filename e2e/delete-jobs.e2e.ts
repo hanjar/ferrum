@@ -135,7 +135,7 @@ test.describe('async delete (FER-585)', () => {
     // Only a delete that takes a moment shows its progress.
     const bar = deleteDlg().getByTestId('delete-progress');
     await expect(bar).toBeVisible();
-    await expect(deleteDlg()).toContainText('1200 entries');
+    await expect(deleteDlg()).toContainText('0 / 1 items');
     await expect(deleteDlg()).toContainText('bigfolder');
 
     const listCalls = (await calls(page, 'list_dir')).length;
@@ -157,7 +157,7 @@ test.describe('async delete (FER-585)', () => {
       currentName: 'bigfolder',
       entries: 5000,
     });
-    await expect(job).toContainText('5000 entries');
+    await expect(job).toContainText('bigfolder');
     await page.keyboard.press('Escape');
 
     await emit(page, 'delete://done', {

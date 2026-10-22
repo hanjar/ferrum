@@ -5,11 +5,15 @@
 //! (`prepare_sources`: string gate, protected folders, reserved device names) run BEFORE a job starts,
 //! exactly as for the old synchronous `delete_entries`; nothing in here widens what can be deleted.
 //!
-//! Cancel is cooperative and checked at an item boundary and, for a permanent delete of a folder,
-//! between the entries inside it. What a cancel leaves behind is never silent:
+//! Cancel and progress are checked at the boundary of a top-level item, before the next one starts;
+//! the item being deleted is finished. A permanent delete of a folder is ONE `fs::remove_dir_all`:
+//! std's version works through directory handles and does not follow a junction or symlink swapped
+//! in while it runs (the CVE-2022-21658 class). A hand-written walker could not give that guarantee,
+//! so there is deliberately no cancel inside a folder (a handle-relative walker is a separate task).
+//! What a cancel leaves behind is never silent:
 //! - `not_processed`: top-level items that were not touched at all;
-//! - `partial`: top-level folders that lost some entries and still exist (permanent delete only; the
-//!   Recycle Bin moves one item atomically, so a trashed folder is either in the bin or untouched).
+//! - `partial`: a folder whose `remove_dir_all` failed part-way and still exists (the failure says why);
+//!   the Recycle Bin moves one item atomically, so a trashed folder is either in the bin or untouched.
 //!
 //! `report.deleted` counts only items that are completely gone, so Activity receipts (built by the
 //! caller from `failed`, `not_processed` and `partial`) are written for those alone.
@@ -117,33 +121,6 @@ fn failed(path: &str, code: ErrorCode, message: String) -> FailedItem {
     }
 }
 
-/// Outcome of removing one folder tree.
-enum Tree {
-    Done,
-    /// Cancelled between entries.
-    Cancelled,
-    Failed(std::io::Error),
-}
-
-struct Walk<'a> {
-    cancelled: &'a dyn Fn() -> bool,
-    progress: &'a mut dyn FnMut(&DeleteProgress),
-    state: &'a mut DeleteProgress,
-    /// Entries removed inside the current top-level item.
-    removed_here: u64,
-    /// Test seam: runs after a sub-folder was enumerated and before it is opened (the window a
-    /// hostile party would use to swap the folder for a junction).
-    before_open: &'a dyn Fn(&Path),
-}
-
-impl Walk<'_> {
-    fn removed_one(&mut self) {
-        self.removed_here += 1;
-        self.state.entries += 1;
-        (self.progress)(self.state);
-    }
-}
-
 #[cfg(windows)]
 fn is_directory_link(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -158,7 +135,8 @@ fn is_directory_link(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
-/// Clear the read-only attribute of `path` (file or folder). False when there was nothing to clear.
+/// Clear the read-only attribute of `path` itself (never following a link). False when there was
+/// nothing to clear.
 fn clear_readonly(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
@@ -191,171 +169,11 @@ fn remove_leaf(path: &Path, is_symlink: bool) -> std::io::Result<()> {
     }
 }
 
-/// An empty folder. Windows refuses to remove a folder that carries the read-only attribute
-/// (Explorer sets it on customised folders with a desktop.ini), `remove_dir_all` never minded.
-fn remove_empty_dir(path: &Path) -> std::io::Result<()> {
-    match fs::remove_dir(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && clear_readonly(path) => {
-            fs::remove_dir(path).map_err(|_| e)
-        }
-        other => other,
-    }
-}
-
-/// One folder being emptied: its open handle and what is left to remove inside it.
-struct Frame {
-    path: std::path::PathBuf,
-    children: std::vec::IntoIter<(std::path::PathBuf, fs::FileType)>,
-    /// Held until the folder is emptied. Opened WITHOUT `FILE_SHARE_DELETE`, so while the handle
-    /// lives nobody can rename, delete or replace this folder (nor, with its parents' handles held
-    /// as well, any folder above it): the path keeps meaning the folder that was checked.
-    _handle: fs::File,
-}
-
-/// What opening a folder for deletion found.
-enum Opened {
-    Dir(Frame),
-    /// A reparse point (junction, symlink): to be removed as a link, never entered.
-    Link,
-}
-
-/// Open `path` as a directory WITHOUT following a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`,
-/// `FILE_FLAG_BACKUP_SEMANTICS` is required to open a directory at all), read its attributes from
-/// the handle itself, and refuse to enter anything that is a reparse point. This closes the
-/// check-then-use race of CVE-2022-21658: the decision is made on the opened object, not on a name
-/// that someone may swap for a junction a moment later. Safe code only (std exposes the flags).
-#[cfg(windows)]
-fn open_dir(path: &Path) -> std::io::Result<Opened> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    const FILE_LIST_DIRECTORY: u32 = 0x1;
-    const FILE_READ_ATTRIBUTES: u32 = 0x80;
-    const FILE_SHARE_READ: u32 = 0x1;
-    const FILE_SHARE_WRITE: u32 = 0x2;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-    let handle = fs::OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let attrs = handle.metadata()?.file_attributes();
-    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Ok(Opened::Link);
-    }
-    if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 {
-        return Err(std::io::Error::other("Not a directory"));
-    }
-    let children = list_children(path)?;
-    Ok(Opened::Dir(Frame {
-        path: path.to_path_buf(),
-        children,
-        _handle: handle,
-    }))
-}
-
-#[cfg(not(windows))]
-fn open_dir(path: &Path) -> std::io::Result<Opened> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Ok(Opened::Link);
-    }
-    let handle = fs::File::open(path)?;
-    let children = list_children(path)?;
-    Ok(Opened::Dir(Frame {
-        path: path.to_path_buf(),
-        children,
-        _handle: handle,
-    }))
-}
-
-fn list_children(
-    dir: &Path,
-) -> std::io::Result<std::vec::IntoIter<(std::path::PathBuf, fs::FileType)>> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        out.push((entry.path(), entry.file_type()?));
-    }
-    Ok(out.into_iter())
-}
-
-/// Remove `root` and everything below it, checking for a cancel before each entry. Iterative (an
-/// explicit stack of open folders): a tree thousands of levels deep, possible with `\\?\` paths,
-/// cannot overflow the thread's stack. A junction or symlink inside the tree is removed as a link
-/// and never entered, so what it points to is never touched.
-fn remove_tree(root: &Path, w: &mut Walk) -> Tree {
-    let mut stack: Vec<Frame> = Vec::new();
-    match open_dir(root) {
-        Ok(Opened::Dir(f)) => stack.push(f),
-        // A top-level link is the item itself: gone as a link, nothing entered.
-        Ok(Opened::Link) => {
-            return match remove_leaf(root, true) {
-                Ok(()) => {
-                    w.removed_one();
-                    Tree::Done
-                }
-                Err(e) => Tree::Failed(e),
-            };
-        }
-        Err(e) => return Tree::Failed(e),
-    }
-    loop {
-        if (w.cancelled)() {
-            return Tree::Cancelled;
-        }
-        let Some(top) = stack.last_mut() else {
-            return Tree::Done;
-        };
-        let Some((path, ft)) = top.children.next() else {
-            // Emptied: release the handle first (an open handle without delete sharing would
-            // block the removal), then remove the folder itself.
-            let done = stack.pop().expect("top exists");
-            let dir = done.path.clone();
-            drop(done);
-            match remove_empty_dir(&dir) {
-                Ok(()) => {
-                    w.removed_one();
-                    continue;
-                }
-                Err(e) => return Tree::Failed(e),
-            }
-        };
-        if ft.is_dir() {
-            (w.before_open)(&path);
-            match open_dir(&path) {
-                Ok(Opened::Dir(f)) => stack.push(f),
-                // It was a folder when listed, but is a link now: remove the link only.
-                Ok(Opened::Link) => match remove_leaf(&path, true) {
-                    Ok(()) => w.removed_one(),
-                    Err(e) => return Tree::Failed(e),
-                },
-                Err(e) => return Tree::Failed(e),
-            }
-        } else {
-            match remove_leaf(&path, ft.is_symlink()) {
-                Ok(()) => w.removed_one(),
-                Err(e) => return Tree::Failed(e),
-            }
-        }
-    }
-}
-
 fn run(
     paths: &[String],
     mode: &Mode,
     cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(&DeleteProgress),
-) -> DeleteJobResult {
-    run_with_hook(paths, mode, cancelled, progress, &|_| {})
-}
-
-fn run_with_hook(
-    paths: &[String],
-    mode: &Mode,
-    cancelled: &dyn Fn() -> bool,
-    progress: &mut dyn FnMut(&DeleteProgress),
-    before_open: &dyn Fn(&Path),
 ) -> DeleteJobResult {
     let total = paths.len();
     let mut report = DeleteReport {
@@ -366,7 +184,6 @@ fn run_with_hook(
     let mut not_processed: Vec<String> = Vec::new();
     let mut partial: Vec<String> = Vec::new();
     let mut was_cancelled = false;
-    let mut cancel_partial = 0usize;
     let mut state = DeleteProgress {
         done: 0,
         total,
@@ -435,43 +252,35 @@ fn run_with_hook(
                     }
                     continue;
                 }
-                let mut walk = Walk {
-                    cancelled,
-                    progress: &mut *progress,
-                    state: &mut state,
-                    removed_here: 0,
-                    before_open,
-                };
-                let outcome = remove_tree(path, &mut walk);
-                let removed_here = walk.removed_here;
-                match outcome {
-                    Tree::Done => report.deleted += 1,
-                    Tree::Cancelled => {
-                        was_cancelled = true;
-                        if removed_here > 0 {
-                            partial.push(p.clone());
-                            cancel_partial = 1;
-                        } else {
-                            not_processed.push(p.clone());
-                        }
-                        not_processed.extend(paths[i + 1..].iter().cloned());
-                        break;
+                // One std `remove_dir_all`: handle-based, never follows a junction or symlink swapped
+                // in while it runs. A folder that carries the read-only attribute (Explorer sets it
+                // on customised folders) is cleared once and retried, on the folder itself only.
+                let result = match fs::remove_dir_all(path) {
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::PermissionDenied
+                            && clear_readonly(path) =>
+                    {
+                        fs::remove_dir_all(path).map_err(|_| e)
                     }
-                    Tree::Failed(e) => {
+                    other => other,
+                };
+                match result {
+                    Ok(()) => {
+                        report.deleted += 1;
+                        state.entries += 1;
+                    }
+                    Err(e) => {
                         let fe = FsError::from(e).with_path(p.clone());
-                        let message = if removed_here > 0 {
-                            format!(
-                                "{} ({removed_here} entries inside were already deleted; the folder was left partly deleted)",
-                                fe.message
-                            )
-                        } else {
-                            fe.message
-                        };
-                        report.failed.push(failed(p, fe.code, message));
-                        // An error in the middle of a folder leaves it partly deleted too: it is
-                        // listed as such (besides the failure that says why).
-                        if removed_here > 0 {
+                        // The folder is still there: some of it may already be gone.
+                        if fs::symlink_metadata(path).is_ok() {
+                            report.failed.push(failed(
+                                p,
+                                fe.code,
+                                format!("{} (the folder may be partly deleted)", fe.message),
+                            ));
                             partial.push(p.clone());
+                        } else {
+                            report.failed.push(failed(p, fe.code, fe.message));
                         }
                     }
                 }
@@ -479,7 +288,7 @@ fn run_with_hook(
         }
     }
     state.done = if was_cancelled {
-        total - not_processed.len() - cancel_partial
+        total - not_processed.len()
     } else {
         total
     };
@@ -553,8 +362,8 @@ mod tests {
         assert_eq!((first.done, first.total), (0, 2));
         let last = seen.last().unwrap();
         assert_eq!((last.done, last.total), (2, 2));
-        // 1 file + (3 + 3 files + `inner` + `tree`) entries.
-        assert_eq!(last.entries, 1 + 3 + 3 + 2);
+        // Progress counts top-level items (a folder is one remove_dir_all).
+        assert_eq!(last.entries, 2);
         assert!(
             seen.iter()
                 .any(|p| p.current_name.as_deref() == Some("tree"))
@@ -563,45 +372,39 @@ mod tests {
     }
 
     #[test]
-    fn cancel_in_the_middle_of_a_big_folder_stops_and_reports_the_folder_as_partial() {
+    fn cancel_stops_before_the_next_top_level_item_and_finishes_the_running_one() {
         let fx = fixture();
         let before = fx.root.join("before.txt");
         fs::write(&before, b"b").unwrap();
         let big = tree_with(&fx.root, "big", 20);
         let after = fx.root.join("after.txt");
         fs::write(&after, b"c").unwrap();
-        let removed = Cell::new(0u64);
-        let mut seen_entries = 0u64;
+        let after_big = fx.root.join("after_big");
+        fs::create_dir_all(&after_big).unwrap();
+        let reached = Cell::new(0usize);
         let r = run_permanent(
-            &[s(&before), s(&big), s(&after)],
-            // Cancel once 10 entries are gone: deterministic, no timing.
-            &|| removed.get() >= 10,
-            &mut |p| {
-                removed.set(p.entries);
-                seen_entries = p.entries;
-            },
+            &[s(&before), s(&big), s(&after), s(&after_big)],
+            // Cancel is asked once the big folder has started: it still finishes (one remove_dir_all).
+            &|| reached.get() >= 2,
+            &mut |p| reached.set(p.done + usize::from(p.current_name.is_some())),
         );
         assert!(r.cancelled);
-        assert_eq!(
-            r.report.deleted, 1,
-            "only the first file is completely gone"
-        );
-        assert!(!before.exists());
-        assert!(big.exists(), "the folder is only partly deleted");
+        assert_eq!(r.report.deleted, 2, "failed: {:?}", r.report.failed);
         assert!(
-            after.exists(),
-            "an item the cancel never reached is untouched"
+            !before.exists() && !big.exists(),
+            "the running item is finished"
         );
-        assert_eq!(r.partial, vec![s(&big)]);
-        assert_eq!(r.not_processed, vec![s(&after)]);
-        assert!(r.report.failed.is_empty());
-        assert!((10..1 + 20 + 20 + 2).contains(&seen_entries));
-        assert_eq!(r.remaining(), vec![s(&big), s(&after)]);
-        // Nothing vanished without a report: every request is deleted, partial or not processed.
+        assert!(
+            after.exists() && after_big.exists(),
+            "later items are untouched"
+        );
+        assert!(r.partial.is_empty(), "no cancel inside a folder");
+        assert_eq!(r.not_processed, vec![s(&after), s(&after_big)]);
         assert_eq!(
-            r.report.deleted + r.partial.len() + r.not_processed.len(),
+            r.report.deleted + r.partial.len() + r.not_processed.len() + r.report.failed.len(),
             r.report.requested
         );
+        assert_eq!(r.remaining(), vec![s(&after), s(&after_big)]);
     }
 
     #[test]
@@ -616,28 +419,6 @@ mod tests {
         assert!(r.partial.is_empty());
         assert_eq!(r.not_processed, vec![s(&a), s(&b)]);
         assert!(a.exists() && b.exists());
-    }
-
-    #[test]
-    fn a_cancel_right_at_the_start_of_a_folder_is_not_called_partial() {
-        let fx = fixture();
-        let a = fx.root.join("a.txt");
-        fs::write(&a, b"a").unwrap();
-        let big = tree_with(&fx.root, "big", 3);
-        // Let the first item pass, cancel as soon as the folder starts (no entry removed yet).
-        let polls = Cell::new(0);
-        let r = run_permanent(
-            &[s(&a), s(&big)],
-            &|| {
-                polls.set(polls.get() + 1);
-                polls.get() >= 3
-            },
-            &mut |_| {},
-        );
-        assert!(r.cancelled);
-        assert!(r.partial.is_empty());
-        assert_eq!(r.not_processed, vec![s(&big)]);
-        assert!(big.join("f0.txt").exists());
     }
 
     #[test]
@@ -849,35 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_swapped_for_a_junction_after_it_was_listed_is_never_entered() {
-        let fx = fixture();
-        let (outside, keep) = outside_with_keep(&fx.root);
-        let tree = fx.root.join("tree");
-        let sub = tree.join("sub");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("f.txt"), b"x").unwrap();
-        // The tree is listed with `sub` as a folder; right before it is opened it is replaced by
-        // a junction to a folder the user cares about (CVE-2022-21658 class).
-        let swapped = Cell::new(false);
-        let r = run_with_hook(&[s(&tree)], &Mode::Permanent, &never, &mut |_| {}, &|p| {
-            if p.ends_with("sub") && !swapped.get() {
-                swapped.set(true);
-                fs::remove_dir_all(p).unwrap();
-                make_junction(p, &outside);
-            }
-        });
-        assert!(swapped.get(), "the race window was exercised");
-        assert!(
-            keep.exists(),
-            "the target of the swapped-in junction survives"
-        );
-        assert!(outside.join("nested").join("deep.txt").exists());
-        assert_eq!(r.report.deleted, 1, "failed: {:?}", r.report.failed);
-        assert!(!tree.exists());
-    }
-
-    #[test]
-    fn a_very_deep_tree_is_deleted_without_recursion() {
+    fn a_very_deep_tree_is_deleted() {
         let fx = fixture();
         let root = fx.root.join("deep");
         // 1000 levels: far beyond MAX_PATH, so everything goes through the \\?\ spelling.
@@ -920,22 +673,6 @@ mod tests {
         assert!(r.report.failed[0].message.contains("partly deleted"));
         assert_eq!(r.partial, vec![s(&dir)]);
         assert!(!r.cancelled);
-        assert!(!dir.join("a.txt").exists() && dir.join("z.txt").exists());
-    }
-
-    #[test]
-    fn an_open_folder_handle_does_not_let_the_folder_be_renamed_under_the_walk() {
-        // The share mode of the walk's folder handle (no FILE_SHARE_DELETE) is what keeps the
-        // checked folder from being swapped while it is emptied.
-        let fx = fixture();
-        let dir = fx.root.join("held");
-        fs::create_dir_all(&dir).unwrap();
-        let frame = match open_dir(&dir).unwrap() {
-            Opened::Dir(f) => f,
-            Opened::Link => panic!("a plain folder"),
-        };
-        assert!(fs::rename(&dir, fx.root.join("moved")).is_err());
-        drop(frame);
-        assert!(fs::rename(&dir, fx.root.join("moved")).is_ok());
+        assert!(dir.join("z.txt").exists());
     }
 }

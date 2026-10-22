@@ -32,10 +32,10 @@ Planned: `create_entry`, `rename_entry`, `delete_entries` (task 10),
 ### Delete jobs (FER-585)
 
 `delete_start(paths, permanent, requestId)` returns at once after the usual path gates (`prepare_sources`); the job runs on a blocking thread.
-Events: `delete://progress` `{requestId, done, total, currentName?, entries}` (throttled) and one `delete://done` `{requestId, result?: {report, cancelled, notProcessed, partial}, error?}`.
-`delete_cancel(requestId)` stops at the next item or, for a permanent delete of a folder, the next entry; `partial` lists folders left partly deleted, `notProcessed` untouched items.
+Events: `delete://progress` `{requestId, done, total, currentName?, entries}` (throttled; `done`/`total` count top-level items, `entries` the items deleted so far) and one `delete://done` `{requestId, result?: {report, cancelled, notProcessed, partial}, error?}`.
+`delete_cancel(requestId)` is checked before each top-level item; the item that is running is finished. There is deliberately no cancel inside a folder: a permanent delete of a folder is one `std::fs::remove_dir_all`, which works through directory handles and does not follow a junction or symlink swapped in while it runs. A hand-written walker could not give that guarantee (a handle-relative walker is a separate task). A top-level link (junction/symlink) is removed as a link, never followed.
+`partial` lists a folder whose `remove_dir_all` failed part-way and still exists (its failure says why); `notProcessed` lists items a cancel never reached.
 `delete_entries` (no progress) stays for plain callers and now runs off the UI thread.
-A permanent delete never enters a junction or symlink: each folder is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and checked on the handle (no `FILE_SHARE_DELETE`, so it cannot be swapped while it is emptied); links are removed as links. The walk is iterative, so very deep trees are safe.
 Known limit: the Recycle Bin call (`trash` crate, `FOF_WANTNUKEWARNING`) now runs on a worker thread without an owner window; the shell's "too large for the Recycle Bin" prompt may appear behind the main window (manual check, FER-581).
 
 ### File clipboard (FER-572)

@@ -501,7 +501,7 @@
           totalEntries: p.total,
           currentMember: p.currentName,
         });
-        flow.summary = `${p.entries} entries deleted`;
+        flow.summary = `${p.done} of ${p.total} items`;
         if (delJob === flow) delProgress = p;
       });
       if (deleteChangedDisk(result)) {
@@ -747,7 +747,7 @@
           <div class="job-fill" style:width={pct === null ? undefined : `${pct}%`}></div>
         </div>
         <p class="job-meta" role="status">
-          {delProgress.done} / {delProgress.total} items · {delProgress.entries} entries deleted
+          {delProgress.done} / {delProgress.total} items
         </p>
         {#if delProgress.currentName}<p class="path mono">{delProgress.currentName}</p>{/if}
         {#if delJob.state === 'cancelling'}<p class="job-meta" role="status">Cancelling...</p>{/if}

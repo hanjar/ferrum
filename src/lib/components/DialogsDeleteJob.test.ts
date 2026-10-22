@@ -133,7 +133,6 @@ describe('FER-585: Delete as a backend job', () => {
     await vi.waitFor(() => expect(progressBar()).not.toBeNull(), { timeout: 2000 });
     expect(progressBar()?.getAttribute('aria-valuenow')).toBe('50');
     expect(modal().textContent).toContain('1 / 2');
-    expect(modal().textContent).toContain('40 entries');
     expect(button('Background')).toBeTruthy();
     expect(jobs.running).toHaveLength(1);
     expect(jobs.running[0]).toMatchObject({ kind: 'delete', processedEntries: 1, totalEntries: 2 });
