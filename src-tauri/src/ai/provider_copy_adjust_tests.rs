@@ -119,9 +119,10 @@ fn archive_prompt_offers_7z_levels_and_still_forbids_rar_and_paths() {
     let prompt = system_prompt(&[ARCHIVE]);
     for needle in [
         "\"format\":\"zip\"|\"7z\"",
-        "\"level\":optional \"store\"|\"fast\"|\"normal\"|\"maximum\"|\"ultra\"",
+        "\"level\":optional \"store\"|\"fast\"|\"normal\"|\"maximum\"|\"ultra\"|\"ultra-text\"",
         "\"paling kecil\"",
         "-> \"ultra\"",
+        "\"ultra-text\" instead (7z only",
         "RAR and other formats are not available",
         "Never put a path in the intent; outputName is a basename only",
     ] {

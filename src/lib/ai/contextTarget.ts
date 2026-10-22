@@ -123,6 +123,8 @@ export function levelText(level: ArchiveIntentLevel): string {
     case 'maximum':
     case 'ultra':
       return 'maksimum (level terkuat, sama dengan Max di dialog Pack)';
+    case 'ultra-text':
+      return 'Ultra (teks): PPMd, lebih lambat tetapi paling kecil untuk file teks';
   }
 }
 

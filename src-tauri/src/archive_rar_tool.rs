@@ -658,6 +658,11 @@ pub fn build_rar_args(
         ArchiveCompressionLevel::Fast => "-m1",
         ArchiveCompressionLevel::Normal => "-m3",
         ArchiveCompressionLevel::Max => "-m5",
+        // FER-579: refused up front by `check_for` (callers); never map it to another level.
+        ArchiveCompressionLevel::UltraText => {
+            debug_assert!(false, "ultra-text is 7z only");
+            "-m5"
+        }
     };
     let mut list_arg = OsString::from("@");
     list_arg.push(listfile_path.as_os_str());
@@ -877,6 +882,7 @@ pub fn create_rar_with_tool(
     level: ArchiveCompressionLevel,
     progress: &mut dyn FnMut(ArchiveProgress) -> bool,
 ) -> Result<PathBuf, ArchiveError> {
+    level.check_for(crate::archive_contract::ArchiveCreateFormat::Rar)?;
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
     crate::archive_create_test::clean_stale_staging(destination_path);

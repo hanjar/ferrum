@@ -25,8 +25,18 @@ export type ArchiveSelector = Selector | EntitySelector;
 /** FER-576: formats the model may ask `archive.create` for. RAR is never creatable from chat. */
 export const ARCHIVE_INTENT_FORMATS = ['zip', '7z'] as const;
 export type ArchiveIntentFormat = (typeof ARCHIVE_INTENT_FORMATS)[number];
-/** FER-576: closed set of compression levels; `maximum` and `ultra` both map to the engine's strongest. */
-export const ARCHIVE_INTENT_LEVELS = ['store', 'fast', 'normal', 'maximum', 'ultra'] as const;
+/**
+ * FER-576: closed set of compression levels; `maximum` and `ultra` both map to the engine's strongest (LZMA2).
+ * FER-579: `ultra-text` is a different method (7z PPMd, for plain text) and is valid with 7z only.
+ */
+export const ARCHIVE_INTENT_LEVELS = [
+  'store',
+  'fast',
+  'normal',
+  'maximum',
+  'ultra',
+  'ultra-text',
+] as const;
 export type ArchiveIntentLevel = (typeof ARCHIVE_INTENT_LEVELS)[number];
 export type ProposedIntent =
   | {
@@ -522,6 +532,9 @@ export function parseIntent(
       !ARCHIVE_INTENT_LEVELS.includes(intent.level as ArchiveIntentLevel)
     ) {
       fail('invalid_payload', 'Archive level is not allowed');
+    }
+    if (intent.level === 'ultra-text' && intent.format !== '7z') {
+      fail('invalid_payload', 'Level ultra-text needs format 7z');
     }
     target(intent.target);
     if (intent.outputName !== undefined && !isSafeOutputName(intent.outputName)) {

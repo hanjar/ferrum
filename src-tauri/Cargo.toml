@@ -91,7 +91,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # FER-464: deflate for the Disk usage scan cache (already in the lock via zip).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 zip = { version = "=4.6.1", default-features = false, features = ["deflate", "aes-crypto"] }
-sevenz-rust2 = { version = "=0.20.2", default-features = false, features = ["compress", "aes256"] }
+sevenz-rust2 = { version = "=0.20.2", default-features = false, features = ["compress", "aes256", "ppmd"] }
 unrar = "=0.5.8"
 ferrum-activity-contract = { path = "src/activity" }
 ferrum-activity-store = { path = "src/activity/store" }

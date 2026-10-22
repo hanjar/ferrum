@@ -144,6 +144,8 @@ export function packLevelOf(
     case 'maximum':
     case 'ultra':
       return 'max';
+    case 'ultra-text':
+      return 'ultra-text';
     default:
       return level;
   }
