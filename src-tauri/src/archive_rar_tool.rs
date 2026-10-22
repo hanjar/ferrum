@@ -657,8 +657,12 @@ pub fn build_rar_args(
         ArchiveCompressionLevel::Store => "-m0",
         ArchiveCompressionLevel::Fast => "-m1",
         ArchiveCompressionLevel::Normal => "-m3",
-        // FER-579: UltraText is refused for RAR before this point (`check_for`).
-        ArchiveCompressionLevel::Max | ArchiveCompressionLevel::UltraText => "-m5",
+        ArchiveCompressionLevel::Max => "-m5",
+        // FER-579: refused up front by `check_for` (callers); never map it to another level.
+        ArchiveCompressionLevel::UltraText => {
+            debug_assert!(false, "ultra-text is 7z only");
+            "-m5"
+        }
     };
     let mut list_arg = OsString::from("@");
     list_arg.push(listfile_path.as_os_str());

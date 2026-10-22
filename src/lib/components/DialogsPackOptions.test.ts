@@ -257,4 +257,26 @@ describe('FER-579: Ultra (text) 7z level', () => {
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
     expect(archiveMocks.archiveCreate.mock.calls[0][5]).toBe('ultra-text');
   });
+  it('a manual level choice survives a zip to 7z switch with a text selection', async () => {
+    archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Reports.7z');
+    register(0, DIR, [CSV, LOG]);
+    dialogs.beginPack('zip');
+    const { container, getByRole } = render(Dialogs);
+    await tick();
+    const max = container.querySelector<HTMLInputElement>('input[name="packLevel"][value="max"]');
+    if (max) await fireEvent.click(max);
+    await tick();
+    const sevenz = container.querySelector<HTMLInputElement>(
+      'input[name="packFormat"][value="sevenz"]',
+    );
+    if (sevenz) await fireEvent.click(sevenz);
+    await tick();
+    expect(radio(container)?.checked).toBe(false);
+    expect(container.querySelector('input[name="packLevel"]:checked')?.getAttribute('value')).toBe(
+      'max',
+    );
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await vi.waitFor(() => expect(dialogs.current).toBeNull());
+    expect(archiveMocks.archiveCreate.mock.calls[0][5]).toBe('max');
+  });
 });

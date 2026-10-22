@@ -865,7 +865,7 @@
         <p class="dim" data-testid="pack-ultra-text-hint">
           {#if packTextSuggested}
             Mostly text files: Ultra (text) gives the smallest 7z. It is slower and uses up to 192
-            MB of memory.
+            MiB of memory.
           {:else}
             Ultra (text) is slower and best for text files (CSV, TXT, LOG, JSON, XML, SQL).
           {/if}

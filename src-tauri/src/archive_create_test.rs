@@ -878,10 +878,15 @@ fn write_zip<W: Write + std::io::Seek>(
         crate::archive_contract::ArchiveCompressionLevel::Normal => {
             (zip::CompressionMethod::Deflated, Some(6))
         }
-        // FER-579: UltraText is refused for ZIP before this point (`check_for`).
-        crate::archive_contract::ArchiveCompressionLevel::Max
-        | crate::archive_contract::ArchiveCompressionLevel::UltraText => {
+        crate::archive_contract::ArchiveCompressionLevel::Max => {
             (zip::CompressionMethod::Deflated, Some(9))
+        }
+        // FER-579: refused up front by `check_for`; never silently use another level.
+        crate::archive_contract::ArchiveCompressionLevel::UltraText => {
+            return Err(err(
+                ArchiveErrorCode::UnsupportedFormat,
+                "Compression level ultra-text is only available for 7z",
+            ));
         }
     };
     let base_options = zip::write::FullFileOptions::default()
@@ -1256,6 +1261,15 @@ pub fn test_7z_progress(
     })?;
     // FER-104 N1: single-threaded decode (see archive_sevenz::open_reader).
     reader.set_thread_count(1);
+    // FER-579: PPMd allocates its declared model up front; refuse absurd sizes before decoding.
+    crate::archive_contract::check_ppmd_memory(
+        reader.archive(),
+        crate::archive_contract::PPMD_DECODE_MAX_MEMORY,
+    )
+    .map_err(|mut e| {
+        e.archive_path = Some(archive_path.to_string_lossy().into_owned());
+        e
+    })?;
 
     // A decode failure inside AES content while a password WAS supplied cannot be told apart from
     // a wrong password (the decoder only sees garbage), so it is reported as `BadPassword`; the
@@ -1386,6 +1400,19 @@ fn mtime_for_7z(disk_path: &Path) -> Option<sevenz_rust2::NtTime> {
 pub const ULTRA_TEXT_PPMD_ORDER: u32 = 32;
 pub const ULTRA_TEXT_PPMD_MEMORY: u32 = 192 * 1024 * 1024;
 
+/// 7-Zip `CEncProps::Normalize` for PPMd: the smallest 2^i (i in 16..=31) with `size <= 2^i / 16`,
+/// capped at the 192 MiB maximum. The model of a smaller file never fills, so the ratio is the
+/// same; order stays 32 (7-Zip only changes memory).
+pub fn ultra_text_mem_for(size: u64) -> u32 {
+    for i in 16..=31u32 {
+        let m = 1u64 << i;
+        if size <= m / 16 {
+            return m.min(u64::from(ULTRA_TEXT_PPMD_MEMORY)) as u32;
+        }
+    }
+    ULTRA_TEXT_PPMD_MEMORY
+}
+
 /// Create a 7z archive from `sources` at `destination_path`.
 pub fn create_7z(sources: &[String], destination_path: &Path) -> Result<(), ArchiveError> {
     create_7z_with_policy(sources, destination_path, ArchiveConflictPolicy::Overwrite).map(|_| ())
@@ -1477,14 +1504,8 @@ pub fn create_7z_progress_with_level(
                 let config = sevenz_rust2::EncoderConfiguration::from(opts);
                 writer.set_content_methods(vec![config]);
             }
-            crate::archive_contract::ArchiveCompressionLevel::UltraText => {
-                let opts = sevenz_rust2::encoder_options::PpmdOptions::from_order_memory_size(
-                    ULTRA_TEXT_PPMD_ORDER,
-                    ULTRA_TEXT_PPMD_MEMORY,
-                );
-                let config = sevenz_rust2::EncoderConfiguration::from(opts);
-                writer.set_content_methods(vec![config]);
-            }
+            // Sized per file inside the loop below.
+            crate::archive_contract::ArchiveCompressionLevel::UltraText => {}
         }
         for entry in &files {
             let member_path = MemberPath::parse(&entry.archive_name).ok();
@@ -1524,6 +1545,20 @@ pub fn create_7z_progress_with_level(
                 continue;
             }
             let src = File::open(&entry.disk_path).map_err(|e| read_err(e, &entry.disk_path))?;
+            if level == crate::archive_contract::ArchiveCompressionLevel::UltraText {
+                // FER-579: every file is its own block and PPMd allocates + zero-fills its whole
+                // model per block, so size it to the file like 7-Zip does.
+                let size = entry
+                    .disk_path
+                    .metadata()
+                    .map(|m| m.len())
+                    .unwrap_or(u64::MAX);
+                let opts = sevenz_rust2::encoder_options::PpmdOptions::from_order_memory_size(
+                    ULTRA_TEXT_PPMD_ORDER,
+                    ultra_text_mem_for(size),
+                );
+                writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::from(opts)]);
+            }
             let mut file_entry = sevenz_rust2::ArchiveEntry::new_file(&entry.archive_name);
             if let Some(nt) = mtime_for_7z(&entry.disk_path) {
                 file_entry.last_modified_date = nt;

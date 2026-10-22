@@ -782,6 +782,56 @@ pub fn dedup_level(
     Ok(merged)
 }
 
+/// 7z method id of PPMd (7z PPMd7 / var.H).
+pub const PPMD_METHOD_ID: [u8; 3] = [0x03, 0x04, 0x01];
+
+/// Declared model memory of a PPMd coder: props are the order byte + u32 LE memory size.
+fn ppmd_declared_memory(props: &[u8]) -> Option<u64> {
+    (props.len() >= 5).then(|| u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
+}
+
+/// The decoder crate keeps coder properties private, but they are part of
+/// its `Debug` output (`properties: [93, 0, 0, 128, 0]`). The crate is
+/// pinned (`=0.20.2`) and a test asserts this parse on a real archive; if
+/// the shape ever changes the check fails CLOSED (refuses the block).
+pub fn coder_properties(coder: &sevenz_rust2::Coder) -> Option<Vec<u8>> {
+    let dbg = format!("{coder:?}");
+    let start = dbg.find("properties: [")? + "properties: [".len();
+    let end = start + dbg[start..].find(']')?;
+    let body = dbg[start..end].trim();
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    body.split(',')
+        .map(|n| n.trim().parse::<u8>().ok())
+        .collect()
+}
+
+/// FER-579: extract and test decode without the per-block memory gate (`archive_sevenz::check_block_codec_memory`), and PPMd allocates (and
+/// zero-fills) its whole declared model when the decoder is built. Refuse any PPMd block that
+/// declares more than this (7-Zip `-mx=9` writes 192 MiB). LZMA/LZMA2 are deliberately not
+/// covered here, so older behaviour is unchanged.
+/// Known limitation: an encoded header is decoded inside `ArchiveReader::new`, before this runs.
+pub const PPMD_DECODE_MAX_MEMORY: u64 = 1024 * 1024 * 1024;
+
+/// Refuse archives with a PPMd block whose declared model memory exceeds `limit`.
+pub fn check_ppmd_memory(archive: &sevenz_rust2::Archive, limit: u64) -> Result<(), ArchiveError> {
+    let too_large = || ArchiveError::new(ArchiveErrorCode::LimitExceeded, CODEC_TOO_LARGE);
+    for block in &archive.blocks {
+        for coder in &block.coders {
+            if coder.encoder_method_id() != PPMD_METHOD_ID {
+                continue;
+            }
+            let props = coder_properties(coder).ok_or_else(too_large)?;
+            match ppmd_declared_memory(&props) {
+                Some(mem) if mem <= limit => {}
+                _ => return Err(too_large()),
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod debug_redaction_tests {
     use super::*;

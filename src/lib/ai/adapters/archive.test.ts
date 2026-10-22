@@ -130,7 +130,19 @@ function build(options: BuildOptions = {}) {
     if (!approved.ok) throw new Error(approved.error.message);
     return facade.execute(approved.value);
   };
-  return { host, ex, updates, stateOf, submit, requests, registry, measure, runFacade };
+  return {
+    host,
+    ex,
+    updates,
+    stateOf,
+    submit,
+    requests,
+    registry,
+    measure,
+    runFacade,
+    facade,
+    svc,
+  };
 }
 
 const dump = (updates: RunUpdate[]): string => JSON.stringify(updates);
@@ -435,6 +447,37 @@ describe('7z ultra-text (PPMd) — FER-579', () => {
     const a = await build({ format: '7z', level: 'ultra-text' }).submit();
     const b = await build({ format: '7z', level: 'maximum' }).submit();
     expect(a?.scopeNote).not.toBe(b?.scopeNote);
+  });
+
+  it('the approval digest of ultra-text differs from maximum and ultra', async () => {
+    const t = build({ format: '7z' });
+    const snapshot = t.svc.capture('req_digest');
+    const digest = async (level: 'ultra-text' | 'maximum' | 'ultra') => {
+      const prepared = await t.facade.prepare(
+        {
+          schemaVersion: 1,
+          requestId: 'req_digest',
+          intent: {
+            capability: 'archive.create',
+            sourcePane: 'left',
+            selector: { kind: 'allVisible', entries: 'all' },
+            format: '7z',
+            level,
+            target: { kind: 'sourceDirectory' },
+          },
+        },
+        { snapshot },
+      );
+      if (!prepared.ok) throw new Error(prepared.error.message);
+      return prepared.value.plan.previewDigest;
+    };
+    const [text, max, ultra] = [
+      await digest('ultra-text'),
+      await digest('maximum'),
+      await digest('ultra'),
+    ];
+    expect(text).not.toBe(max);
+    expect(text).not.toBe(ultra);
   });
 });
 
