@@ -48,6 +48,7 @@
     extract: 'Extract',
     test: 'Test archive',
     verify: 'Verify',
+    delete: 'Delete',
   };
 
   /** FER-578: the row's main action - answer a held prompt, or read a finished job's result.

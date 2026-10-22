@@ -19,7 +19,7 @@ import {
 } from '../ipc/archive';
 import { toast } from './toastStore.svelte';
 
-export type JobKind = 'pack' | 'extract' | 'test' | 'verify';
+export type JobKind = 'pack' | 'extract' | 'test' | 'verify' | 'delete';
 export type JobState =
   'queued' | 'running' | 'needsInput' | 'cancelling' | 'done' | 'failed' | 'canceled';
 

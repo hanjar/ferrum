@@ -36,6 +36,18 @@ const mutMocks = vi.hoisted(() => ({
 }));
 vi.mock('../ipc/mutations', () => mutMocks);
 
+// FER-585: the dialog deletes through the async job (`runDelete`). These tests drive the backend
+// result through the `deleteEntries` mock: the adapter wraps it as a finished, uncancelled job.
+vi.mock('../ipc/deleteJobs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ipc/deleteJobs')>()),
+  runDelete: async (paths: string[], permanent: boolean) => ({
+    report: await mutMocks.deleteEntries(paths, permanent),
+    cancelled: false,
+    notProcessed: [],
+    partial: [],
+  }),
+}));
+
 // FER-572: the file-clipboard IPC (a cut paste empties the clipboard when its move completes).
 const clipMocks = vi.hoisted(() => ({ clipboardFinishCut: vi.fn().mockResolvedValue(true) }));
 vi.mock('../ipc/clipboardFiles', () => clipMocks);

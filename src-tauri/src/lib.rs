@@ -27,6 +27,7 @@ pub mod compare_archive;
 pub mod copy_engine;
 pub mod copy_native;
 pub mod copy_pool;
+pub mod delete_jobs;
 pub mod disk_usage;
 pub mod disk_usage_cache;
 pub mod domain;
@@ -118,6 +119,8 @@ pub fn run() {
             ipc::create_entry,
             ipc::rename_entry,
             ipc::delete_entries,
+            ipc::delete_start,
+            ipc::delete_cancel,
             ipc::ai_recycle_check,
             ipc::ai_delete_to_recycle,
             ipc::ai_tree_census,
