@@ -17,7 +17,7 @@ describe('app metadata', () => {
   });
 
   it('exposes version matching package.json', () => {
-    expect(APP_VERSION).toBe('0.2.1');
+    expect(APP_VERSION).toBe('0.2.2');
     expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
@@ -141,13 +141,13 @@ describe('formatBuildDetail', () => {
 
 describe('deterministic test environment values', () => {
   it('injects test000 commit and fixed date in Vitest', () => {
-    expect(BUILD_INFO.version).toBe('0.2.1');
+    expect(BUILD_INFO.version).toBe('0.2.2');
     expect(BUILD_INFO.commit).toBe('test000');
     expect(BUILD_INFO.dirty).toBe(false);
     expect(BUILD_INFO.date).toBe('2026-10-14T00:00:00.000Z');
 
-    expect(BUILD_LABEL).toBe('0.2.1 · test000 · 14 Okt');
-    expect(BUILD_LABEL_COMPACT).toBe('0.2.1 · test000');
+    expect(BUILD_LABEL).toBe('0.2.2 · test000 · 14 Okt');
+    expect(BUILD_LABEL_COMPACT).toBe('0.2.2 · test000');
     expect(BUILD_DETAIL).toContain('test000');
   });
 });

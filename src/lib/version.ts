@@ -8,7 +8,7 @@ export interface BuildInfo {
 }
 
 const DEFAULT_BUILD_INFO: BuildInfo = {
-  version: '0.2.1',
+  version: '0.2.2',
   commit: 'unknown',
   dirty: false,
   date: '',
