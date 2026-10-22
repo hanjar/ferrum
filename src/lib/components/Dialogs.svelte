@@ -26,6 +26,7 @@
   import { FsError } from '../ipc/types';
   import { isCancelledError } from '../ipc/archiveErrors';
   import { archiveRarToolProbe, type ArchiveCompressionLevel } from '../ipc/archive';
+  import { isMostlyText } from '../packSuggest';
   import {
     dialogs,
     sanitizeMemberPath,
@@ -64,9 +65,19 @@
   // the safe default re-applied on every dialog open (D21 one-ask).
   let extractPolicy = $state<'skip' | 'overwrite' | 'rename'>('skip');
   let packLevel = $state<ArchiveCompressionLevel>('normal');
+  // FER-579: true once the user picked a level themselves; the text suggestion then never overrides it.
+  let packLevelTouched = $state(false);
   let packFormat = $state<PackFormat>('zip');
   let packTarget = $state<string>('');
   let rarAvailable = $state(false);
+  /** FER-579: "Ultra (text)" (7z PPMd) is offered for 7z only. */
+  const packLevelChoices = $derived<[string, string][]>([
+    ['store', '&Store'],
+    ['fast', '&Fast'],
+    ['normal', '&Normal'],
+    ['max', '&Maximum'],
+    ...(packFormat === 'sevenz' ? [['ultra-text', '&Ultra (text)'] as [string, string]] : []),
+  ]);
   const packFormats = $derived<PackFormat[]>(
     rarAvailable ? ['zip', 'sevenz', 'rar'] : ['zip', 'sevenz'],
   );
@@ -94,6 +105,12 @@
 
   function changePackFormat(fmt: PackFormat) {
     packFormat = fmt;
+    // FER-579: Ultra (text) is a 7z method. Leaving 7z drops it; entering 7z with a mostly-text
+    // selection preselects it unless the user already chose a level (a hint, never forced).
+    if (fmt !== 'sevenz' && packLevel === 'ultra-text') packLevel = 'normal';
+    if (fmt === 'sevenz' && !packLevelTouched && d?.kind === 'pack' && isMostlyText(d.paths)) {
+      packLevel = 'ultra-text';
+    }
     if (d && d.kind === 'pack') {
       d.format = fmt;
       packTarget = withArchiveExt(packTarget || d.target, fmt);
@@ -155,6 +172,7 @@
             : 'ask';
         extractPolicy = 'skip';
         packLevel = 'normal';
+        packLevelTouched = false;
         password = '';
         fastDontAsk = false;
         rarProbing = false;
@@ -164,6 +182,7 @@
         if (d.kind === 'pack') {
           packFormat = d.format;
           packTarget = d.target;
+          if (d.format === 'sevenz' && isMostlyText(d.paths)) packLevel = 'ultra-text';
           // FER-510: the RAR option only ever appears after the probe succeeded. A dialog
           // opened directly with format 'rar' (e.g. reopened after a failed RAR pack) shows a
           // checking note instead, cannot be submitted while checking, and falls back to ZIP
@@ -226,6 +245,10 @@
   });
 
   const d = $derived(dialogs.current);
+  /** FER-579: the selection is mostly text, so 7z "Ultra (text)" (PPMd) is worth suggesting. */
+  const packTextSuggested = $derived(
+    d?.kind === 'pack' && packFormat === 'sevenz' && isMostlyText(d.paths),
+  );
 
   // F2-14: live match count for the Select/Unselect Group preview.
   const groupMatchCount = $derived.by(() => {
@@ -821,7 +844,7 @@
       {/if}
       <p class="dim" id="pack-level-label">Compression</p>
       <div class="policies" role="radiogroup" aria-labelledby="pack-level-label" use:roving>
-        {#each [['store', '&Store'], ['fast', '&Fast'], ['normal', '&Normal'], ['max', '&Maximum']] as [val, label] (val)}
+        {#each packLevelChoices as [val, label] (val)}
           <label class="check">
             <input
               type="radio"
@@ -830,6 +853,7 @@
               value={val}
               onchange={() => {
                 packLevel = val as ArchiveCompressionLevel;
+                packLevelTouched = true;
               }}
               disabled={busy}
             />
@@ -837,6 +861,16 @@
           </label>
         {/each}
       </div>
+      {#if packFormat === 'sevenz'}
+        <p class="dim" data-testid="pack-ultra-text-hint">
+          {#if packTextSuggested}
+            Mostly text files: Ultra (text) gives the smallest 7z. It is slower and uses up to 192
+            MB of memory.
+          {:else}
+            Ultra (text) is slower and best for text files (CSV, TXT, LOG, JSON, XML, SQL).
+          {/if}
+        </p>
+      {/if}
     {:else if d.kind === 'selectGroup'}
       <h2 id="dlg-title">{d.unselect ? 'Unselect Group' : 'Select Group'}</h2>
       <p class="path mono">{d.parent}</p>

@@ -494,6 +494,10 @@ pub enum ArchiveLevel {
     Normal,
     Maximum,
     Ultra,
+    /// FER-579: 7z PPMd for plain text. A DIFFERENT method from `maximum`/`ultra` (LZMA2), so it has
+    /// its own name; only valid with `format: "7z"`.
+    #[serde(rename = "ultra-text")]
+    UltraText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +622,13 @@ fn parse_envelope(value: Value, active_request_id: &str) -> Result<IntentEnvelop
                 .is_some_and(|name| !safe_output_name(name))
             {
                 return Err(ContractError::InvalidOutputName);
+            }
+            if archive.level == Some(ArchiveLevel::UltraText)
+                && archive.format != ArchiveFormat::Sevenz
+            {
+                return Err(ContractError::InvalidEnvelope(
+                    "Level ultra-text needs format 7z".into(),
+                ));
             }
         }
         Intent::DirectoriesSync(sync) => {

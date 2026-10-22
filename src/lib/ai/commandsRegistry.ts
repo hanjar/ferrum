@@ -79,7 +79,7 @@ export const INTENT_SCHEMAS: Record<MutatingCapabilityId, IntentSchema> = {
         ],
       },
       format: { enum: ['zip', '7z'] },
-      level: { enum: ['store', 'fast', 'normal', 'maximum', 'ultra'] },
+      level: { enum: ['store', 'fast', 'normal', 'maximum', 'ultra', 'ultra-text'] },
       target: {
         oneOf: [
           {

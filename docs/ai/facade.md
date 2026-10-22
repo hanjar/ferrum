@@ -95,9 +95,12 @@ No new Tauri command, Cargo or `package.json` change is required by this lane.
 ## archive.create: 7z and compression level (FER-576)
 
 - `format` is `"zip"` (default) or `"7z"`. RAR is never creatable from chat (the intent parser rejects it, Rust and TS).
-- `level` is optional, a closed set: `store | fast | normal | maximum | ultra`. Unknown strings, non-strings and `null` are invalid
+- `level` is optional, a closed set: `store | fast | normal | maximum | ultra | ultra-text`. Unknown strings, non-strings and `null` are invalid
   in both parsers (shared cases in `contract-fixtures/ai/cases.json`). The adapter maps it to the engine's `ArchiveCompressionLevel`
   (`maximum` and `ultra` both -> `max`, LZMA2 level 9 for 7z, deflate 9 for ZIP). The model never names an engine flag.
+- `ultra-text` (FER-579) is a different method (7z PPMd, order 32 / 192 MiB), so it keeps its own name and is NOT folded into `maximum`
+  (the one-name rule for `maximum`/`ultra` is unchanged). It is valid with `format: "7z"` only: both parsers reject it with zip, and the
+  backend refuses it for ZIP/RAR. The prompt picks it when the user asks for the smallest/max 7z of plain-text files (csv, tsv, txt, log, json, xml, sql, md).
 - Execution is the same Pack service as the manual dialog (`runPack`, `format: 'sevenz'`, conflict `skip`: never replaces a file).
 - A typed `.zip`/`.7z` output name is converted to the chosen format's extension. Format and level are part of the plan digest, so
   changing either needs a fresh approval, and the preview text names them ("Format 7z, kompresi maksimum (level terkuat, sama dengan Max di dialog Pack)"); `ultra` is shown and digested as `maximum`.

@@ -118,7 +118,8 @@ export async function archiveCreateZip(
  *  `name (n).ext` and resolves with the path actually written. */
 export type ArchiveCreateConflict = 'skip' | 'overwrite' | 'rename';
 
-export type ArchiveCompressionLevel = 'store' | 'fast' | 'normal' | 'max';
+/** FER-579: `ultra-text` (7z PPMd) is valid for the 7z format only; the backend rejects it for ZIP/RAR. */
+export type ArchiveCompressionLevel = 'store' | 'fast' | 'normal' | 'max' | 'ultra-text';
 
 export type ArchiveCreateFormat = 'zip' | 'sevenz' | 'rar';
 

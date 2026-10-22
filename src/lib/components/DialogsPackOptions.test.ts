@@ -172,3 +172,89 @@ describe('FER-59 / FER-66: Pack compression level options in Dialogs and packSer
     );
   });
 });
+
+describe('FER-579: Ultra (text) 7z level', () => {
+  const CSV = 'C:\\Data\\Reports\\sales.csv';
+  const LOG = 'C:\\Data\\Reports\\app.log';
+  const radio = (c: HTMLElement) =>
+    c.querySelector<HTMLInputElement>('input[name="packLevel"][value="ultra-text"]');
+
+  it('is offered for 7z only', async () => {
+    register(0, DIR, [FILE_A]);
+    dialogs.beginPack('zip');
+    const { container } = render(Dialogs);
+    await tick();
+    expect(radio(container)).toBeNull();
+    const sevenz = container.querySelector<HTMLInputElement>(
+      'input[name="packFormat"][value="sevenz"]',
+    );
+    expect(sevenz).not.toBeNull();
+    if (sevenz) await fireEvent.click(sevenz);
+    await tick();
+    expect(radio(container)).not.toBeNull();
+    expect(container.querySelectorAll('input[name="packLevel"]').length).toBe(5);
+    expect(container.querySelector('[data-testid="pack-ultra-text-hint"]')).not.toBeNull();
+  });
+
+  it('mostly-text selection on 7z: preselected with a hint, still changeable', async () => {
+    archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Reports.7z');
+    register(0, DIR, [CSV, LOG]);
+    dialogs.beginPack('sevenz');
+    const { container, getByRole } = render(Dialogs);
+    await tick();
+    expect(radio(container)?.checked).toBe(true);
+    expect(container.querySelector('[data-testid="pack-ultra-text-hint"]')?.textContent).toContain(
+      'Mostly text files',
+    );
+    const normal = container.querySelector<HTMLInputElement>(
+      'input[name="packLevel"][value="normal"]',
+    );
+    if (normal) await fireEvent.click(normal);
+    await tick();
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await vi.waitFor(() => expect(dialogs.current).toBeNull());
+    expect(archiveMocks.archiveCreate).toHaveBeenCalledWith(
+      [CSV, LOG],
+      'C:\\Data\\Reports.7z',
+      'sevenz',
+      undefined,
+      expect.any(String),
+      'normal',
+    );
+  });
+
+  it('a non-text selection is not preselected', async () => {
+    register(0, DIR, [FILE_A.replace('.txt', '.png')]);
+    dialogs.beginPack('sevenz');
+    const { container } = render(Dialogs);
+    await tick();
+    expect(radio(container)?.checked).toBe(false);
+    expect(container.querySelector('input[name="packLevel"]:checked')?.getAttribute('value')).toBe(
+      'normal',
+    );
+  });
+
+  it('submits ultra-text for 7z, and switching to ZIP drops it back to normal', async () => {
+    archiveMocks.archiveCreate.mockResolvedValue('C:\\Data\\Reports.7z');
+    register(0, DIR, [CSV]);
+    dialogs.beginPack('sevenz');
+    const { container, getByRole } = render(Dialogs);
+    await tick();
+    const zip = container.querySelector<HTMLInputElement>('input[name="packFormat"][value="zip"]');
+    if (zip) await fireEvent.click(zip);
+    await tick();
+    expect(radio(container)).toBeNull();
+    expect(container.querySelector('input[name="packLevel"]:checked')?.getAttribute('value')).toBe(
+      'normal',
+    );
+    const sevenz = container.querySelector<HTMLInputElement>(
+      'input[name="packFormat"][value="sevenz"]',
+    );
+    if (sevenz) await fireEvent.click(sevenz);
+    await tick();
+    expect(radio(container)?.checked).toBe(true);
+    await fireEvent.click(getByRole('button', { name: 'Pack' }));
+    await vi.waitFor(() => expect(dialogs.current).toBeNull());
+    expect(archiveMocks.archiveCreate.mock.calls[0][5]).toBe('ultra-text');
+  });
+});

@@ -513,6 +513,24 @@ pub enum ArchiveCompressionLevel {
     #[default]
     Normal,
     Max,
+    /// FER-579: 7z only. PPMd (order 32, 192 MiB, the 7-Zip `-mx=9 -m0=PPMd` settings): slower
+    /// than LZMA2, but clearly smaller on plain text (CSV, logs, JSON, SQL...).
+    #[serde(rename = "ultra-text")]
+    UltraText,
+}
+
+impl ArchiveCompressionLevel {
+    /// FER-579: `ultra-text` is a 7z method; ZIP and RAR refuse it instead of silently
+    /// substituting another level.
+    pub fn check_for(self, format: ArchiveCreateFormat) -> Result<(), ArchiveError> {
+        if self == Self::UltraText && format != ArchiveCreateFormat::Sevenz {
+            return Err(ArchiveError::new(
+                ArchiveErrorCode::UnsupportedFormat,
+                "Compression level ultra-text is only available for 7z",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,7 +29,7 @@ interface BuildOptions {
   target?: { kind: 'sourceDirectory' } | { kind: 'pane'; pane: 'left' | 'right' };
   rightPath?: string;
   format?: 'zip' | '7z';
-  level?: 'store' | 'fast' | 'normal' | 'maximum' | 'ultra';
+  level?: 'store' | 'fast' | 'normal' | 'maximum' | 'ultra' | 'ultra-text';
   outputName?: string;
 }
 
@@ -400,6 +400,7 @@ describe('7z and compression level — FER-576', () => {
     expect(packLevelOf('normal')).toBe('normal');
     expect(packLevelOf('maximum')).toBe('max');
     expect(packLevelOf('ultra')).toBe('max');
+    expect(packLevelOf('ultra-text')).toBe('ultra-text');
     expect(packFormatOf('7z')).toBe('sevenz');
     expect(packFormatOf('zip')).toBe('zip');
   });
@@ -412,6 +413,28 @@ describe('7z and compression level — FER-576', () => {
     await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
     expect(ipc.archiveCreate.mock.calls[0][2]).toBe('zip');
     expect(ipc.archiveCreate.mock.calls[0][5]).toBeUndefined();
+  });
+});
+
+describe('7z ultra-text (PPMd) — FER-579', () => {
+  it('7z + ultra-text: its own card text and the Pack call carries ultra-text', async () => {
+    ipc.archiveCreate.mockResolvedValue(`${LEFT}\\Invoice.7z`);
+    const t = build({ format: '7z', level: 'ultra-text' });
+    const preview = await t.submit();
+    const text = JSON.stringify(preview);
+    expect(text).toContain('PPMd');
+    expect(text).not.toContain('maksimum'); // a different method than maximum/ultra
+    t.ex.approve('run-1');
+    await vi.waitFor(() => expect(t.stateOf('run-1')).toBe('succeeded'));
+    const call = ipc.archiveCreate.mock.calls[0];
+    expect(call[2]).toBe('sevenz');
+    expect(call[5]).toBe('ultra-text');
+  });
+
+  it('the card tells ultra-text apart from maximum', async () => {
+    const a = await build({ format: '7z', level: 'ultra-text' }).submit();
+    const b = await build({ format: '7z', level: 'maximum' }).submit();
+    expect(a?.scopeNote).not.toBe(b?.scopeNote);
   });
 });
 

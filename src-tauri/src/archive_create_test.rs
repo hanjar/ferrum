@@ -835,6 +835,7 @@ fn create_zip_via_progress_with_level(
     wrap: WrapWriter<'_>,
     progress: &mut dyn FnMut(ArchiveProgress) -> bool,
 ) -> Result<PathBuf, ArchiveError> {
+    level.check_for(crate::archive_contract::ArchiveCreateFormat::Zip)?;
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
     clean_stale_staging(destination_path);
@@ -877,7 +878,9 @@ fn write_zip<W: Write + std::io::Seek>(
         crate::archive_contract::ArchiveCompressionLevel::Normal => {
             (zip::CompressionMethod::Deflated, Some(6))
         }
-        crate::archive_contract::ArchiveCompressionLevel::Max => {
+        // FER-579: UltraText is refused for ZIP before this point (`check_for`).
+        crate::archive_contract::ArchiveCompressionLevel::Max
+        | crate::archive_contract::ArchiveCompressionLevel::UltraText => {
             (zip::CompressionMethod::Deflated, Some(9))
         }
     };
@@ -1377,6 +1380,12 @@ fn mtime_for_7z(disk_path: &Path) -> Option<sevenz_rust2::NtTime> {
     sevenz_rust2::NtTime::try_from(mtime).ok()
 }
 
+/// FER-579: PPMd settings of the `ultra-text` 7z level. These are the values 7-Zip itself uses
+/// for `-mx=9 -m0=PPMd` (order 32, 192 MiB model memory). PPMd is symmetric, so the reader needs
+/// the same memory: 192 MiB stays under the reader's 256 MiB codec cap (`archive_sevenz`).
+pub const ULTRA_TEXT_PPMD_ORDER: u32 = 32;
+pub const ULTRA_TEXT_PPMD_MEMORY: u32 = 192 * 1024 * 1024;
+
 /// Create a 7z archive from `sources` at `destination_path`.
 pub fn create_7z(sources: &[String], destination_path: &Path) -> Result<(), ArchiveError> {
     create_7z_with_policy(sources, destination_path, ArchiveConflictPolicy::Overwrite).map(|_| ())
@@ -1415,6 +1424,7 @@ pub fn create_7z_progress_with_level(
     level: crate::archive_contract::ArchiveCompressionLevel,
     progress: &mut dyn FnMut(ArchiveProgress) -> bool,
 ) -> Result<PathBuf, ArchiveError> {
+    level.check_for(crate::archive_contract::ArchiveCreateFormat::Sevenz)?;
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
     clean_stale_staging(destination_path);
@@ -1464,6 +1474,14 @@ pub fn create_7z_progress_with_level(
                 let mut opts = sevenz_rust2::encoder_options::Lzma2Options::from_level(9);
                 // FER-66: Limit dictionary size to 16 MiB so encoder memory remains under 256 MiB (from_level is single-threaded).
                 opts.set_dictionary_size(16 * 1024 * 1024);
+                let config = sevenz_rust2::EncoderConfiguration::from(opts);
+                writer.set_content_methods(vec![config]);
+            }
+            crate::archive_contract::ArchiveCompressionLevel::UltraText => {
+                let opts = sevenz_rust2::encoder_options::PpmdOptions::from_order_memory_size(
+                    ULTRA_TEXT_PPMD_ORDER,
+                    ULTRA_TEXT_PPMD_MEMORY,
+                );
                 let config = sevenz_rust2::EncoderConfiguration::from(opts);
                 writer.set_content_methods(vec![config]);
             }

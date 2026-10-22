@@ -1957,3 +1957,146 @@ mod solid_tests {
         assert_eq!(names(&merged), vec![("docs", true)]);
     }
 }
+
+/// FER-579: the `ultra-text` level writes PPMd (7-Zip `-mx=9 -m0=PPMd`: order 32, 192 MiB).
+#[cfg(test)]
+mod ultra_text_tests {
+    use super::*;
+    use crate::archive_contract::{
+        ArchiveCompressionLevel, ArchiveConflictPolicy, ArchiveCreateFormat,
+    };
+
+    /// Deterministic CSV-like text: repeated columns, slowly varying numbers.
+    fn csv_text(rows: u32) -> Vec<u8> {
+        let mut out = String::from("id,date,customer,status,amount,note\n");
+        let mut seed: u32 = 12345;
+        for i in 0..rows {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let cust = seed % 400;
+            let amount = (seed >> 8) % 100_000;
+            out.push_str(&format!(
+                "{i},2026-10-{:02},CUST-{cust:05},{},{}.{:02},order line {} for region {}\n",
+                1 + (i % 28),
+                ["PAID", "OPEN", "VOID"][(seed % 3) as usize],
+                amount / 100,
+                amount % 100,
+                i % 97,
+                seed % 12,
+            ));
+        }
+        out.into_bytes()
+    }
+
+    fn pack(src: &Path, dest: &Path, level: ArchiveCompressionLevel) {
+        crate::archive_create_test::create_7z_progress_with_level(
+            &[src.to_string_lossy().into_owned()],
+            dest,
+            ArchiveConflictPolicy::Skip,
+            level,
+            &mut |_| true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ultra_text_ppmd_round_trips_and_beats_lzma2_normal_on_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("data.csv");
+        let body = csv_text(20_000);
+        std::fs::write(&src, &body).unwrap();
+        let ppmd = dir.path().join("ultra.7z");
+        let lzma2 = dir.path().join("normal.7z");
+        pack(&src, &ppmd, ArchiveCompressionLevel::UltraText);
+        pack(&src, &lzma2, ArchiveCompressionLevel::Normal);
+
+        // The archive really declares PPMd (not LZMA2) and passes our own codec-memory gate.
+        let reader = SevenZProvider::open_reader(&ppmd, None).unwrap();
+        let archive = reader.archive();
+        let coder = &archive.blocks[0].coders[0];
+        assert_eq!(coder.encoder_method_id(), METHOD_PPMD);
+        let props = coder_properties(coder).unwrap();
+        assert_eq!(props[0], 32, "order");
+        assert_eq!(
+            u32::from_le_bytes([props[1], props[2], props[3], props[4]]),
+            192 * 1024 * 1024,
+            "memory"
+        );
+        check_block_codec_memory(archive, 0, 256 * 1024 * 1024).unwrap();
+        drop(reader);
+
+        // Round trip through the production reader.
+        let mut reader = SevenZProvider::open_reader(&ppmd, None).unwrap();
+        let mut out = Vec::new();
+        let (found, truncated) = stream_member(&mut reader, "data.csv", u64::MAX, None, &mut |c| {
+            out.extend_from_slice(c);
+            Ok(())
+        })
+        .unwrap();
+        assert!(found && !truncated);
+        assert_eq!(out, body);
+
+        let ppmd_len = std::fs::metadata(&ppmd).unwrap().len();
+        let lzma2_len = std::fs::metadata(&lzma2).unwrap().len();
+        assert!(
+            ppmd_len < lzma2_len,
+            "PPMd {ppmd_len} bytes must be smaller than LZMA2 normal {lzma2_len} bytes"
+        );
+    }
+
+    #[test]
+    fn ultra_text_is_refused_for_zip_and_rar() {
+        for fmt in [ArchiveCreateFormat::Zip, ArchiveCreateFormat::Rar] {
+            let err = ArchiveCompressionLevel::UltraText
+                .check_for(fmt)
+                .unwrap_err();
+            assert_eq!(err.code, ArchiveErrorCode::UnsupportedFormat);
+        }
+        assert!(
+            ArchiveCompressionLevel::UltraText
+                .check_for(ArchiveCreateFormat::Sevenz)
+                .is_ok()
+        );
+        assert!(
+            ArchiveCompressionLevel::Max
+                .check_for(ArchiveCreateFormat::Zip)
+                .is_ok()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let zip = dir.path().join("a.zip");
+        let res = crate::archive_create_test::create_zip_progress_with_level(
+            &[src.to_string_lossy().into_owned()],
+            &zip,
+            &crate::archive_contract::ArchiveLimits {
+                max_entries: 10,
+                max_total_bytes: u64::MAX,
+                max_entry_bytes: u64::MAX,
+                max_depth: 8,
+            },
+            ArchiveConflictPolicy::Skip,
+            ArchiveCompressionLevel::UltraText,
+            &mut |_| true,
+        );
+        assert_eq!(res.unwrap_err().code, ArchiveErrorCode::UnsupportedFormat);
+        assert!(!zip.exists());
+    }
+
+    #[test]
+    fn ultra_text_wire_name_is_validated() {
+        let ok: ArchiveCompressionLevel = serde_json::from_str("\"ultra-text\"").unwrap();
+        assert_eq!(ok, ArchiveCompressionLevel::UltraText);
+        for bad in [
+            "\"ultra\"",
+            "\"ultraText\"",
+            "\"ultra_text\"",
+            "\"ppmd\"",
+            "null",
+        ] {
+            assert!(
+                serde_json::from_str::<ArchiveCompressionLevel>(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}

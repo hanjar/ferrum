@@ -20,7 +20,7 @@ fn envelope(format: Value, level: Option<Value>) -> Value {
 
 #[test]
 fn seven_zip_with_every_level_parses_and_round_trips() {
-    for level in ["store", "fast", "normal", "maximum", "ultra"] {
+    for level in ["store", "fast", "normal", "maximum", "ultra", "ultra-text"] {
         let value = envelope(json!("7z"), Some(json!(level)));
         let parsed = parse_intent(value.clone(), "req_1").expect(level);
         match &parsed.intent {
@@ -28,6 +28,26 @@ fn seven_zip_with_every_level_parses_and_round_trips() {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+}
+
+#[test]
+fn ultra_text_needs_7z_and_exact_spelling() {
+    let ok = envelope(json!("7z"), Some(json!("ultra-text")));
+    assert!(parse_intent(ok, "req_1").is_ok());
+    let zip = envelope(json!("zip"), Some(json!("ultra-text")));
+    assert!(parse_intent(zip, "req_1").is_err());
+    for spelling in [
+        "ultraText",
+        "ultra_text",
+        "Ultra-Text",
+        "ppmd",
+        "ultra text",
+    ] {
+        assert!(
+            parse_intent(envelope(json!("7z"), Some(json!(spelling))), "req_1").is_err(),
+            "{spelling}"
+        );
     }
 }
 

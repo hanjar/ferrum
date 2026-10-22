@@ -98,7 +98,8 @@ Berasal dari review keamanan FER-104 (N2, F3, N3, N5). Perilaku yang berlaku sek
   - `fast`: LZMA2 level 1.
   - `normal` (default): LZMA2 level 6.
   - `max`: LZMA2 level 9 dengan batas dictionary size 16 MiB dan single thread (`threads: 1`). Ini menjaga estimasi penggunaan RAM encoder tetap di bawah batas ~256 MiB (sekitar 184 MiB RAM).
-- **Dialog Pack:** Menyediakan kontrol radio "Kompresi" dengan 4 pilihan: Simpan (`store`), Cepat (`fast`), Normal (`normal`, default), dan Maksimal (`max`). Pemanggil tanpa opsi `level` (seperti adapter AI) tetap berjalan tanpa perubahan (default normal).
+  - `ultra-text` (FER-579, hanya 7z): PPMd order 32, memori 192 MiB (pengaturan 7-Zip `-mx=9 -m0=PPMd`). Lebih lambat daripada LZMA2 tetapi jauh lebih kecil untuk file teks (CSV, log, JSON, SQL). PPMd bersifat simetris: pembaca juga memakai ~192 MiB, masih di bawah batas codec 256 MiB di `archive_sevenz.rs`. ZIP dan RAR menolak level ini di backend (`UnsupportedFormat`). Tidak memakai zstd di dalam .7z.
+- **Dialog Pack:** Menyediakan kontrol radio "Kompresi" dengan 4 pilihan: Simpan (`store`), Cepat (`fast`), Normal (`normal`, default), dan Maksimal (`max`); untuk format 7z ada pilihan kelima, "Ultra (text)" (`ultra-text`, huruf akses Alt+U). Pilihan itu diusulkan (dipilih awal, bisa diganti) ketika paling sedikit 80% item terpilih berekstensi teks (csv, tsv, txt, log, json, xml, sql, md, ...), lengkap dengan petunjuk singkat bahwa ia lebih lambat dan terbaik untuk teks. Pemanggil tanpa opsi `level` (seperti adapter AI) tetap berjalan tanpa perubahan (default normal).
 
 ## P4 — Fixture RAR legal, notice lisensi UnRAR, dan penutupan KI-02 (FER-72, FER-76, FER-38, FER-70, FER-69, FER-37, Oktober 2026)
 

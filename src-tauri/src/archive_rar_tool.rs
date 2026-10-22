@@ -657,7 +657,8 @@ pub fn build_rar_args(
         ArchiveCompressionLevel::Store => "-m0",
         ArchiveCompressionLevel::Fast => "-m1",
         ArchiveCompressionLevel::Normal => "-m3",
-        ArchiveCompressionLevel::Max => "-m5",
+        // FER-579: UltraText is refused for RAR before this point (`check_for`).
+        ArchiveCompressionLevel::Max | ArchiveCompressionLevel::UltraText => "-m5",
     };
     let mut list_arg = OsString::from("@");
     list_arg.push(listfile_path.as_os_str());
@@ -877,6 +878,7 @@ pub fn create_rar_with_tool(
     level: ArchiveCompressionLevel,
     progress: &mut dyn FnMut(ArchiveProgress) -> bool,
 ) -> Result<PathBuf, ArchiveError> {
+    level.check_for(crate::archive_contract::ArchiveCreateFormat::Rar)?;
     precheck_conflict(destination_path, policy)?;
     crate::archive_contract::check_cancelled()?;
     crate::archive_create_test::clean_stale_staging(destination_path);
