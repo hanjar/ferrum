@@ -7,6 +7,7 @@ This page is a short, hand-written summary. `THIRD-PARTY-NOTICES.txt` is the aut
 ## Highlights
 
 - **UnRAR** (`unrar` / `unrar_sys`): Alexander Roshal's freeware UnRAR source is used to read RAR archives. Its license (full text in [licenses/UnRAR-license.txt](licenses/UnRAR-license.txt)) allows use in any software that only handles RAR archives; it does not permit developing a RAR-compatible archiver.
+- **sevenz-rust2** (Apache-2.0): Ferrum ships a modified copy, vendored in `src-tauri/vendor/sevenz-rust2` with its original `LICENSE`. The changes harden header parsing against hostile archives; every changed spot is marked `FERRUM PATCH (FER-588)` and listed in `FERRUM-PATCHES.md` there.
 - **WinRAR / Rar.exe**: Ferrum does not bundle or distribute WinRAR or any `Rar.exe`. RAR creation runs a user-provided, licensed WinRAR installation configured in Settings. WinRAR licensing remains the user's responsibility.
 - **Geist and Geist Mono** fonts: SIL Open Font License 1.1.
 - **PDF.js** (`pdfjs-dist`): Apache-2.0.

@@ -205,6 +205,51 @@ describe('collectors', () => {
     expect(JSON.stringify(found)).not.toContain(root);
   });
 
+  it('keeps a vendored third-party crate (FER-588) and marks it as modified', () => {
+    const root = tmp();
+    const dir = (rel) => {
+      const d = join(root, ...rel.split('/'));
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, 'LICENSE'), `${rel} license\n`);
+      return join(d, 'Cargo.toml');
+    };
+    const pkg = (name, manifest) => ({
+      id: name,
+      name,
+      version: '1.0.0',
+      source: null,
+      license: 'Apache-2.0',
+      manifest_path: manifest,
+    });
+    const metadata = {
+      packages: [
+        pkg('app', dir('src-tauri')),
+        pkg('own', dir('src-tauri/crates/own')),
+        pkg('vendored', dir('src-tauri/vendor/vendored')),
+      ],
+      resolve: {
+        root: 'app',
+        nodes: [
+          {
+            id: 'app',
+            deps: [
+              { pkg: 'own', dep_kinds: [{ kind: null }] },
+              { pkg: 'vendored', dep_kinds: [{ kind: null }] },
+            ],
+          },
+          { id: 'own', deps: [] },
+          { id: 'vendored', deps: [] },
+        ],
+      },
+    };
+    const found = collectRustComponents(metadata);
+    expect(found.map((c) => c.name)).toEqual(['vendored']);
+    expect(found[0].note).toContain('src-tauri/vendor/vendored');
+    expect(JSON.stringify(found)).not.toContain(root);
+    const out = renderNotices({ components: found, header: 'H', special: '' });
+    expect(out).toContain('  Note:    Modified copy vendored at src-tauri/vendor/vendored');
+  });
+
   it('collects npm packages reachable from dependencies and extra roots, not dev-only ones', () => {
     const entry = (extra = {}) => ({ version: '1.0.0', license: 'MIT', ...extra });
     const lock = {

@@ -9,3 +9,5 @@ contract-fixtures/
 src-tauri/windows/
 # FER-453: generated sandboxed PDF viewer bundle
 public/pdf-viewer.js
+# FER-588: vendored third-party source, kept byte-identical to upstream except the marked patches
+src-tauri/vendor/
