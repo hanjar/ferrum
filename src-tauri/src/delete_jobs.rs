@@ -7,9 +7,11 @@
 //!
 //! Cancel is checked before every top-level item and, for a permanent delete of a folder, before
 //! every entry inside it (FER-586): the folder goes through [`crate::delete_walker`], which opens,
-//! lists and deletes relative to open directory handles and never follows a junction or symlink,
-//! including one swapped in or created in place while it runs (the CVE-2022-21658 class). Progress
-//! (`entries`, `bytes`) moves per entry. A top-level link is removed as a link, by path, as before.
+//! lists and deletes relative to open directory handles, checks that every opened entry is the
+//! object its parent listed (file id), and never follows a junction or symlink, including one
+//! swapped in or created in place while it runs (the CVE-2022-21658 class; on network locations
+//! through the id check, see that module for exactly what holds where). Progress (`entries`,
+//! `bytes`) moves per entry. A top-level link is removed as a link, by path, as before.
 //! The Recycle Bin moves one item atomically, so cancel and progress there stay per top-level item.
 //! What a cancel leaves behind is never silent:
 //! - `not_processed`: top-level items that were not touched at all;
