@@ -1131,7 +1131,10 @@ mod tests {
         if std::env::var_os("FERRUM_REQUIRE_ALL_TESTS").is_some() {
             panic!("{msg}");
         }
-        eprintln!("{msg}");
+        // Straight to the process's stderr: the test harness captures `eprintln!` of a passing
+        // test, which would hide the skip (in CI logs too).
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{msg}");
     }
 
     /// `\\localhost\<drive>$\...` for a local path, if the admin share answers here.
