@@ -1,5 +1,6 @@
 /** FER-585: wording for what a delete job did (dialog text, dock summary, retry list). */
-import type { DeleteJobResult } from './ipc/deleteJobs';
+import type { DeleteJobResult, DeleteProgress } from './ipc/deleteJobs';
+import { formatSize } from './format';
 import { baseName } from './stores/jobsStore.svelte';
 
 function names(paths: string[], max = 3): string {
@@ -65,4 +66,16 @@ export function deleteSummary(r: DeleteJobResult): string {
 export function deleteOutcome(r: DeleteJobResult): 'done' | 'failed' | 'canceled' {
   if (r.cancelled) return 'canceled';
   return r.report.failed.length > 0 ? 'failed' : 'done';
+}
+
+/**
+ * FER-586: what a running delete removed so far, inside folders included ("1,204 entries removed,
+ * 3.40 MB"); empty before the first entry. A permanent delete moves this per entry, so one big
+ * folder shows progress even while the item count stays at 0 / 1.
+ */
+export function deleteProgressDetail(p: DeleteProgress): string {
+  if (p.entries <= 0) return '';
+  const noun = p.entries === 1 ? 'entry' : 'entries';
+  const size = p.bytes && p.bytes > 0 ? `, ${formatSize(p.bytes)}` : '';
+  return `${p.entries.toLocaleString('en-US')} ${noun} removed${size}`;
 }

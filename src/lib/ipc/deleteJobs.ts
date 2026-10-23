@@ -20,6 +20,8 @@ export interface DeleteProgress {
   currentName?: string;
   /** Files and folders removed so far, inside folders included. */
   entries: number;
+  /** FER-586: bytes of the files removed so far (optional: older backends do not send it). */
+  bytes?: number;
 }
 
 export interface DeleteJobResult {

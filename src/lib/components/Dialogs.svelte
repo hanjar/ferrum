@@ -12,6 +12,7 @@
     deleteHasProblems,
     deleteOutcome,
     deleteProblemText,
+    deleteProgressDetail,
     deleteRemaining,
     deleteSummary,
   } from '../deleteResult';
@@ -772,6 +773,9 @@
         <p class="job-meta" role="status">
           {delProgress.done} / {delProgress.total} items
         </p>
+        {#if delProgress.entries > 0}<p class="job-meta" data-testid="delete-progress-detail">
+            {deleteProgressDetail(delProgress)}
+          </p>{/if}
         {#if delProgress.currentName}<p class="path mono">{delProgress.currentName}</p>{/if}
         {#if delJob.state === 'cancelling'}<p class="job-meta" role="status">Cancelling...</p>{/if}
       {/if}

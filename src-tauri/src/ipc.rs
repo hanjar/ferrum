@@ -4173,6 +4173,7 @@ mod fer512_ipc_gate_tests {
             total: 4,
             current_name: Some("big".into()),
             entries: 7,
+            bytes: 4096,
         };
         let v = serde_json::to_value(super::DeleteProgressEvent {
             request_id: "del-1",
@@ -4181,7 +4182,7 @@ mod fer512_ipc_gate_tests {
         .unwrap();
         assert_eq!(
             v,
-            serde_json::json!({"requestId":"del-1","done":1,"total":4,"currentName":"big","entries":7})
+            serde_json::json!({"requestId":"del-1","done":1,"total":4,"currentName":"big","entries":7,"bytes":4096})
         );
         let result = crate::delete_jobs::run_permanent(&[], &|| false, &mut |_| {});
         let v = serde_json::to_value(super::DeleteDoneEvent {
