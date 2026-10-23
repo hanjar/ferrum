@@ -22,7 +22,9 @@
 //! * Anything it cannot parse is refused (fail closed): the decoder crate
 //!   would reject such a header too, but possibly after allocating.
 
-use super::{ArchiveError, ArchiveErrorCode, CODEC_TOO_LARGE, declared_codec_memory};
+use super::{
+    ArchiveError, ArchiveErrorCode, CODEC_TOO_LARGE, aes_props_refused, declared_codec_memory,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 /// Most memory the coders of an encoded header may declare (summed over one folder).
@@ -301,6 +303,9 @@ fn check_encoded_streams_info(
             } else {
                 &[]
             };
+            if aes_props_refused(id, props) {
+                return Err(too_large()); // KDF rounds would run before any decoding
+            }
             match declared_codec_memory(id, props) {
                 Some(Ok(m)) => memory = memory.saturating_add(m),
                 Some(Err(())) => return Err(too_large()), // unparsable props: fail closed
@@ -549,6 +554,24 @@ mod tests {
     }
 
     #[test]
+    fn aes_key_derivation_rounds_are_capped_in_the_header() {
+        let lzma = lzma_props(1 << 20);
+        let with_aes = |props: &[u8]| {
+            let info = encoded_info(&[(&AES_ID, props), (&LZMA_ID, &lzma)], 0, 10, 100);
+            check(file_with_encoded_header(&info, 10), HEADER_CODEC_MAX_MEMORY)
+        };
+        // power 24 (7-Zip's maximum) is fine, also with the salt/iv flag bits set
+        with_aes(&[24, 0, 1, 2]).unwrap();
+        with_aes(&[0xC0 | 24, 0xFF, 1, 2]).unwrap();
+        // above it, and 0x3F (which panics inside the crate), is refused before any KDF runs
+        for power in [25u8, 31, 0x3E, 0x3F, 0xFF, 0x7F] {
+            assert_codec_too_large(with_aes(&[power, 0, 1, 2]));
+        }
+        // no props at all: fail closed
+        assert_codec_too_large(with_aes(&[]));
+    }
+
+    #[test]
     fn coder_memory_is_summed_over_the_folder() {
         let p = lzma_props(1 << 20);
         let info = encoded_info(
@@ -721,6 +744,35 @@ mod tests {
         assert_codec_too_large(check(bytes, 1024));
     }
 
+    /// Next-header position (offset, size) when it lies inside the file.
+    fn header_range(bytes: &[u8]) -> Option<(usize, usize)> {
+        if bytes.len() < 32 {
+            return None;
+        }
+        let off = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
+        let size = u64::from_le_bytes(bytes[20..28].try_into().ok()?);
+        let start = 32u64.checked_add(off)?;
+        let end = start.checked_add(size)?;
+        (end <= bytes.len() as u64).then_some((start as usize, size as usize))
+    }
+
+    fn header_nid(bytes: &[u8]) -> Option<u8> {
+        let (start, size) = header_range(bytes)?;
+        (size > 0).then(|| bytes[start])
+    }
+
+    /// Recompute the next-header CRC and the start-header CRC after a mutation.
+    fn fix_crcs(bytes: &mut [u8]) {
+        if let Some((start, size)) = header_range(bytes) {
+            let crc = crc32fast::hash(&bytes[start..start + size]);
+            bytes[28..32].copy_from_slice(&crc.to_le_bytes());
+        }
+        if bytes.len() >= 32 {
+            let crc = crc32fast::hash(&bytes[12..32]);
+            bytes[8..12].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+
     struct XorShift(u64);
     impl XorShift {
         fn next(&mut self) -> u64 {
@@ -756,6 +808,7 @@ mod tests {
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let mut accepted = 0u32;
         let mut refused = 0u32;
+        let mut crate_runs = 0u32;
         for round in 0..40_000u32 {
             let mut bytes = seeds[round as usize % seeds.len()].clone();
             // The interesting bytes are the signature header and the tail (next header).
@@ -784,11 +837,25 @@ mod tests {
                 }
                 _ => {}
             }
-            match check(bytes, HEADER_CODEC_MAX_MEMORY) {
-                Ok(()) => accepted += 1,
+            // Re-seal both CRCs so mutants are not stopped by the checksums and reach the deeper
+            // parser (and, when accepted, the decoder crate).
+            fix_crcs(&mut bytes);
+            match check(bytes.clone(), HEADER_CODEC_MAX_MEMORY) {
+                Ok(()) => {
+                    accepted += 1;
+                    // Accepted encoded headers must also open (or fail cleanly) in the crate.
+                    if crate_runs < 1500 && header_nid(&bytes) == Some(K_ENCODED_HEADER) {
+                        crate_runs += 1;
+                        let _ = sevenz_rust2::ArchiveReader::new(
+                            Cursor::new(bytes),
+                            sevenz_rust2::Password::empty(),
+                        );
+                    }
+                }
                 Err(_) => refused += 1,
             }
         }
+        assert!(crate_runs > 100, "{crate_runs}");
         assert!(accepted > 0 && refused > 0, "{accepted}/{refused}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),

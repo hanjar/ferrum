@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// Fixed, path-free messages for the read-only budgets (solid-block skip work
 /// and codec memory). The preview maps these to safe UI text.
 pub const SOLID_TOO_LARGE: &str = "solid block too large to preview";
-pub const CODEC_TOO_LARGE: &str = "codec memory too large to preview";
+pub const CODEC_TOO_LARGE: &str = "codec needs too much memory to open";
 
 /// Budget for decompressed bytes skipped to reach a member of a solid block.
 pub const MAX_SOLID_SKIP_BYTES: u64 = 256 * 1024 * 1024;
@@ -791,6 +791,23 @@ pub const METHOD_LZMA2: [u8; 1] = [0x21];
 /// 7z PPMd7 (var.H).
 pub const METHOD_PPMD: [u8; 3] = [0x03, 0x04, 0x01];
 
+/// 7z AES-256 + SHA-256 coder id.
+pub const METHOD_AES: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
+
+/// Most key-derivation rounds exponent 7-Zip itself accepts (`kNumCyclesPower_Supported_MAX`).
+/// The decoder crate runs `2^power` SHA-256 rounds (uncancellable) as soon as a password is
+/// supplied, and panics for 0x3F, so anything above is refused before it can run.
+pub const AES_MAX_CYCLES_POWER: u8 = 24;
+
+/// True when `method` is the AES coder and its props are unusable or ask for more key-derivation
+/// rounds than [`AES_MAX_CYCLES_POWER`] (missing props fail closed).
+pub fn aes_props_refused(method: &[u8], props: &[u8]) -> bool {
+    method == METHOD_AES
+        && props
+            .first()
+            .is_none_or(|b| (b & 0x3F) > AES_MAX_CYCLES_POWER)
+}
+
 /// Declared decoder memory for a coder, from its method id and properties.
 /// `None` for methods whose memory is not attacker-sized (copy, filters...).
 /// `Some(Err(()))`: the method is memory-sized but its props do not parse
@@ -861,6 +878,13 @@ pub fn check_codec_memory(archive: &sevenz_rust2::Archive, limit: u64) -> Result
         let mut total: u64 = 0;
         for coder in &block.coders {
             let method = coder.encoder_method_id();
+            if method == METHOD_AES {
+                let props = coder_properties(coder).ok_or_else(too_large)?;
+                if aes_props_refused(method, &props) {
+                    return Err(too_large());
+                }
+                continue;
+            }
             if method != METHOD_LZMA && method != METHOD_LZMA2 && method != METHOD_PPMD {
                 continue;
             }

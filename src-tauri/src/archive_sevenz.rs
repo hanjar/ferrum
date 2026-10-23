@@ -190,8 +190,8 @@ impl ReadGuard {
 }
 
 use crate::archive_contract::{
-    CODEC_DECODE_MAX_MEMORY, METHOD_LZMA, METHOD_LZMA2, METHOD_PPMD, check_codec_memory,
-    coder_properties, declared_codec_memory,
+    CODEC_DECODE_MAX_MEMORY, METHOD_AES, METHOD_LZMA, METHOD_LZMA2, METHOD_PPMD, aes_props_refused,
+    check_codec_memory, coder_properties, declared_codec_memory,
 };
 pub use crate::archive_contract::{CODEC_TOO_LARGE, SOLID_TOO_LARGE};
 
@@ -208,10 +208,21 @@ fn check_block_codec_memory(
     let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for coder in &block.coders {
         let method = coder.encoder_method_id();
-        if method != METHOD_LZMA && method != METHOD_LZMA2 && method != METHOD_PPMD {
+        if method != METHOD_LZMA
+            && method != METHOD_LZMA2
+            && method != METHOD_PPMD
+            && method != METHOD_AES
+        {
             continue;
         }
         let props = coder_properties(coder).ok_or_else(too_large)?;
+        if method == METHOD_AES {
+            // Key-derivation rounds are attacker-sized too (refused above 2^24, like 7-Zip).
+            if aes_props_refused(method, &props) {
+                return Err(too_large());
+            }
+            continue;
+        }
         items.push((method.to_vec(), props));
     }
     if sum_within_limit(&items, limit) {
@@ -2273,6 +2284,37 @@ mod ultra_text_tests {
                 b"hello hello hello hello"
             );
         }
+    }
+
+    #[test]
+    fn aes_cycles_power_is_capped_for_content_coders() {
+        assert!(!aes_props_refused(&METHOD_AES, &[24, 0]));
+        assert!(!aes_props_refused(&METHOD_AES, &[0xC0 | 19, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[25, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[0x3F, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[]));
+        assert!(!aes_props_refused(&METHOD_LZMA2, &[]));
+        // A real encrypted archive (sevenz-rust2 default power) passes every gate.
+        let dir = tempfile::tempdir().unwrap();
+        let p = small_archive_with(
+            dir.path(),
+            "aes.7z",
+            vec![
+                sevenz_rust2::EncoderConfiguration::from(
+                    sevenz_rust2::encoder_options::AesEncoderOptions::new("pw".into()),
+                ),
+                sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::LZMA2),
+            ],
+        );
+        let reader = SevenZProvider::open_reader(&p, Some("pw")).unwrap();
+        assert!(
+            reader.archive().blocks[0]
+                .coders
+                .iter()
+                .any(|c| c.encoder_method_id() == METHOD_AES)
+        );
+        check_codec_memory(reader.archive(), CODEC_DECODE_MAX_MEMORY).unwrap();
+        check_block_codec_memory(reader.archive(), 0, 256 << 20).unwrap();
     }
 
     #[test]
