@@ -1229,6 +1229,8 @@ fn sevenz_err(e: sevenz_rust2::Error) -> ArchiveError {
             ArchiveErrorCode::UnsupportedCodec
         }
         E::MaxMemLimited { .. } => ArchiveErrorCode::LimitExceeded,
+        // FER-588: the vendored crate's cap on header counts (the archive may be valid).
+        E::Other(m) if m.starts_with("Too many entries") => ArchiveErrorCode::LimitExceeded,
         _ => ArchiveErrorCode::CorruptArchive,
     };
     ArchiveError::new(code, format!("7z: {e}"))

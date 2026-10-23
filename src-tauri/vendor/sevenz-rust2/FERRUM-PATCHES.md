@@ -26,15 +26,20 @@ so the fix belongs in the parser.
 
 ## What changed
 
-Every changed spot carries a `// FERRUM PATCH (FER-588):` comment. Behaviour for valid archives is
-unchanged: the limits are far above what 7-Zip or this crate write, and match 7-Zip's own limits
-where it has one.
+Each modified file starts with a "Modified by the Ferrum project (FER-588)" line, and every changed
+spot carries a `// FERRUM PATCH (FER-588):` comment. The structural checks below are the ones 7-Zip
+itself applies, so archives 7-Zip accepts are not affected. The one exception is the absolute cap
+on items: 7-Zip allows up to 2^31 - 1 files, this copy stops at 1,048,576 (about 100 MiB of entry
+metadata). A count above the cap that the header can really describe fails with a message starting
+`Too many entries`, which Ferrum reports as `LimitExceeded` ("too large"), not as a corrupt
+archive; a count the header bytes cannot describe is a format error.
 
 `src/reader.rs`
 
 - New private helpers: `HeaderSource` (header parsing always reads from an in-memory buffer, so the
   unread byte count is known; the header parsers now take `R: HeaderSource` instead of `R: Read`),
-  `bounded_count` (count <= unread header items and <= absolute cap, else `Error::Other`) and
+  `bounded_count` (count <= unread header items, else a format error; <= absolute cap, else a
+  `Too many entries` error) and
   `try_vec` (`vec![v; n]` via `try_reserve_exact`, failure becomes `Error::Other`).
 - Caps: `MAX_HEADER_ITEMS = 1 << 20` (files, pack streams, blocks, sub-streams, digests),
   `MAX_CODERS_PER_BLOCK = 64`, `MAX_STREAMS_PER_BLOCK = 64` (per coder and per block, in and out),
@@ -61,6 +66,18 @@ where it has one.
   (they size the bind pair and packed stream vectors); property size bounded by the unread header
   and allocated fallibly; a block without packed streams is an error (decoding indexed into an
   empty list; 7-Zip rejects it).
+- `check_coder_graph` (new, called at the end of `read_block`), the checks of 7-Zip's
+  `CBondsChecks`: every coder has exactly one out stream; bind pair indices are in range and not
+  duplicated; packed streams are in range, unbound and not duplicated; exactly one main coder;
+  walking from it reaches every coder exactly once. Without it a bind pair cycle in a BCJ2 block
+  recursed in `get_in_stream` / `get_in_stream2` until the **stack overflowed** (process killed),
+  and out-of-range bind pairs were index panics.
+- `build_decode_stack2`, `get_in_stream`, `get_in_stream2` (decoding, defence in depth): a `depth`
+  argument stops the bind pair recursion after `coders.len()` steps; coder, stream map and unpack
+  size lookups use `get`; the BCJ2 main coder must have 4 in and 1 out streams before
+  `Bcj2Reader::new` (it indexed four inputs and panicked).
+- `pack_pos` additions (`read_encoded_header`, `build_decode_stack`, `build_decode_stack2`,
+  `read_file`) are checked (debug overflow panics).
 - `read_bits`: the bit vector must fit in the unread header before `BitSet::with_capacity`.
 - `read_file`: the capacity hint taken from a header size is capped at `MAX_PREALLOC`; the vector
   still grows to the real size while reading.
@@ -68,7 +85,7 @@ where it has one.
 `src/block.rs`
 
 - `OrderedCoderIter` stops after `coders.len()` steps: a bind pair cycle in a hostile header looped
-  forever, stacking decoders.
+  forever, stacking decoders (also excluded up front by `check_coder_graph`).
 
 `Cargo.toml`
 
@@ -89,13 +106,15 @@ where it has one.
 ## Tests
 
 `src-tauri/tests/archive_sevenz_counts.rs`: byte-built hostile archives (valid CRCs) for every count
-above, through list, read, extract and test, plus a deterministic CRC-fixed mutation fuzz that runs
-Ferrum's pre-check and then this crate under a counting allocator (no panic, no allocation above
-the ceiling). `FER588_FUZZ_ROUNDS` raises the round count locally.
+above and the BCJ2 coder-graph cases (cycle, out-of-range bind pair, BCJ2 with two inputs), through
+list, read, extract and test, plus a deterministic CRC-fixed mutation fuzz (seeds include BCJ2
+blocks) that runs Ferrum's pre-check, then this crate, and decodes every input it opens, under a
+counting allocator (no panic, no allocation above the ceiling). `FER588_FUZZ_ROUNDS` and
+`FER588_FUZZ_SEED` change the run locally.
 
 ## Upstream plan
 
 Offer the same change upstream as one PR against `hasenbanck/sevenz-rust2` (bounded counts,
-fallible allocation, the panic fixes and the coder-iterator bound, with the 42-byte reproducer as
+fallible allocation, the coder graph check, the panic fixes and the coder-iterator bound, with the 42-byte reproducer as
 a regression test). When a release contains it, drop this directory and the `[patch.crates-io]`
 entry and pin that version instead. Until then, re-apply these patches on every version bump.

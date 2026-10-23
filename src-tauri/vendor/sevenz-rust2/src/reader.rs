@@ -1,3 +1,4 @@
+// Modified by the Ferrum project (FER-588): see FERRUM-PATCHES.md at the root of this crate.
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -66,14 +67,28 @@ impl<T: AsRef<[u8]>> HeaderSource for std::io::Cursor<T> {
 ///
 /// `available` is the most items the unread header bytes can describe (bytes, or bytes * 8 when an
 /// item may take a single bit); `max` is the absolute cap.
+///
+/// A count the header bytes cannot describe is a format error. A count the header can describe
+/// but that is above the cap gets its own message, starting with [`TOO_MANY_ENTRIES`], so callers
+/// can report "too large" instead of "corrupt" (the archive may be valid, just bigger than this
+/// reader accepts).
 fn bounded_count(count: u64, available: usize, max: usize, field: &str) -> Result<usize, Error> {
-    if count > max as u64 || count > available as u64 {
+    if count > available as u64 {
         return Err(Error::other(format!(
-            "Header format error: {field} {count} exceeds the header size or the limit of {max}"
+            "Header format error: {field} {count} exceeds what the header can describe"
+        )));
+    }
+    if count > max as u64 {
+        return Err(Error::other(format!(
+            "{TOO_MANY_ENTRIES}: {field} {count} exceeds the limit of {max}"
         )));
     }
     Ok(count as usize)
 }
+
+/// FERRUM PATCH (FER-588): message prefix of the error for a count above an absolute cap (see
+/// `bounded_count`). Ferrum maps it to its "limit exceeded" code.
+const TOO_MANY_ENTRIES: &str = "Too many entries";
 
 /// FERRUM PATCH (FER-588): `vec![value; len]` that reports an allocation failure as an error
 /// instead of aborting the process.
@@ -497,7 +512,10 @@ impl Archive {
             .first()
             .ok_or(Error::other("no blocks, can't read encoded header"))?;
         let first_pack_stream_index = 0;
-        let block_offset = SIGNATURE_HEADER_SIZE + archive.pack_pos;
+        // FERRUM PATCH (FER-588): checked (pack_pos comes from the header).
+        let block_offset = SIGNATURE_HEADER_SIZE
+            .checked_add(archive.pack_pos)
+            .ok_or_else(|| Error::other("Header format error: pack position overflow"))?;
         if archive.pack_sizes.is_empty() {
             return Err(Error::other("no packed streams, can't read encoded header"));
         }
@@ -1212,8 +1230,80 @@ impl Archive {
         }
         block.packed_streams = packed_streams;
 
+        // FERRUM PATCH (FER-588): validate the coder graph before anything decodes it.
+        check_coder_graph(&block)?;
+
         Ok(block)
     }
+}
+
+/// FERRUM PATCH (FER-588): the checks of 7-Zip's `CBondsChecks`. The decoders index coders,
+/// streams and unpack sizes with bind pair and packed stream numbers from the header and follow
+/// bind pairs recursively: an out-of-range index panicked, and a cycle recursed until the stack
+/// overflowed, which kills the process.
+///
+/// - every coder has exactly one out stream (7-Zip rejects others; the decoders here treat an out
+///   stream index as a coder index);
+/// - bind pairs reference existing in/out streams, without duplicates;
+/// - packed streams reference existing, unbound in streams, without duplicates;
+/// - exactly one out stream is unbound (the main coder), and walking from it through the bind
+///   pairs reaches every coder exactly once (no cycle, no unused coder).
+fn check_coder_graph(block: &Block) -> Result<(), Error> {
+    let bad = |what: &str| Err(Error::other(format!("Header format error: {what}")));
+    let num_coders = block.coders.len();
+    let total_in = block.total_input_streams;
+    if block.coders.iter().any(|c| c.num_out_streams != 1) {
+        return bad("coder without exactly one out stream");
+    }
+    // First in stream of each coder (the totals are capped at MAX_STREAMS_PER_BLOCK).
+    let mut in_start = Vec::with_capacity(num_coders);
+    let mut next = 0usize;
+    for coder in &block.coders {
+        in_start.push(next);
+        next += coder.num_in_streams as usize;
+    }
+    let mut in_bound = vec![false; total_in];
+    let mut out_bound = vec![false; num_coders];
+    for bp in &block.bind_pairs {
+        if bp.in_index >= total_in as u64 || bp.out_index >= num_coders as u64 {
+            return bad("bind pair index out of range");
+        }
+        let (i, o) = (bp.in_index as usize, bp.out_index as usize);
+        if in_bound[i] || out_bound[o] {
+            return bad("duplicate bind pair");
+        }
+        in_bound[i] = true;
+        out_bound[o] = true;
+    }
+    let mut packed = vec![false; total_in];
+    for &p in &block.packed_streams {
+        if p >= total_in as u64 || in_bound[p as usize] || packed[p as usize] {
+            return bad("invalid packed stream");
+        }
+        packed[p as usize] = true;
+    }
+    let mut unbound = (0..num_coders).filter(|&o| !out_bound[o]);
+    let (Some(main), None) = (unbound.next(), unbound.next()) else {
+        return bad("not exactly one main coder");
+    };
+    let mut visited = vec![false; num_coders];
+    let mut stack = vec![main];
+    while let Some(c) = stack.pop() {
+        if visited[c] {
+            return bad("bind pair cycle");
+        }
+        visited[c] = true;
+        let first = in_start[c];
+        for s in first..first + block.coders[c].num_in_streams as usize {
+            if let Some(bp) = block.find_bind_pair_for_in_stream(s as u64) {
+                stack.push(bp.out_index as usize);
+            }
+        }
+    }
+    if visited.iter().any(|v| !v) {
+        return bad("bind pair cycle or unused coder");
+    }
+    Ok(())
 }
 
 #[inline]
@@ -1448,9 +1538,13 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Self::build_decode_stack2(source, archive, block_index, password, thread_count);
         }
         let first_pack_stream_index = archive.stream_map.block_first_pack_stream_index[block_index];
+        // FERRUM PATCH (FER-588): checked (pack_pos comes from the header).
         let block_offset = SIGNATURE_HEADER_SIZE
-            + archive.pack_pos
-            + archive.stream_map.pack_stream_offsets[first_pack_stream_index];
+            .checked_add(archive.pack_pos)
+            .and_then(|p| {
+                p.checked_add(archive.stream_map.pack_stream_offsets[first_pack_stream_index])
+            })
+            .ok_or_else(|| Error::other("Header format error: pack position overflow"))?;
 
         let (mut has_crc, mut crc) = (block.has_crc, block.crc);
 
@@ -1522,19 +1616,23 @@ impl<R: Read + Seek> ArchiveReader<R> {
         assert!(block.total_input_streams > block.total_output_streams);
         let shared_source = Rc::new(RefCell::new(source));
         let first_pack_stream_index = archive.stream_map.block_first_pack_stream_index[block_index];
-        let start_pos = SIGNATURE_HEADER_SIZE + archive.pack_pos;
+        // FERRUM PATCH (FER-588): checked (pack_pos comes from the header).
+        let start_pos = SIGNATURE_HEADER_SIZE
+            .checked_add(archive.pack_pos)
+            .ok_or_else(|| Error::other("Header format error: pack position overflow"))?;
         let offsets = &archive.stream_map.pack_stream_offsets[first_pack_stream_index..];
 
         let mut sources = Vec::with_capacity(block.packed_streams.len());
 
         for (i, offset) in offsets[..block.packed_streams.len()].iter().enumerate() {
-            let pack_pos = start_pos + offset;
             let pack_size = archive.pack_sizes[first_pack_stream_index + i];
+            // FERRUM PATCH (FER-588): checked (overflow panicked in debug builds).
+            let overflow = || Error::other("Header format error: pack position overflow");
+            let pack_pos = start_pos.checked_add(*offset).ok_or_else(overflow)?;
+            let pack_end = pack_pos.checked_add(pack_size).ok_or_else(overflow)?;
 
-            let pack_reader = SharedBoundedReader::new(
-                Rc::clone(&shared_source),
-                (pack_pos, pack_pos + pack_size),
-            );
+            let pack_reader =
+                SharedBoundedReader::new(Rc::clone(&shared_source), (pack_pos, pack_end));
 
             sources.push(pack_reader);
         }
@@ -1550,7 +1648,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
         let main_coder_index = {
             let mut coder_used = [false; MAX_CODER_COUNT];
             for bp in block.bind_pairs.iter() {
-                coder_used[bp.out_index as usize] = true;
+                // FERRUM PATCH (FER-588): `get_mut` (an out-of-range index panicked; the graph
+                // is also validated in `check_coder_graph`).
+                if let Some(used) = coder_used.get_mut(bp.out_index as usize) {
+                    *used = true;
+                }
             }
             let mut mci = 0;
             for (i, used) in coder_used[..block.coders.len()].iter().enumerate() {
@@ -1567,6 +1669,14 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(Error::unsupported(format!("Unsupported method: {id:?}")));
         }
 
+        // FERRUM PATCH (FER-588): `Bcj2Reader` indexes exactly four inputs (panicked otherwise).
+        if block.coders[main_coder_index].num_in_streams != 4
+            || block.coders[main_coder_index].num_out_streams != 1
+        {
+            return Err(Error::other(
+                "Header format error: BCJ2 coder needs 4 in and 1 out streams",
+            ));
+        }
         let num_in_streams = block.coders[main_coder_index].num_in_streams as usize;
         let mut inputs: Vec<Box<dyn Read>> = Vec::with_capacity(num_in_streams);
         let start_i = coder_to_stream_map[main_coder_index];
@@ -1578,6 +1688,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 password,
                 i,
                 thread_count,
+                0,
             )?);
         }
         let mut decoder: Box<dyn Read> = Box::new(Bcj2Reader::new(inputs, block.get_unpack_size()));
@@ -1601,10 +1712,16 @@ impl<R: Read + Seek> ArchiveReader<R> {
         password: &Password,
         in_stream_index: usize,
         thread_count: u32,
+        depth: usize, // FERRUM PATCH (FER-588): bind pairs followed so far
     ) -> Result<Box<dyn Read + 'r>, Error>
     where
         R: 'r,
     {
+        // FERRUM PATCH (FER-588): a valid graph is at most `coders.len()` deep; a cycle used to
+        // recurse until the stack overflowed (`check_coder_graph` rejects cycles up front).
+        if depth > block.coders.len() {
+            return Err(Error::other("Header format error: bind pair cycle"));
+        }
         let index = block
             .packed_streams
             .iter()
@@ -1629,6 +1746,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             password,
             index,
             thread_count,
+            depth + 1,
         )
     }
 
@@ -1639,16 +1757,24 @@ impl<R: Read + Seek> ArchiveReader<R> {
         password: &Password,
         in_stream_index: usize,
         thread_count: u32,
+        depth: usize, // FERRUM PATCH (FER-588)
     ) -> Result<Box<dyn Read + 'r>, Error>
     where
         R: 'r,
     {
-        let coder = &block.coders[in_stream_index];
-        let start_index = coder_to_stream_map[in_stream_index];
+        // FERRUM PATCH (FER-588): `get` instead of indexing with a header-supplied number.
+        let out_of_range = || Error::other("in_stream_index out of range");
+        let coder = block.coders.get(in_stream_index).ok_or_else(out_of_range)?;
+        let start_index = *coder_to_stream_map
+            .get(in_stream_index)
+            .ok_or_else(out_of_range)?;
         if start_index == usize::MAX {
             return Err(Error::other("in_stream_index out of range"));
         }
-        let uncompressed_len = block.unpack_sizes[in_stream_index] as usize;
+        let uncompressed_len = *block
+            .unpack_sizes
+            .get(in_stream_index)
+            .ok_or_else(out_of_range)? as usize;
         if coder.num_in_streams == 1 {
             let input = Self::get_in_stream(
                 block,
@@ -1657,6 +1783,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 password,
                 start_index,
                 thread_count,
+                depth + 1,
             )?;
 
             let decoder = add_decoder(
@@ -1757,7 +1884,11 @@ impl<R: Read + Seek> ArchiveReader<R> {
             false => {
                 let pack_index = self.archive.stream_map.block_first_pack_stream_index[block_index];
                 let pack_offset = self.archive.stream_map.pack_stream_offsets[pack_index];
-                let block_offset = SIGNATURE_HEADER_SIZE + self.archive.pack_pos + pack_offset;
+                // FERRUM PATCH (FER-588): checked (pack_pos comes from the header).
+                let block_offset = SIGNATURE_HEADER_SIZE
+                    .checked_add(self.archive.pack_pos)
+                    .and_then(|p| p.checked_add(pack_offset))
+                    .ok_or_else(|| Error::other("Header format error: pack position overflow"))?;
 
                 self.source.seek(SeekFrom::Start(block_offset))?;
 

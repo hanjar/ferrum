@@ -380,6 +380,139 @@ fn next_header_of(full: &[u8]) -> Vec<u8> {
     full[32 + off..].to_vec()
 }
 
+/// BCJ2 method id (`03 03 01 1B`), as a complex coder (flags: id size 4, not simple).
+const BCJ2: [u8; 5] = [0x14, 0x03, 0x03, 0x01, 0x1B];
+
+/// One block described by `block` (coder count, coders, bind pairs, packed streams), `npack`
+/// pack streams of one byte each, `outs` unpack sizes, one sub-stream, files `names_list`.
+/// The FER-588 review's builder (decode reaches `build_decode_stack2` for BCJ2 blocks).
+fn one_block(npack: u64, block: &[u8], outs: &[u64], names_list: &[&str]) -> Vec<u8> {
+    let packed = vec![0x41u8; npack as usize];
+    let mut sizes = Vec::new();
+    for _ in 0..npack {
+        sizes.extend(num(1));
+    }
+    let mut unpack = Vec::new();
+    for o in outs {
+        unpack.extend(num(*o));
+    }
+    let nm = names(names_list);
+    let header = cat(&[
+        &[K_HEADER, K_MAIN_STREAMS_INFO, K_PACK_INFO],
+        &num(0),
+        &num(npack),
+        &[K_SIZE],
+        &sizes,
+        &[K_END, K_UNPACK_INFO, K_FOLDER],
+        &num(1),
+        &[0x00],
+        block,
+        &[K_CODERS_UNPACK_SIZE],
+        &unpack,
+        &[K_END, K_SUB_STREAMS_INFO, K_END, K_END, K_FILES_INFO],
+        &num(names_list.len() as u64),
+        &[K_NAME],
+        &num(nm.len() as u64),
+        &nm,
+        &[K_END, K_END],
+    ]);
+    archive(&packed, &header)
+}
+
+/// BCJ2 (4 in, 1 out), all four inputs packed: a valid graph.
+fn bcj2_plain() -> Vec<u8> {
+    let b = cat(&[
+        &num(1),
+        &BCJ2,
+        &num(4),
+        &num(1),
+        &num(0),
+        &num(1),
+        &num(2),
+        &num(3),
+    ]);
+    one_block(4, &b, &[4], &["a"])
+}
+
+/// BCJ2 + Copy feeding BCJ2 input 0 (bind in0 <- out1), packed in1..in4: a valid graph.
+fn bcj2_chain() -> Vec<u8> {
+    let b = cat(&[
+        &num(2),
+        &BCJ2,
+        &num(4),
+        &num(1),
+        &[0x01, 0x00],
+        &num(0),
+        &num(1),
+        &num(1),
+        &num(2),
+        &num(3),
+        &num(4),
+    ]);
+    one_block(4, &b, &[4, 1], &["a"])
+}
+
+/// BCJ2 + Copy A + Copy B with binds (in0 <- outA) and (inA <- outA): A feeds itself. Before
+/// the review fix, decoding recursed until the stack overflowed and the process died.
+fn bcj2_cycle() -> Vec<u8> {
+    let b = cat(&[
+        &num(3),
+        &BCJ2,
+        &num(4),
+        &num(1),
+        &[0x01, 0x00, 0x01, 0x00],
+        &num(0),
+        &num(1),
+        &num(4),
+        &num(1),
+        &num(1),
+        &num(2),
+        &num(3),
+        &num(5),
+    ]);
+    one_block(4, &b, &[4, 4, 4], &["a"])
+}
+
+/// BCJ2 + Copy with a bind pair whose out index is 1000 (index panic before the fix).
+fn bcj2_bad_out_index() -> Vec<u8> {
+    let b = cat(&[
+        &num(2),
+        &BCJ2,
+        &num(4),
+        &num(1),
+        &[0x01, 0x00],
+        &num(0),
+        &num(1000),
+        &num(1),
+        &num(2),
+        &num(3),
+        &num(4),
+    ]);
+    one_block(4, &b, &[4, 4], &["a"])
+}
+
+/// BCJ2 id with 2 in streams (`Bcj2Reader` indexed four and panicked).
+fn bcj2_two_inputs() -> Vec<u8> {
+    let b = cat(&[&num(1), &BCJ2, &num(2), &num(1), &num(0), &num(1)]);
+    one_block(2, &b, &[4], &["a"])
+}
+
+/// `count` empty directories: a well-formed header whose file count is only limited by the cap.
+fn many_empty_dirs(count: u64) -> Vec<u8> {
+    let bits = vec![0xFFu8; count.div_ceil(8) as usize];
+    archive(
+        &[],
+        &cat(&[
+            &[K_HEADER, K_FILES_INFO],
+            &num(count),
+            &[K_EMPTY_STREAM],
+            &num(bits.len() as u64),
+            &bits,
+            &[K_END, K_END],
+        ]),
+    )
+}
+
 // -------------------------------------------------------- Ferrum surfaces ---
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -656,6 +789,73 @@ fn oversized_next_header_is_refused_by_the_crate_without_allocating_it() {
     assert!(max_one <= 1 << 20, "largest allocation {max_one}");
 }
 
+// ------------------------------------------- review R1: coder graph (BCJ2) ---
+
+#[test]
+fn valid_bcj2_graphs_still_open() {
+    // The graph check must not reject the shapes 7-Zip writes: BCJ2 alone and BCJ2 with a
+    // coder feeding one of its inputs.
+    for (tag, bytes) in [("bcj2-plain", bcj2_plain()), ("bcj2-chain", bcj2_chain())] {
+        let tmp = TempDir::new(tag);
+        let path = tmp.path().join(format!("{tag}.7z"));
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(list(&path).unwrap(), 1, "{tag}");
+        // The packed bytes are not real BCJ2 data: decoding may fail, but only with an error.
+        let _ = read(&path, "a");
+        let _ = test(&path);
+    }
+}
+
+#[test]
+fn bind_pair_cycle_is_refused_instead_of_overflowing_the_stack() {
+    // Review R1 B1: listed fine, then read/extract/test killed the process (stack overflow).
+    assert_refused_everywhere("bcj2-cycle", &bcj2_cycle(), "bind pair");
+}
+
+#[test]
+fn bind_pair_out_of_range_is_refused() {
+    assert_refused_everywhere("bcj2-badout", &bcj2_bad_out_index(), "bind pair index");
+}
+
+#[test]
+fn bcj2_with_two_inputs_is_an_error_not_a_panic() {
+    // A graph-valid block; only the BCJ2 decoder needs four inputs. Listing works, decoding
+    // must fail with an error (it panicked inside `Bcj2Reader`).
+    let tmp = TempDir::new("bcj2-two");
+    let path = tmp.path().join("two.7z");
+    fs::write(&path, bcj2_two_inputs()).unwrap();
+    assert_eq!(list(&path).unwrap(), 1);
+    let dest = tmp.path().join("out");
+    fs::create_dir_all(&dest).unwrap();
+    let r = read(&path, "a").expect_err("read must fail");
+    assert!(r.message.contains("BCJ2"), "{}", r.message);
+    assert!(extract(&path, &dest).is_err());
+    assert!(test(&path).is_err());
+}
+
+#[test]
+fn more_entries_than_the_cap_is_limit_exceeded_not_corrupt() {
+    // Review R1 N1: a header that really describes 1,048,577 empty directories is well formed;
+    // the crate's cap refuses it, and Ferrum reports it as too large, not as corrupt.
+    let tmp = TempDir::new("cap");
+    let path = tmp.path().join("cap.7z");
+    fs::write(&path, many_empty_dirs((1 << 20) + 1)).unwrap();
+    let err = list(&path).expect_err("over the cap");
+    assert_eq!(err.code, Code::LimitExceeded, "{}", err.message);
+    assert!(err.message.contains("Too many entries"), "{}", err.message);
+    let err = test(&path).expect_err("over the cap");
+    assert_eq!(err.code, Code::LimitExceeded, "{}", err.message);
+
+    // At the cap the same shape opens.
+    let ok = tmp.path().join("ok.7z");
+    fs::write(&ok, many_empty_dirs(1 << 20)).unwrap();
+    let opened = sevenz_rust2::ArchiveReader::new(
+        fs::File::open(&ok).unwrap(),
+        sevenz_rust2::Password::empty(),
+    );
+    assert_eq!(opened.unwrap().archive().files.len(), 1 << 20);
+}
+
 // ------------------------------------------------------- differential fuzz ---
 
 struct XorShift(u64);
@@ -685,6 +885,11 @@ fn written_7z(dir: &Path, name: &str, files: usize, solid: bool) -> Vec<u8> {
     use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
     let path = dir.join(name);
     let mut w = ArchiveWriter::create(&path).unwrap();
+    // Small LZMA2 dictionary: the fuzz decodes every input, and 40 blocks with the default
+    // dictionary cost ~1 s each in a debug build.
+    let mut lzma2 = sevenz_rust2::encoder_options::Lzma2Options::from_level(1);
+    lzma2.set_dictionary_size(64 << 10);
+    w.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::from(lzma2)]);
     if solid {
         let entries: Vec<ArchiveEntry> = (0..files)
             .map(|i| ArchiveEntry::new_file(&format!("d/f{i:04}.txt")))
@@ -722,6 +927,8 @@ fn differential_fuzz_of_header_counts_never_panics_or_over_allocates() {
         written_7z(tmp.path(), "multi.7z", 40, false), // encoded (LZMA) header
         written_7z(tmp.path(), "solid.7z", 40, true),  // encoded header, solid block
         encoded(&next_header_of(&sane_plain())),       // stored encoded header
+        bcj2_plain(),                                  // reaches build_decode_stack2
+        bcj2_chain(),                                  // BCJ2 with a bind pair
     ];
     for (i, seed) in seeds.iter().enumerate() {
         let open = sevenz_rust2::ArchiveReader::new(
@@ -735,7 +942,7 @@ fn differential_fuzz_of_header_counts_never_panics_or_over_allocates() {
     let rounds: usize = std::env::var("FER588_FUZZ_ROUNDS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(30_000);
+        .unwrap_or(20_000);
     // FER588_FUZZ_SEED picks another deterministic sequence.
     let seed = std::env::var("FER588_FUZZ_SEED")
         .ok()
@@ -792,13 +999,11 @@ fn differential_fuzz_of_header_counts_never_panics_or_over_allocates() {
                 };
                 // Production order: codec memory is checked before anything is decoded.
                 reader.set_thread_count(1);
-                // Decode only every 32nd input, at most 256 KiB of output each: decode-time CPU is
-                // bounded elsewhere (ReadGuard, cancel); this only looks for panics.
-                if round % 32 == 0
-                    && archive_contract::check_codec_memory(reader.archive(), 64 << 20).is_ok()
-                {
+                // Decode every opened input (codec memory <= 16 MiB, at most 16 KiB of output): CPU is
+                // bounded elsewhere (ReadGuard, cancel); this looks for panics and crashes.
+                if archive_contract::check_codec_memory(reader.archive(), 16 << 20).is_ok() {
                     let mut sink = [0u8; 4096];
-                    let mut budget = 256usize << 10;
+                    let mut budget = 16usize << 10;
                     let _ = reader.for_each_entries(|_, r| {
                         loop {
                             let n = r.read(&mut sink)?;
@@ -841,9 +1046,9 @@ fn differential_fuzz_of_header_counts_never_panics_or_over_allocates() {
          largest allocation {max_all} bytes, {elapsed:?}"
     );
     assert!(accepted > rounds / 4, "fuzz must exercise the crate");
-    // ~10 s for the default rounds in a debug build; a hang shows up here.
+    // ~25 s for the default rounds in a debug build; a hang shows up here.
     assert!(
-        elapsed < std::time::Duration::from_secs(120) * (rounds.div_ceil(30_000) as u32),
+        elapsed < std::time::Duration::from_secs(120) * (rounds.div_ceil(20_000) as u32),
         "fuzz too slow: {elapsed:?}"
     );
 }

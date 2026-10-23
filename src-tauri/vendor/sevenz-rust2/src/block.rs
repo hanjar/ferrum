@@ -1,3 +1,4 @@
+// Modified by the Ferrum project (FER-588): see FERRUM-PATCHES.md at the root of this crate.
 /// Represents a compression block.
 ///
 /// A block contains one or more coders (compression/filter methods) that are chained
