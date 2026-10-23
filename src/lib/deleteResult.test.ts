@@ -5,6 +5,7 @@ import {
   deleteHasProblems,
   deleteOutcome,
   deleteProblemText,
+  deleteProgressDetail,
   deleteRemaining,
   deleteSummary,
 } from './deleteResult';
@@ -81,5 +82,22 @@ describe('deleteResult', () => {
   it('long lists are shortened', () => {
     const r = make({ cancelled: true, partial: ['a\\1', 'a\\2', 'a\\3', 'a\\4'] }, { deleted: 0 });
     expect(deleteProblemText(r)).toContain('1, 2, 3 …');
+  });
+});
+
+describe('deleteProgressDetail (FER-586)', () => {
+  it('is empty before anything was removed', () => {
+    expect(deleteProgressDetail({ done: 0, total: 1, entries: 0, bytes: 0 })).toBe('');
+  });
+  it('counts entries and bytes inside folders', () => {
+    expect(deleteProgressDetail({ done: 0, total: 1, entries: 1204, bytes: 3 * 1024 * 1024 })).toBe(
+      '1,204 entries removed, 3.00 MB',
+    );
+    expect(deleteProgressDetail({ done: 0, total: 1, entries: 1, bytes: 0 })).toBe(
+      '1 entry removed',
+    );
+  });
+  it('accepts a progress without bytes (older backend)', () => {
+    expect(deleteProgressDetail({ done: 1, total: 2, entries: 40 })).toBe('40 entries removed');
   });
 });

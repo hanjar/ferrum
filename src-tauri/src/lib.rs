@@ -28,6 +28,8 @@ pub mod copy_engine;
 pub mod copy_native;
 pub mod copy_pool;
 pub mod delete_jobs;
+#[cfg(windows)]
+pub mod delete_walker;
 pub mod disk_usage;
 pub mod disk_usage_cache;
 pub mod domain;

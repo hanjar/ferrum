@@ -129,10 +129,12 @@ describe('FER-585: Delete as a backend job', () => {
   it('a long delete shows progress after the delay, with Background and Cancel', async () => {
     const job = controllable();
     await confirm();
-    job.progress({ done: 1, total: 2, currentName: 'b', entries: 40 });
+    job.progress({ done: 1, total: 2, currentName: 'b', entries: 40, bytes: 2048 });
     await vi.waitFor(() => expect(progressBar()).not.toBeNull(), { timeout: 2000 });
     expect(progressBar()?.getAttribute('aria-valuenow')).toBe('50');
     expect(modal().textContent).toContain('1 / 2');
+    // FER-586: entries inside folders move per entry.
+    expect(modal().textContent).toContain('40 entries removed, 2.00 KB');
     expect(button('Background')).toBeTruthy();
     expect(jobs.running).toHaveLength(1);
     expect(jobs.running[0]).toMatchObject({ kind: 'delete', processedEntries: 1, totalEntries: 2 });
