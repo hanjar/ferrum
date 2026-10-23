@@ -1043,6 +1043,7 @@ servo_arc 0.4.3
 sevenz-rust2 0.20.2
   License: Apache-2.0
   Source:  https://github.com/hasenbanck/sevenz-rust
+  Note:    Modified copy vendored at src-tauri/vendor/sevenz-rust2 (changes listed in FERRUM-PATCHES.md there).
   Text:    [L96] (LICENSE)
 
 sha1 0.10.7

@@ -174,6 +174,16 @@ export function readLicenseFiles(dir, extra = []) {
 /** Crates that vendor other software whose license file is not at the top of the package. */
 export const EXTRA_LICENSE_FILES = { unrar_sys: ['vendor/unrar/license.txt'] };
 
+/**
+ * Third-party crates vendored into the repository and wired in with `[patch.crates-io]` (FER-588).
+ * They have no registry `source` but are not Ferrum's own code, so they stay in the notices, with a
+ * note that the copy is modified. Returns the repository-relative directory, or null.
+ */
+export function vendoredCrateDir(manifestPath) {
+  const m = /[\\/](src-tauri[\\/]vendor[\\/][^\\/]+)[\\/]Cargo\.toml$/.exec(manifestPath ?? '');
+  return m ? m[1].replace(/\\/g, '/') : null;
+}
+
 function dirOfManifest(manifestPath) {
   return manifestPath.replace(/[\\/][^\\/]+$/, '');
 }
@@ -183,7 +193,8 @@ function dirOfManifest(manifestPath) {
  *
  * The walk follows normal dependency edges only (dev-dependencies are tests, build-dependencies run
  * on the build machine and are not linked into the binary). Proc-macro crates are normal edges and
- * stay in. Workspace-local crates (no registry source) are Ferrum itself and are not listed.
+ * stay in. Workspace-local crates (no registry source) are Ferrum itself and are not listed, except
+ * vendored third-party crates (see `vendoredCrateDir`).
  */
 export function collectRustComponents(metadata) {
   const byId = new Map(metadata.packages.map((p) => [p.id, p]));
@@ -204,7 +215,9 @@ export function collectRustComponents(metadata) {
   const out = [];
   for (const id of seen) {
     const pkg = byId.get(id);
-    if (!pkg || !pkg.source) continue;
+    if (!pkg) continue;
+    const vendored = vendoredCrateDir(pkg.manifest_path);
+    if (!pkg.source && !vendored) continue;
     const dir = dirOfManifest(pkg.manifest_path);
     out.push({
       ecosystem: 'crate',
@@ -219,6 +232,11 @@ export function collectRustComponents(metadata) {
         name: rel,
         text: normalizeText(readFileSync(join(dir, rel), 'utf8')),
       })),
+      ...(vendored
+        ? {
+            note: `Modified copy vendored at ${vendored} (changes listed in FERRUM-PATCHES.md there).`,
+          }
+        : {}),
     });
   }
   return out;
@@ -426,6 +444,7 @@ export function renderNotices({ components, header, special }) {
       lines.push(`${c.name} ${c.version}`);
       lines.push(`  License: ${c.license}`);
       if (c.repository) lines.push(`  Source:  ${c.repository}`);
+      if (c.note) lines.push(`  Note:    ${c.note}`);
       const refs = filesOf(c).map((f) => `[L${texts.get(textKey(f.text)).id}] (${f.name})`);
       lines.push(`  Text:    ${refs.join(', ')}`, '');
     }

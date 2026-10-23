@@ -109,3 +109,9 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 png = "0.18"
+
+# FER-588: sevenz-rust2 0.20.2 vendored with bounded header counts and fallible allocations, so a
+# hostile 7z header returns an error instead of aborting the process. See
+# vendor/sevenz-rust2/FERRUM-PATCHES.md (origin, patch list, upstream plan).
+[patch.crates-io]
+sevenz-rust2 = { path = "vendor/sevenz-rust2" }
