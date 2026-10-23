@@ -22,7 +22,9 @@
 //! - Listing reads the open handle; deleting goes through the open handle: `FileDispositionInfoEx`
 //!   with POSIX semantics and `IGNORE_READONLY_ATTRIBUTE`; where a file system does not support that
 //!   (FAT, older systems) the classic `FileDispositionInfo`, after clearing the read-only attribute
-//!   through a second handle of the same object (restored if the delete still fails).
+//!   through a second handle opened from the first (restored if the delete still fails). That second
+//!   handle, like the working handle of the top folder, must prove it is the same object (file id)
+//!   wherever ids are required; otherwise nothing is changed and the original error is returned.
 //! - Iterative: an explicit stack of open directories, so depth is bounded by memory, not the
 //!   thread's stack.
 //! - Retries like std: a sharing violation on open is retried a few times with a short back-off; a
@@ -31,7 +33,9 @@
 //!
 //! What is guaranteed (the CVE-2022-21658 class: a folder swapped for a junction, or turned into a
 //! junction in place, while the delete runs):
-//! - Local volumes: a relative open is resolved by the kernel in the held object itself. A folder
+//! - Local volumes on a known file system (NTFS, ReFS, FAT, FAT32, exFAT, by the volume's
+//!   `FileFsAttributeInformation`): a relative open is resolved by the kernel in the held object
+//!   itself. A folder
 //!   swapped for a link before it is opened is opened AS the link and deleted as such. A held folder
 //!   turned into a link in place makes every later relative open fail with
 //!   STATUS_REPARSE_POINT_NOT_RESOLVED; the walker then deletes it as the link it now is, through
@@ -42,7 +46,10 @@
 //!   keeps an open that landed somewhere else from being used: the object must be the one the held
 //!   parent listed. On a network location every entry must have a verifiable id, otherwise the walk
 //!   is refused with an error; and held folders are opened without `FILE_SHARE_DELETE`, so they
-//!   cannot be renamed away while held. Tested through `\\localhost\<drive>$`.
+//!   cannot be renamed away while held. Tested through `\\localhost\<drive>$` (scenarios: in-place
+//!   junction, swap before open, rename of a held folder, the classic delete's second open).
+//! - Any other local file system (e.g. a user-mode WinFsp/Dokan volume, which may resolve by path)
+//!   is treated like a network location: ids required, held folders without delete sharing.
 //! - Local volumes keep `FILE_SHARE_DELETE` (as std): a subtree moved elsewhere by another process
 //!   while it is being deleted is still deleted at its new place (it is the same object the user
 //!   chose).
@@ -65,8 +72,8 @@ use std::time::Duration;
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileFsDeviceInformation,
-    NtCreateFile, NtQueryVolumeInformationFile,
+    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileFsAttributeInformation,
+    FileFsDeviceInformation, NtCreateFile, NtQueryVolumeInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_CANT_RESOLVE_FILENAME, ERROR_DIR_NOT_EMPTY, ERROR_INVALID_FUNCTION, ERROR_INVALID_LEVEL,
@@ -109,6 +116,8 @@ pub(crate) enum Seam<'a> {
     OpenedDir(&'a Path),
     /// A directory's handle was listed (one batch); its entries are about to be opened.
     Listed(&'a Path),
+    /// The classic delete is about to open a read-only entry again to clear its attribute.
+    BeforeReopen(&'a Path),
 }
 
 /// Remove `root` (a folder) and everything below it. `cancelled` is polled before every entry;
@@ -141,8 +150,10 @@ type FileId = [u8; 16];
 
 /// Facts about the volume the walk runs on, fixed when the top folder is opened.
 struct Volume {
-    /// UNC path or mapped drive: opens are resolved by path on the server.
-    remote: bool,
+    /// Every opened object must prove its identity (file id): a network location (opens are
+    /// resolved by path on the server) or a file system not known to resolve relative opens in the
+    /// held object itself (see [`ids_required`]).
+    strict: bool,
     /// Share mode for held folders.
     dir_share: u32,
     /// The listing class with 128-bit ids works here (cleared once if the file system rejects it).
@@ -163,29 +174,39 @@ pub(crate) fn remove_tree_with(
         return Err(WalkError::Cancelled);
     }
     // A probe handle (no delete access, so it does not conflict with the share mode chosen below)
-    // says what the top entry is and where it lives; the working handle is the same object opened
-    // again, without resolving the path a second time.
+    // says what the top entry is and where it lives. The working handle is opened again from it: on
+    // a local volume that is the same object without resolving the path again; on a network
+    // location the server resolves the path again, so the two ids must match.
     let probe = with_sharing_retry(|| open_root(root)).map_err(|e| io_err(root, e))?;
     let tag = attribute_tag(&probe).map_err(|e| io_err(root, e))?;
+    let remote = is_remote(&probe).map_err(|e| io_err(root, e))?;
+    let strict = ids_required(remote, file_system_name(&probe).as_deref());
+    let volume = Volume {
+        strict,
+        dir_share: if strict { SHARE_NO_DELETE } else { SHARE_ALL },
+        extended_listing: Cell::new(true),
+    };
+    let reopen_top = |access: u32, share: u32| -> io::Result<OwnedHandle> {
+        let h = with_sharing_retry(|| reopen(&probe, access, share))?;
+        if !same_object(&probe, &h, strict) {
+            return Err(io::Error::other(
+                "the folder changed while it was being opened for deleting",
+            ));
+        }
+        Ok(h)
+    };
     if !is_real_directory(&tag) {
         // Not a folder (any more): a link is deleted as the link, a file as the file.
-        let top = with_sharing_retry(|| reopen(&probe, BASE_ACCESS, SHARE_ALL))
-            .map_err(|e| io_err(root, e))?;
+        let top = reopen_top(BASE_ACCESS, SHARE_ALL).map_err(|e| io_err(root, e))?;
         drop(probe);
-        delete_by_handle(&top).map_err(|e| io_err(root, e))?;
+        delete_by_handle(&top, strict, &|| seam(Seam::BeforeReopen(root)))
+            .map_err(|e| io_err(root, e))?;
         removed(0);
         return Ok(());
     }
-    let remote = is_remote(&probe).map_err(|e| io_err(root, e))?;
-    let volume = Volume {
-        remote,
-        dir_share: if remote { SHARE_NO_DELETE } else { SHARE_ALL },
-        extended_listing: Cell::new(true),
-    };
-    // On a network location the top folder is held without delete sharing too.
-    let top =
-        with_sharing_retry(|| reopen(&probe, BASE_ACCESS | FILE_LIST_DIRECTORY, volume.dir_share))
-            .map_err(|e| io_err(root, e))?;
+    // Held without delete sharing too when ids are required.
+    let top = reopen_top(BASE_ACCESS | FILE_LIST_DIRECTORY, volume.dir_share)
+        .map_err(|e| io_err(root, e))?;
     drop(probe);
     let top_volume = object_id(&top).and_then(|(serial, _)| serial);
 
@@ -264,7 +285,7 @@ pub(crate) fn remove_tree_with(
             if is_real_directory(&tag) {
                 let child = if entry.listed_as_dir {
                     child
-                } else if volume.remote {
+                } else if volume.strict {
                     // Listed as a file, a folder now: another object. (A held folder on a network
                     // location must be opened without delete sharing, which this handle was not.)
                     drop(child);
@@ -289,7 +310,10 @@ pub(crate) fn remove_tree_with(
                 continue;
             }
             // A file, or a link of any kind (deleted as the link, never entered).
-            delete_by_handle(&child).map_err(|e| io_err(&child_path, e))?;
+            delete_by_handle(&child, volume.strict, &|| {
+                seam(Seam::BeforeReopen(&child_path))
+            })
+            .map_err(|e| io_err(&child_path, e))?;
             drop(child);
             let is_plain_file =
                 tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0;
@@ -312,7 +336,10 @@ pub(crate) fn remove_tree_with(
             continue;
         }
         // Listed to the end and every entry handled: delete the folder itself.
-        match delete_by_handle(&frame.handle) {
+        let frame_path = frame.path.clone();
+        match delete_by_handle(&frame.handle, volume.strict, &|| {
+            seam(Seam::BeforeReopen(&frame_path))
+        }) {
             Ok(()) => {
                 stack.pop();
                 removed(0);
@@ -404,10 +431,10 @@ fn verify_identity(
     }
     let opened = object_id(child);
     let (Some(listed), Some((serial, id))) = (entry.id, opened) else {
-        return if volume.remote {
+        return if volume.strict {
             Identity::Unverifiable
         } else {
-            // Local: the relative open was resolved in the held object itself.
+            // A known local file system: the relative open was resolved in the held object itself.
             Identity::Same
         };
     };
@@ -446,6 +473,76 @@ fn object_id(handle: &OwnedHandle) -> Option<(Option<u64>, FileId)> {
     }
     let index = (u64::from(bh.nFileIndexHigh) << 32) | u64::from(bh.nFileIndexLow);
     (index != 0).then_some((Some(u64::from(bh.dwVolumeSerialNumber)), widen(index)))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: a re-opened handle is reported as another object.
+    static FORCE_REOPEN_MISMATCH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `b` (opened again from `a`) is provably the same object as `a`. Ids that cannot be read
+/// count as "same" only when ids are not required on this volume.
+fn same_object(a: &OwnedHandle, b: &OwnedHandle, strict: bool) -> bool {
+    #[cfg(test)]
+    if FORCE_REOPEN_MISMATCH.with(|f| f.get()) {
+        return false;
+    }
+    match (object_id(a), object_id(b)) {
+        (Some((serial_a, id_a)), Some((serial_b, id_b))) => {
+            id_a == id_b && (serial_a.is_none() || serial_b.is_none() || serial_a == serial_b)
+        }
+        _ => !strict,
+    }
+}
+
+/// Local file systems known to resolve a handle-relative open in the held object itself (the
+/// kernel's own drivers). Anything else (a network location, or a third-party file system that may
+/// resolve by path in user mode, e.g. WinFsp/Dokan) must prove every entry's identity.
+const KNOWN_LOCAL_FILE_SYSTEMS: [&str; 5] = ["NTFS", "ReFS", "FAT", "FAT32", "exFAT"];
+
+fn ids_required(remote: bool, file_system: Option<&str>) -> bool {
+    remote
+        || !file_system.is_some_and(|name| {
+            KNOWN_LOCAL_FILE_SYSTEMS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(name))
+        })
+}
+
+/// The file system name of the volume of `handle` (`FileFsAttributeInformation`), if it answers.
+fn file_system_name(handle: &OwnedHandle) -> Option<String> {
+    // FILE_FS_ATTRIBUTE_INFORMATION: attributes (u32), max component length (i32), name length in
+    // bytes (u32), then the name. 8-byte aligned buffer, far larger than any file system name.
+    let mut buf = [0u64; 64];
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `buf` is writable for the size passed, `status_block` is writable, and `handle` is a
+    // live handle we own.
+    let status = unsafe {
+        NtQueryVolumeInformationFile(
+            handle.as_raw_handle(),
+            &mut status_block,
+            buf.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buf) as u32,
+            FileFsAttributeInformation,
+        )
+    };
+    if status < 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let name_len = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+    let name_bytes = bytes.get(12..12usize.checked_add(name_len)?)?;
+    if !name_len.is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = name_bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    String::from_utf16(&units).ok()
 }
 
 fn widen(index: u64) -> FileId {
@@ -885,7 +982,12 @@ fn legacy_forced() -> bool {
 }
 
 /// Delete the object behind `handle` (a file, an empty folder or a link: the link itself).
-fn delete_by_handle(handle: &OwnedHandle) -> io::Result<()> {
+/// `strict`: ids are required on this volume (see [`legacy_delete`]); `before_reopen` is a test seam.
+fn delete_by_handle(
+    handle: &OwnedHandle,
+    strict: bool,
+    before_reopen: &dyn Fn(),
+) -> io::Result<()> {
     if !legacy_forced() {
         let info = FILE_DISPOSITION_INFO_EX {
             Flags: FILE_DISPOSITION_FLAG_DELETE
@@ -916,7 +1018,7 @@ fn delete_by_handle(handle: &OwnedHandle) -> io::Result<()> {
             return Err(e);
         }
     }
-    legacy_delete(handle)
+    legacy_delete(handle, strict, before_reopen)
 }
 
 fn set_legacy_disposition(handle: &OwnedHandle) -> io::Result<()> {
@@ -970,21 +1072,27 @@ fn set_basic_attributes(handle: &OwnedHandle, attributes: u32) -> io::Result<()>
 }
 
 /// The classic delete: the name goes when the last handle closes. A read-only entry is made
-/// writable first, through a second handle of the SAME object (never by path); if the delete still
-/// fails, its read-only attribute is put back.
-fn legacy_delete(handle: &OwnedHandle) -> io::Result<()> {
+/// writable first, through a second handle opened from the first one. On a local volume that is the
+/// same object; on a network location the server resolves the path again, so the second handle
+/// must prove it is the same object (file id) before any attribute is changed; otherwise the
+/// original error is returned and nothing is touched. If the delete still fails, the read-only
+/// attribute is put back.
+fn legacy_delete(handle: &OwnedHandle, strict: bool, before_reopen: &dyn Fn()) -> io::Result<()> {
     match set_legacy_disposition(handle) {
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             let tag = attribute_tag(handle)?;
             if tag.FileAttributes & FILE_ATTRIBUTE_READONLY == 0 {
                 return Err(e);
             }
-            let writer = reopen(
+            before_reopen();
+            let writer = match reopen(
                 handle,
                 FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
                 SHARE_ALL,
-            )
-            .map_err(|_| e)?;
+            ) {
+                Ok(w) if same_object(handle, &w, strict) => w,
+                _ => return Err(e),
+            };
             let mut basic = FILE_BASIC_INFO::default();
             // SAFETY: `basic` is a writable FILE_BASIC_INFO and the size passed is its size.
             let ok = unsafe {
@@ -1714,7 +1822,8 @@ mod tests {
         });
         assert!(converted.get());
         assert_victim_intact(&v);
-        eprintln!("smb scenario A walk result: {r:?}");
+        r.unwrap();
+        assert!(!top.exists());
     }
 
     #[test]
@@ -1753,6 +1862,173 @@ mod tests {
             !fx.root.join("d-moved").exists(),
             "the held folder could be renamed away"
         );
+        r.unwrap();
+        assert!(!top.exists());
+    }
+
+    #[test]
+    fn ids_are_required_off_the_known_local_file_systems() {
+        for fs_name in ["NTFS", "ReFS", "FAT", "FAT32", "exFAT", "ntfs"] {
+            assert!(!ids_required(false, Some(fs_name)), "{fs_name}");
+            assert!(ids_required(true, Some(fs_name)), "remote {fs_name}");
+        }
+        for fs_name in ["FUSE-rclone", "Dokan", "CDFS", "UDF", ""] {
+            assert!(ids_required(false, Some(fs_name)), "{fs_name}");
+        }
+        assert!(ids_required(false, None), "unknown file system");
+    }
+
+    #[test]
+    fn the_test_volume_is_a_known_local_file_system() {
+        let fx = fixture();
+        let h = open_root(&fx.root).unwrap();
+        let name = file_system_name(&h);
+        assert!(!is_remote(&h).unwrap());
+        assert!(
+            !ids_required(false, name.as_deref()),
+            "temp folder on {name:?}"
+        );
+    }
+
+    #[test]
+    fn a_top_folder_that_changes_between_probe_and_open_is_refused() {
+        let fx = fixture();
+        let top = fx.root.join("t");
+        fs::create_dir_all(&top).unwrap();
+        fs::write(top.join("f"), b"x").unwrap();
+        FORCE_REOPEN_MISMATCH.with(|f| f.set(true));
+        let (r, entries, _) = run(&top);
+        FORCE_REOPEN_MISMATCH.with(|f| f.set(false));
+        match r {
+            Err(WalkError::Io { error, .. }) => {
+                assert!(error.to_string().contains("changed"), "{error}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(entries, 0);
+        assert!(top.join("f").exists());
+    }
+
+    #[test]
+    fn the_classic_delete_never_clears_read_only_on_an_object_it_cannot_prove_is_the_entry() {
+        // Review R2-S1, local form: ids required (network-style), classic delete, and the second
+        // handle reported as another object. The original error comes back; no attribute changes.
+        let fx = fixture();
+        let top = fx.root.join("t");
+        fs::create_dir_all(&top).unwrap();
+        let f = top.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        set_readonly(&f);
+        let reopened = Cell::new(false);
+        FORCE_REMOTE.with(|x| x.set(true));
+        FORCE_LEGACY_DELETE.with(|x| x.set(true));
+        let r = remove_tree_with(&top, &never, &mut |_| {}, &|s| {
+            if let Seam::BeforeReopen(p) = s
+                && p == f
+            {
+                reopened.set(true);
+                FORCE_REOPEN_MISMATCH.with(|x| x.set(true));
+            }
+        });
+        FORCE_REOPEN_MISMATCH.with(|x| x.set(false));
+        FORCE_LEGACY_DELETE.with(|x| x.set(false));
+        FORCE_REMOTE.with(|x| x.set(false));
+        assert!(reopened.get());
+        match r {
+            Err(WalkError::Io { path, error }) => {
+                assert_eq!(path, f);
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            }
+            other => panic!("expected the original access error, got {other:?}"),
+        }
+        assert!(f.exists());
+        assert!(fs::metadata(&f).unwrap().permissions().readonly());
+    }
+
+    /// Review R2-S1 through SMB: the classic delete's second open is sent to the server as a path.
+    /// The read-only entry is moved away and its folder turned into a junction to a victim folder
+    /// holding a read-only file of the same name; the victim's attribute must not change.
+    #[test]
+    fn over_smb_the_classic_delete_never_touches_the_attributes_of_an_object_outside_the_tree() {
+        let fx = fixture();
+        let Some(unc_root) = admin_share_path(&fx.root) else {
+            skip(
+                "over_smb_the_classic_delete_never_touches_the_attributes",
+                r"the admin share \\localhost\<drive>$ is not reachable here",
+            );
+            return;
+        };
+        let v = fx.root.join("victim");
+        fs::create_dir_all(&v).unwrap();
+        fs::write(v.join("f.txt"), b"precious").unwrap();
+        set_readonly(&v.join("f.txt"));
+        let top = fx.root.join("tree");
+        let d = top.join("d");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("f.txt"), b"decoy").unwrap();
+        set_readonly(&d.join("f.txt"));
+        let unc_f = unc_root.join("tree").join("d").join("f.txt");
+        let swapped = Cell::new(false);
+        FORCE_LEGACY_DELETE.with(|x| x.set(true));
+        let r = remove_tree_with(&unc_root.join("tree"), &never, &mut |_| {}, &|s| {
+            if let Seam::BeforeReopen(p) = s
+                && p == unc_f
+                && !swapped.replace(true)
+            {
+                let moved = fx.root.join("f-moved.txt");
+                fs::rename(d.join("f.txt"), &moved).unwrap();
+                // The attacker's own file: made writable, so that its delete would succeed and
+                // nothing would put the victim's attribute back.
+                let mut perms = fs::metadata(&moved).unwrap().permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                fs::set_permissions(&moved, perms).unwrap();
+                convert_in_place_to_junction(&d, &v);
+            }
+        });
+        FORCE_LEGACY_DELETE.with(|x| x.set(false));
+        assert!(swapped.get(), "the classic delete path was not taken");
+        assert!(r.is_err(), "the unproven entry is not deleted: {r:?}");
+        assert_eq!(fs::read(v.join("f.txt")).unwrap(), b"precious");
+        assert!(
+            fs::metadata(v.join("f.txt"))
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "the victim's read-only attribute is untouched"
+        );
+        // Clean-up for the temp dir: the moved decoy and the junction.
+        let _ = fs::remove_dir(&d);
+    }
+
+    #[test]
+    fn over_smb_a_folder_swapped_for_a_junction_before_it_is_opened_is_removed_as_a_link() {
+        let fx = fixture();
+        let Some(unc_root) = admin_share_path(&fx.root) else {
+            skip(
+                "over_smb_a_folder_swapped_for_a_junction_before_it_is_opened",
+                r"the admin share \\localhost\<drive>$ is not reachable here",
+            );
+            return;
+        };
+        let (v, _) = victim(&fx.root);
+        let top = fx.root.join("tree");
+        let sub = top.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("secret.txt"), b"decoy").unwrap();
+        let unc_sub = unc_root.join("tree").join("sub");
+        let swapped = Cell::new(false);
+        let r = remove_tree_with(&unc_root.join("tree"), &never, &mut |_| {}, &|s| {
+            if let Seam::BeforeOpen(p) = s
+                && p == unc_sub
+                && !swapped.replace(true)
+            {
+                fs::rename(&sub, top.join("moved")).unwrap();
+                make_junction(&sub, &v);
+            }
+        });
+        assert!(swapped.get());
+        assert_victim_intact(&v);
         r.unwrap();
         assert!(!top.exists());
     }
