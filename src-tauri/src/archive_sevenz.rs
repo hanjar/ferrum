@@ -58,7 +58,7 @@ impl SevenZProvider {
         Ok(())
     }
 
-    fn open_reader(
+    pub(crate) fn open_reader(
         path: &Path,
         password: Option<&str>,
     ) -> Result<ArchiveReader<File>, ArchiveError> {
@@ -81,6 +81,14 @@ impl SevenZProvider {
     ) -> Result<ArchiveReader<File>, ArchiveError> {
         use std::io::{Seek, SeekFrom};
         Self::sniff_file(&mut file)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| ArchiveError::new(ArchiveErrorCode::Io, e.to_string()))?;
+        // FER-587: an encoded header is decoded inside `ArchiveReader::new`; bound its
+        // allocations (and its codec memory) from the raw bytes first.
+        crate::archive_contract::sevenz_header::precheck_encoded_header(
+            &mut file,
+            crate::archive_contract::sevenz_header::HEADER_CODEC_MAX_MEMORY,
+        )?;
         file.seek(SeekFrom::Start(0))
             .map_err(|e| ArchiveError::new(ArchiveErrorCode::Io, e.to_string()))?;
         let mut reader = ArchiveReader::new(file, password_of(password)).map_err(sevenz_err)?;
@@ -181,44 +189,11 @@ impl ReadGuard {
     };
 }
 
+use crate::archive_contract::{
+    CODEC_DECODE_MAX_MEMORY, METHOD_AES, METHOD_LZMA, METHOD_LZMA2, METHOD_PPMD, aes_props_refused,
+    check_codec_memory, coder_properties, declared_codec_memory,
+};
 pub use crate::archive_contract::{CODEC_TOO_LARGE, SOLID_TOO_LARGE};
-use crate::archive_contract::{PPMD_DECODE_MAX_MEMORY, check_ppmd_memory, coder_properties};
-
-const METHOD_LZMA: [u8; 3] = [0x03, 0x01, 0x01];
-const METHOD_LZMA2: [u8; 1] = [0x21];
-const METHOD_PPMD: [u8; 3] = [0x03, 0x04, 0x01];
-
-/// Declared decoder memory for a coder, from its method id and properties.
-/// `None` for methods whose memory is not attacker-sized (copy, filters...).
-fn declared_codec_memory(method: &[u8], props: &[u8]) -> Option<Result<u64, ()>> {
-    if method == METHOD_LZMA {
-        // props: lc/lp/pb byte + u32 LE dictionary size.
-        return Some(if props.len() >= 5 {
-            Ok(u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
-        } else {
-            Err(())
-        });
-    }
-    if method == METHOD_LZMA2 {
-        return Some(match props.first() {
-            Some(&b) if b <= 40 => Ok(if b == 40 {
-                u32::MAX as u64
-            } else {
-                (2u64 | (b as u64 & 1)) << (b / 2 + 11)
-            }),
-            _ => Err(()),
-        });
-    }
-    if method == METHOD_PPMD {
-        // props: order byte + u32 LE memory size.
-        return Some(if props.len() >= 5 {
-            Ok(u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
-        } else {
-            Err(())
-        });
-    }
-    None
-}
 
 /// Refuse blocks whose codec would allocate more than `limit` bytes.
 fn check_block_codec_memory(
@@ -233,10 +208,21 @@ fn check_block_codec_memory(
     let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for coder in &block.coders {
         let method = coder.encoder_method_id();
-        if method != METHOD_LZMA && method != METHOD_LZMA2 && method != METHOD_PPMD {
+        if method != METHOD_LZMA
+            && method != METHOD_LZMA2
+            && method != METHOD_PPMD
+            && method != METHOD_AES
+        {
             continue;
         }
         let props = coder_properties(coder).ok_or_else(too_large)?;
+        if method == METHOD_AES {
+            // Key-derivation rounds are attacker-sized too (refused above 2^24, like 7-Zip).
+            if aes_props_refused(method, &props) {
+                return Err(too_large());
+            }
+            continue;
+        }
         items.push((method.to_vec(), props));
     }
     if sum_within_limit(&items, limit) {
@@ -654,6 +640,19 @@ fn extract_counted(
     decoded: &AtomicU64,
     poll: std::time::Duration,
 ) -> Result<(), ArchiveError> {
+    extract_counted_with_limit(request, progress, decoded, poll, CODEC_DECODE_MAX_MEMORY)
+}
+
+/// [`extract_counted`] with an explicit codec-memory limit (FER-587: tests use a tiny one
+/// instead of allocating a hostile 1 GiB model; production always passes
+/// [`CODEC_DECODE_MAX_MEMORY`]).
+fn extract_counted_with_limit(
+    request: &crate::archive_contract::ArchiveExtractRequest,
+    progress: &mut dyn FnMut(crate::archive_contract::ArchiveProgress) -> bool,
+    decoded: &AtomicU64,
+    poll: std::time::Duration,
+    codec_limit: u64,
+) -> Result<(), ArchiveError> {
     use crate::archive_contract::{ArchiveOperationKind, ArchiveProgress};
     use crate::archive_extract::{self, Entry, EntryKind};
 
@@ -662,7 +661,10 @@ fn extract_counted(
         Path::new(&request.archive_path),
         request.password.as_deref(),
     )?;
-    check_ppmd_memory(reader.archive(), PPMD_DECODE_MAX_MEMORY)?;
+    check_codec_memory(reader.archive(), codec_limit).map_err(|mut e| {
+        e.archive_path = Some(request.archive_path.clone());
+        e
+    })?;
 
     // Metadata pass: owned copies so the header borrow ends before the
     // decoder worker needs the reader.
@@ -1267,7 +1269,7 @@ mod solid_tests {
         let open = production
             .find("fn open_reader_file(")
             .expect("open_reader_file exists");
-        let body = &production[open..open + 1400];
+        let body = &production[open..open + 2200];
         assert!(
             body.contains("reader.set_thread_count(DECODE_THREADS)"),
             "open_reader_file must pin the decoder to one thread"
@@ -1853,7 +1855,7 @@ mod solid_tests {
         // that cleanup takes, because the flag is raised inside the cancel check itself.
         let src = include_str!("archive_sevenz.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
-        let body = &production[production.find("fn extract_counted(").unwrap()..];
+        let body = &production[production.find("fn extract_counted_with_limit(").unwrap()..];
         let body = &body[..body.find("\n}").unwrap()];
         let check = body
             .find("let cancel_seen = ||")
@@ -2143,56 +2145,309 @@ mod ultra_text_tests {
         }
     }
 
-    #[test]
-    fn extract_and_test_refuse_ppmd_blocks_declaring_over_1_gib() {
-        use sevenz_rust2::{ArchiveEntry as SzEntry, ArchiveWriter, EncoderConfiguration};
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("hostile.7z");
-        // 1 GiB + 4 KiB declared. (The encoder really allocates it once; the decoder must not.)
-        let mem: u32 = (1 << 30) + 4096;
-        let opts = sevenz_rust2::encoder_options::PpmdOptions::from_order_memory_size(6, mem);
+    /// Small archive whose single block uses `methods` (declared memory ~1 MiB) so a tiny limit
+    /// stands in for the 1 GiB production limit without allocating anything big.
+    fn small_archive_with(
+        dir: &Path,
+        name: &str,
+        methods: Vec<sevenz_rust2::EncoderConfiguration>,
+    ) -> PathBuf {
+        use sevenz_rust2::{ArchiveEntry as SzEntry, ArchiveWriter};
+        let p = dir.join(name);
         let mut w = ArchiveWriter::create(&p).unwrap();
-        w.set_content_methods(vec![EncoderConfiguration::from(opts)]);
-        let body: &[u8] = b"hello hello hello hello";
-        w.push_archive_entry(SzEntry::new_file("a.txt"), Some(body))
-            .unwrap();
+        w.set_content_methods(methods);
+        w.push_archive_entry(
+            SzEntry::new_file("a.txt"),
+            Some(&b"hello hello hello hello"[..]),
+        )
+        .unwrap();
         w.finish().unwrap();
+        p
+    }
 
-        let reader = SevenZProvider::open_reader(&p, None).unwrap();
-        let err = check_ppmd_memory(reader.archive(), PPMD_DECODE_MAX_MEMORY).unwrap_err();
-        assert_eq!(err.code, ArchiveErrorCode::LimitExceeded);
+    fn ppmd_1m() -> sevenz_rust2::EncoderConfiguration {
+        sevenz_rust2::EncoderConfiguration::from(
+            sevenz_rust2::encoder_options::PpmdOptions::from_order_memory_size(6, 1 << 20),
+        )
+    }
+
+    fn lzma2_1m() -> sevenz_rust2::EncoderConfiguration {
+        let mut o = sevenz_rust2::encoder_options::Lzma2Options::from_level(1);
+        o.set_dictionary_size(1 << 20);
+        sevenz_rust2::EncoderConfiguration::from(o)
+    }
+
+    fn lzma_default() -> sevenz_rust2::EncoderConfiguration {
+        // The crate's default LZMA dictionary (a few MiB).
+        sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::LZMA)
+    }
+
+    fn assert_codec_too_large(err: ArchiveError) {
+        assert_eq!(err.code, ArchiveErrorCode::LimitExceeded, "{err:?}");
         assert_eq!(err.message, CODEC_TOO_LARGE);
-        assert!(check_ppmd_memory(reader.archive(), mem as u64).is_ok());
-        drop(reader);
+    }
 
-        let err = crate::archive_create_test::test_7z(&p, None).unwrap_err();
-        assert_eq!(err.code, ArchiveErrorCode::LimitExceeded);
-        assert_eq!(err.message, CODEC_TOO_LARGE);
-
-        let dest = dir.path().join("out");
-        std::fs::create_dir(&dest).unwrap();
-        let request = crate::archive_contract::ArchiveExtractRequest {
-            archive_path: p.to_string_lossy().into_owned(),
+    fn all_members_request(
+        archive: &Path,
+        dest: &Path,
+    ) -> crate::archive_contract::ArchiveExtractRequest {
+        crate::archive_contract::ArchiveExtractRequest {
+            archive_path: archive.to_string_lossy().into_owned(),
             member_paths: vec![],
             destination_path: dest.to_string_lossy().into_owned(),
             conflict: ArchiveConflictPolicy::Overwrite,
             limits: crate::archive_contract::ArchiveLimits {
-                max_entries: 100,
+                max_entries: 10_000,
                 max_total_bytes: u64::MAX,
                 max_entry_bytes: u64::MAX,
-                max_depth: 8,
+                max_depth: 32,
             },
             password: None,
+        }
+    }
+
+    #[test]
+    fn extract_and_test_refuse_any_codec_block_over_the_limit() {
+        // FER-587 / N-R2-1: the hostile case is exercised with a 64 KiB limit against ~1 MiB
+        // declarations, so no test allocates anything large.
+        const LIMIT: u64 = 64 * 1024;
+        let cases: Vec<(&str, Vec<sevenz_rust2::EncoderConfiguration>)> = vec![
+            ("ppmd", vec![ppmd_1m()]),
+            ("lzma2", vec![lzma2_1m()]),
+            ("lzma", vec![lzma_default()]),
+        ];
+        for (tag, methods) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let p = small_archive_with(dir.path(), &format!("hostile-{tag}.7z"), methods);
+
+            let reader = SevenZProvider::open_reader(&p, None).unwrap();
+            let declared = {
+                let c = &reader.archive().blocks[0].coders[0];
+                declared_codec_memory(c.encoder_method_id(), &coder_properties(c).unwrap())
+                    .unwrap()
+                    .unwrap()
+            };
+            assert!(
+                declared > LIMIT && declared <= 64 << 20,
+                "{tag}: {declared}"
+            );
+            assert_codec_too_large(check_codec_memory(reader.archive(), LIMIT).unwrap_err());
+            assert!(
+                check_codec_memory(reader.archive(), declared).is_ok(),
+                "{tag}"
+            );
+            assert_codec_too_large(check_codec_memory(reader.archive(), declared - 1).unwrap_err());
+            drop(reader);
+
+            let err = crate::archive_create_test::test_7z_progress_with_limit(
+                &p,
+                None,
+                &mut |_| {},
+                LIMIT,
+            )
+            .unwrap_err();
+            assert_codec_too_large(err);
+
+            let dest = dir.path().join("out");
+            std::fs::create_dir(&dest).unwrap();
+            let request = all_members_request(&p, &dest);
+            let err = extract_counted_with_limit(
+                &request,
+                &mut |_| true,
+                &AtomicU64::new(0),
+                std::time::Duration::from_millis(50),
+                LIMIT,
+            )
+            .unwrap_err();
+            assert_codec_too_large(err);
+            assert!(!dest.join("a.txt").exists(), "{tag}");
+
+            // With a sufficient limit the same archive tests and extracts fine.
+            let report = crate::archive_create_test::test_7z_progress_with_limit(
+                &p,
+                None,
+                &mut |_| {},
+                declared,
+            )
+            .unwrap();
+            assert_eq!(report.entries.len(), 1, "{tag}");
+            extract_counted_with_limit(
+                &request,
+                &mut |_| true,
+                &AtomicU64::new(0),
+                std::time::Duration::from_millis(50),
+                declared,
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dest.join("a.txt")).unwrap(),
+                b"hello hello hello hello"
+            );
+        }
+    }
+
+    #[test]
+    fn aes_cycles_power_is_capped_for_content_coders() {
+        assert!(!aes_props_refused(&METHOD_AES, &[24, 0]));
+        assert!(!aes_props_refused(&METHOD_AES, &[0xC0 | 19, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[25, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[0x3F, 0]));
+        assert!(aes_props_refused(&METHOD_AES, &[]));
+        assert!(!aes_props_refused(&METHOD_LZMA2, &[]));
+        // A real encrypted archive (sevenz-rust2 default power) passes every gate.
+        let dir = tempfile::tempdir().unwrap();
+        let p = small_archive_with(
+            dir.path(),
+            "aes.7z",
+            vec![
+                sevenz_rust2::EncoderConfiguration::from(
+                    sevenz_rust2::encoder_options::AesEncoderOptions::new("pw".into()),
+                ),
+                sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::LZMA2),
+            ],
+        );
+        let reader = SevenZProvider::open_reader(&p, Some("pw")).unwrap();
+        assert!(
+            reader.archive().blocks[0]
+                .coders
+                .iter()
+                .any(|c| c.encoder_method_id() == METHOD_AES)
+        );
+        check_codec_memory(reader.archive(), CODEC_DECODE_MAX_MEMORY).unwrap();
+        check_block_codec_memory(reader.archive(), 0, 256 << 20).unwrap();
+    }
+
+    #[test]
+    fn codec_limit_counts_every_coder_of_a_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = small_archive_with(dir.path(), "chain.7z", vec![lzma2_1m(), lzma2_1m()]);
+        let reader = SevenZProvider::open_reader(&p, None).unwrap();
+        assert_eq!(reader.archive().blocks[0].coders.len(), 2);
+        assert!(check_codec_memory(reader.archive(), 2 << 20).is_ok());
+        assert_codec_too_large(check_codec_memory(reader.archive(), (2 << 20) - 1).unwrap_err());
+    }
+
+    #[test]
+    fn production_wiring_uses_the_1_gib_codec_limit() {
+        assert_eq!(CODEC_DECODE_MAX_MEMORY, 1 << 30);
+        let src = include_str!("archive_sevenz.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let wrapper = &production[production.find("fn extract_counted(").unwrap()..];
+        assert!(
+            wrapper[..wrapper.find("fn extract_counted_with_limit").unwrap()]
+                .contains("CODEC_DECODE_MAX_MEMORY")
+        );
+        let limited = &production[production.find("fn extract_counted_with_limit(").unwrap()..];
+        assert!(limited[..1500].contains("check_codec_memory(reader.archive(), codec_limit)"));
+        // test: thin wrapper in archive_create_test passes the same constant
+        let ct = include_str!("archive_create_test.rs");
+        let ct_prod = &ct[..ct.find("#[cfg(test)]").unwrap_or(ct.len())];
+        let wrapper = &ct_prod[ct_prod.find("pub fn test_7z_progress(").unwrap()..];
+        assert!(wrapper[..400].contains("CODEC_DECODE_MAX_MEMORY"));
+        assert!(ct_prod.contains("check_codec_memory(reader.archive(), codec_limit)"));
+        // preview / read / compare / open go through `read_from` -> `stream_member` with the
+        // 256 MiB preview guard, which checks every block before the decoder walks it.
+        let read_from = &production[production.find("fn read_from(").unwrap()..];
+        assert!(read_from[..1800].contains("Some(&ReadGuard::PREVIEW)"));
+        assert!(production.contains("check_block_codec_memory(archive, bi, g.max_codec_memory)"));
+    }
+
+    /// A real sevenz-rust2 archive with an encoded header whose LZMA dictionary property is
+    /// patched to 0xFFFFFFFF (CRCs are left stale on purpose: the pre-check runs first).
+    fn archive_with_hostile_encoded_header(dir: &Path) -> PathBuf {
+        use sevenz_rust2::{ArchiveEntry as SzEntry, ArchiveWriter};
+        let p = dir.join("hostile-header.7z");
+        let mut w = ArchiveWriter::create(&p).unwrap();
+        for i in 0..300 {
+            w.push_archive_entry(
+                SzEntry::new_file(&format!("folder/some-long-file-name-{i:04}.txt")),
+                Some(&b"x"[..]),
+            )
+            .unwrap();
+        }
+        w.finish().unwrap();
+        let mut bytes = std::fs::read(&p).unwrap();
+        let off = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
+        assert_eq!(bytes[32 + off], 0x17, "test needs an encoded header");
+        // coder byte (id size 3 + has props), LZMA id, props size 5, then lc/lp/pb + dict
+        let pat = [0x23u8, 0x03, 0x01, 0x01, 0x05];
+        let at = bytes[32 + off..]
+            .windows(pat.len())
+            .position(|w| w == pat)
+            .expect("LZMA coder in the encoded header")
+            + 32
+            + off;
+        bytes[at + 6..at + 10].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_hostile_encoded_header_is_refused_on_every_open_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = archive_with_hostile_encoded_header(dir.path());
+        let err = match SevenZProvider::open_reader(&p, None) {
+            Err(e) => e,
+            Ok(_) => panic!("must be refused before the decoder runs"),
         };
-        let err = extract_counted(
-            &request,
-            &mut |_| true,
-            &AtomicU64::new(0),
-            std::time::Duration::from_millis(50),
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ArchiveErrorCode::LimitExceeded);
-        assert_eq!(err.message, CODEC_TOO_LARGE);
-        assert!(!dest.join("a.txt").exists());
+        assert_eq!(err.archive_path.as_deref(), p.to_str());
+        assert_codec_too_large(err);
+
+        let provider = SevenZProvider::new();
+        let archive_path = p.to_string_lossy().into_owned();
+        let list = ArchiveListRequest {
+            location: Location::Archive {
+                archive_path: archive_path.clone(),
+                member_path: MemberPath::parse("").unwrap(),
+            },
+            request_token: 1,
+            password: None,
+        };
+        assert_codec_too_large(provider.list(&list).unwrap_err());
+        let read = ArchiveReadRequest {
+            location: Location::Archive {
+                archive_path,
+                member_path: MemberPath::parse("folder/some-long-file-name-0000.txt").unwrap(),
+            },
+            max_bytes: 10,
+            password: None,
+        };
+        assert_codec_too_large(provider.read(&read, &mut |_| Ok(())).unwrap_err());
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let request = all_members_request(&p, &dest);
+        assert_codec_too_large(
+            extract_counted(
+                &request,
+                &mut |_| true,
+                &AtomicU64::new(0),
+                std::time::Duration::from_millis(50),
+            )
+            .unwrap_err(),
+        );
+        assert_codec_too_large(crate::archive_create_test::test_7z(&p, None).unwrap_err());
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn every_open_of_an_untrusted_7z_runs_the_header_precheck_first() {
+        let src = include_str!("archive_sevenz.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let pre = production.find("precheck_encoded_header(").unwrap();
+        let new = production.find("ArchiveReader::new(").unwrap();
+        assert!(pre < new, "pre-check must precede the decoder open");
+        assert_eq!(production.matches("ArchiveReader::new(").count(), 1);
+        let ct = include_str!("archive_create_test.rs");
+        let ct_prod = &ct[..ct.find("#[cfg(test)]").unwrap_or(ct.len())];
+        assert_eq!(ct_prod.matches("ArchiveReader::open(").count(), 0);
+        assert_eq!(ct_prod.matches("ArchiveReader::new(").count(), 1);
+        assert!(
+            ct_prod.find("precheck_encoded_header(").unwrap()
+                < ct_prod.find("ArchiveReader::new(").unwrap()
+        );
+        assert_eq!(
+            crate::archive_contract::sevenz_header::HEADER_CODEC_MAX_MEMORY,
+            64 * 1024 * 1024
+        );
     }
 }

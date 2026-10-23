@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// Fixed, path-free messages for the read-only budgets (solid-block skip work
 /// and codec memory). The preview maps these to safe UI text.
 pub const SOLID_TOO_LARGE: &str = "solid block too large to preview";
-pub const CODEC_TOO_LARGE: &str = "codec memory too large to preview";
+pub const CODEC_TOO_LARGE: &str = "codec needs too much memory to open";
 
 /// Budget for decompressed bytes skipped to reach a member of a solid block.
 pub const MAX_SOLID_SKIP_BYTES: u64 = 256 * 1024 * 1024;
@@ -782,12 +782,64 @@ pub fn dedup_level(
     Ok(merged)
 }
 
-/// 7z method id of PPMd (7z PPMd7 / var.H).
-pub const PPMD_METHOD_ID: [u8; 3] = [0x03, 0x04, 0x01];
+#[path = "archive_sevenz_header.rs"]
+pub mod sevenz_header;
 
-/// Declared model memory of a PPMd coder: props are the order byte + u32 LE memory size.
-fn ppmd_declared_memory(props: &[u8]) -> Option<u64> {
-    (props.len() >= 5).then(|| u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
+/// 7z method ids whose decoder allocates attacker-sized memory.
+pub const METHOD_LZMA: [u8; 3] = [0x03, 0x01, 0x01];
+pub const METHOD_LZMA2: [u8; 1] = [0x21];
+/// 7z PPMd7 (var.H).
+pub const METHOD_PPMD: [u8; 3] = [0x03, 0x04, 0x01];
+
+/// 7z AES-256 + SHA-256 coder id.
+pub const METHOD_AES: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
+
+/// Most key-derivation rounds exponent 7-Zip itself accepts (`kNumCyclesPower_Supported_MAX`).
+/// The decoder crate runs `2^power` SHA-256 rounds (uncancellable) as soon as a password is
+/// supplied, and panics for 0x3F, so anything above is refused before it can run.
+pub const AES_MAX_CYCLES_POWER: u8 = 24;
+
+/// True when `method` is the AES coder and its props are unusable or ask for more key-derivation
+/// rounds than [`AES_MAX_CYCLES_POWER`] (missing props fail closed).
+pub fn aes_props_refused(method: &[u8], props: &[u8]) -> bool {
+    method == METHOD_AES
+        && props
+            .first()
+            .is_none_or(|b| (b & 0x3F) > AES_MAX_CYCLES_POWER)
+}
+
+/// Declared decoder memory for a coder, from its method id and properties.
+/// `None` for methods whose memory is not attacker-sized (copy, filters...).
+/// `Some(Err(()))`: the method is memory-sized but its props do not parse
+/// (callers fail closed).
+pub fn declared_codec_memory(method: &[u8], props: &[u8]) -> Option<Result<u64, ()>> {
+    if method == METHOD_LZMA {
+        // props: lc/lp/pb byte + u32 LE dictionary size.
+        return Some(if props.len() >= 5 {
+            Ok(u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
+        } else {
+            Err(())
+        });
+    }
+    if method == METHOD_LZMA2 {
+        return Some(match props.first() {
+            Some(&b) if b <= 40 => Ok(if b == 40 {
+                u32::MAX as u64
+            } else {
+                (2u64 | (b as u64 & 1)) << (b / 2 + 11)
+            }),
+            _ => Err(()),
+        });
+    }
+    if method == METHOD_PPMD {
+        // props: order byte + u32 LE memory size.
+        return Some(if props.len() >= 5 {
+            Ok(u32::from_le_bytes([props[1], props[2], props[3], props[4]]) as u64)
+        } else {
+            Err(())
+        });
+    }
+    None
 }
 
 /// The decoder crate keeps coder properties private, but they are part of
@@ -807,25 +859,42 @@ pub fn coder_properties(coder: &sevenz_rust2::Coder) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// FER-579: extract and test decode without the per-block memory gate (`archive_sevenz::check_block_codec_memory`), and PPMd allocates (and
-/// zero-fills) its whole declared model when the decoder is built. Refuse any PPMd block that
-/// declares more than this (7-Zip `-mx=9` writes 192 MiB). LZMA/LZMA2 are deliberately not
-/// covered here, so older behaviour is unchanged.
-/// Known limitation: an encoded header is decoded inside `ArchiveReader::new`, before this runs.
-pub const PPMD_DECODE_MAX_MEMORY: u64 = 1024 * 1024 * 1024;
+/// FER-579/FER-587: extract and test decode without the per-block preview gate
+/// (`archive_sevenz::check_block_codec_memory`, 256 MiB). LZMA, LZMA2 and PPMd allocate their
+/// whole declared dictionary / model when the decoder is built (PPMd also zero-fills it), so
+/// every block whose coders together declare more than this is refused with
+/// [`CODEC_TOO_LARGE`] before any decoding. 7-Zip `-mx=9` writes 64 MiB (LZMA2) or 192 MiB
+/// (PPMd), so real archives stay far below it.
+pub const CODEC_DECODE_MAX_MEMORY: u64 = 1024 * 1024 * 1024;
 
-/// Refuse archives with a PPMd block whose declared model memory exceeds `limit`.
-pub fn check_ppmd_memory(archive: &sevenz_rust2::Archive, limit: u64) -> Result<(), ArchiveError> {
+/// Refuse archives with a block whose memory-sized coders (LZMA, LZMA2, PPMd; a BCJ2 or other
+/// multi-coder chain counts every coder, they are alive at once) declare more than `limit`
+/// bytes in total. Unparsable props fail CLOSED. The encoded header itself is gated earlier by
+/// `archive_sevenz_header::precheck_encoded_header`, since the decoder crate decodes it while
+/// opening.
+pub fn check_codec_memory(archive: &sevenz_rust2::Archive, limit: u64) -> Result<(), ArchiveError> {
     let too_large = || ArchiveError::new(ArchiveErrorCode::LimitExceeded, CODEC_TOO_LARGE);
     for block in &archive.blocks {
+        let mut total: u64 = 0;
         for coder in &block.coders {
-            if coder.encoder_method_id() != PPMD_METHOD_ID {
+            let method = coder.encoder_method_id();
+            if method == METHOD_AES {
+                let props = coder_properties(coder).ok_or_else(too_large)?;
+                if aes_props_refused(method, &props) {
+                    return Err(too_large());
+                }
+                continue;
+            }
+            if method != METHOD_LZMA && method != METHOD_LZMA2 && method != METHOD_PPMD {
                 continue;
             }
             let props = coder_properties(coder).ok_or_else(too_large)?;
-            match ppmd_declared_memory(&props) {
-                Some(mem) if mem <= limit => {}
+            match declared_codec_memory(method, &props) {
+                Some(Ok(mem)) => total = total.saturating_add(mem),
                 _ => return Err(too_large()),
+            }
+            if total > limit {
+                return Err(too_large());
             }
         }
     }
