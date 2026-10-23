@@ -1253,23 +1253,49 @@ pub fn test_7z_progress(
     password: Option<&str>,
     progress: &mut dyn FnMut(ArchiveProgress),
 ) -> Result<ArchiveTestReport, ArchiveError> {
-    crate::archive_contract::check_cancelled()?;
-    let mut reader = ArchiveReader::open(archive_path, password_of(password)).map_err(|e| {
-        let mut err = sevenz_err(e);
-        err.archive_path = Some(archive_path.to_string_lossy().into_owned());
-        err
-    })?;
-    // FER-104 N1: single-threaded decode (see archive_sevenz::open_reader).
-    reader.set_thread_count(1);
-    // FER-579: PPMd allocates its declared model up front; refuse absurd sizes before decoding.
-    crate::archive_contract::check_ppmd_memory(
-        reader.archive(),
-        crate::archive_contract::PPMD_DECODE_MAX_MEMORY,
+    test_7z_progress_with_limit(
+        archive_path,
+        password,
+        progress,
+        crate::archive_contract::CODEC_DECODE_MAX_MEMORY,
     )
-    .map_err(|mut e| {
+}
+
+/// [`test_7z_progress`] with an explicit codec-memory limit (FER-587, tests only vary it).
+pub(crate) fn test_7z_progress_with_limit(
+    archive_path: &Path,
+    password: Option<&str>,
+    progress: &mut dyn FnMut(ArchiveProgress),
+    codec_limit: u64,
+) -> Result<ArchiveTestReport, ArchiveError> {
+    crate::archive_contract::check_cancelled()?;
+    // FER-587: bound the encoded-header decode before the decoder crate runs (same pre-check
+    // as `archive_sevenz::open_reader_file`).
+    let with_path = |mut e: ArchiveError| {
         e.archive_path = Some(archive_path.to_string_lossy().into_owned());
         e
-    })?;
+    };
+    let mut file = std::fs::File::open(archive_path)
+        .map_err(|e| with_path(ArchiveError::new(ArchiveErrorCode::Io, e.to_string())))?;
+    crate::archive_contract::sevenz_header::precheck_encoded_header(
+        &mut file,
+        crate::archive_contract::sevenz_header::HEADER_CODEC_MAX_MEMORY,
+    )
+    .map_err(with_path)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))
+        .map_err(|e| with_path(ArchiveError::new(ArchiveErrorCode::Io, e.to_string())))?;
+    let mut reader =
+        ArchiveReader::new(file, password_of(password)).map_err(|e| with_path(sevenz_err(e)))?;
+    // FER-104 N1: single-threaded decode (see archive_sevenz::open_reader).
+    reader.set_thread_count(1);
+    // LZMA/LZMA2/PPMd allocate their declared dictionary/model up front: refuse absurd sizes
+    // before decoding.
+    crate::archive_contract::check_codec_memory(reader.archive(), codec_limit).map_err(
+        |mut e| {
+            e.archive_path = Some(archive_path.to_string_lossy().into_owned());
+            e
+        },
+    )?;
 
     // A decode failure inside AES content while a password WAS supplied cannot be told apart from
     // a wrong password (the decoder only sees garbage), so it is reported as `BadPassword`; the
