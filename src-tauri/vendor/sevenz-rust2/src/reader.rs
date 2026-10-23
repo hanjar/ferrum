@@ -499,6 +499,7 @@ impl Archive {
         Ok(archive)
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_encoded_header<'r, R: HeaderSource, RI: 'r + Read + Seek>(
         header: &mut R,
         reader: &'r mut RI,
@@ -562,6 +563,7 @@ impl Archive {
         Ok((decoder, unpack_size))
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_streams_info<R: HeaderSource>(
         header: &mut R,
         archive: &mut Archive,
@@ -589,6 +591,7 @@ impl Archive {
         Ok(())
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_files_info<R: HeaderSource + Seek>(
         header: &mut R,
         archive: &mut Archive,
@@ -886,6 +889,7 @@ impl Archive {
         Ok(())
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_pack_info<R: HeaderSource>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
         archive.pack_pos = read_variable_u64(header)?;
         // FERRUM PATCH (FER-588): bounded before sizing `pack_sizes` / `pack_crcs` (each pack
@@ -929,6 +933,7 @@ impl Archive {
 
         Ok(())
     }
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_unpack_info<R: HeaderSource>(
         header: &mut R,
         archive: &mut Archive,
@@ -994,6 +999,7 @@ impl Archive {
         Ok(())
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_sub_streams_info<R: HeaderSource>(
         header: &mut R,
         archive: &mut Archive,
@@ -1112,6 +1118,7 @@ impl Archive {
         Ok(())
     }
 
+    // FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
     fn read_block<R: HeaderSource>(header: &mut R) -> Result<Block, Error> {
         let mut block = Block::default();
 
@@ -1349,6 +1356,7 @@ fn read_all_or_bits<R: HeaderSource>(header: &mut R, size: usize) -> io::Result<
     }
 }
 
+// FERRUM PATCH (FER-588): `R: HeaderSource` (was `R: Read`).
 fn read_bits<R: HeaderSource>(header: &mut R, size: usize) -> io::Result<BitSet> {
     // FERRUM PATCH (FER-588): the bit vector must still be in the header; checked before
     // `BitSet::with_capacity` allocates for it.
@@ -1688,7 +1696,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 password,
                 i,
                 thread_count,
-                0,
+                0, // FERRUM PATCH (FER-588): depth
             )?);
         }
         let mut decoder: Box<dyn Read> = Box::new(Bcj2Reader::new(inputs, block.get_unpack_size()));
@@ -1717,7 +1725,8 @@ impl<R: Read + Seek> ArchiveReader<R> {
     where
         R: 'r,
     {
-        // FERRUM PATCH (FER-588): a valid graph is at most `coders.len()` deep; a cycle used to
+        // FERRUM PATCH (FER-588): `depth` counts bind pairs followed (one per get_in_stream ->
+        // get_in_stream2 step); a valid chain follows at most `coders.len() - 1`. A cycle used to
         // recurse until the stack overflowed (`check_coder_graph` rejects cycles up front).
         if depth > block.coders.len() {
             return Err(Error::other("Header format error: bind pair cycle"));
@@ -1746,7 +1755,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             password,
             index,
             thread_count,
-            depth + 1,
+            depth + 1, // FERRUM PATCH (FER-588): one bind pair followed
         )
     }
 
@@ -1783,7 +1792,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 password,
                 start_index,
                 thread_count,
-                depth + 1,
+                depth, // FERRUM PATCH (FER-588): same coder, no bind pair followed
             )?;
 
             let decoder = add_decoder(

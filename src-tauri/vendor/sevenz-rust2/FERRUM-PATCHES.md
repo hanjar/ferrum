@@ -73,7 +73,8 @@ archive; a count the header bytes cannot describe is a format error.
   recursed in `get_in_stream` / `get_in_stream2` until the **stack overflowed** (process killed),
   and out-of-range bind pairs were index panics.
 - `build_decode_stack2`, `get_in_stream`, `get_in_stream2` (decoding, defence in depth): a `depth`
-  argument stops the bind pair recursion after `coders.len()` steps; coder, stream map and unpack
+  argument counts bind pairs followed (one per `get_in_stream` -> `get_in_stream2` step) and stops
+  the recursion beyond `coders.len()`; coder, stream map and unpack
   size lookups use `get`; the BCJ2 main coder must have 4 in and 1 out streams before
   `Bcj2Reader::new` (it indexed four inputs and panicked).
 - `pack_pos` additions (`read_encoded_header`, `build_decode_stack`, `build_decode_stack2`,

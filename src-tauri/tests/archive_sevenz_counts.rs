@@ -387,10 +387,17 @@ const BCJ2: [u8; 5] = [0x14, 0x03, 0x03, 0x01, 0x1B];
 /// pack streams of one byte each, `outs` unpack sizes, one sub-stream, files `names_list`.
 /// The FER-588 review's builder (decode reaches `build_decode_stack2` for BCJ2 blocks).
 fn one_block(npack: u64, block: &[u8], outs: &[u64], names_list: &[&str]) -> Vec<u8> {
-    let packed = vec![0x41u8; npack as usize];
+    let packs = vec![vec![0x41u8]; npack as usize];
+    one_block_packs(&packs, block, outs, names_list)
+}
+
+/// [`one_block`] with explicit pack stream contents (in `packed_streams` order).
+fn one_block_packs(packs: &[Vec<u8>], block: &[u8], outs: &[u64], names_list: &[&str]) -> Vec<u8> {
+    let npack = packs.len() as u64;
+    let packed = packs.concat();
     let mut sizes = Vec::new();
-    for _ in 0..npack {
-        sizes.extend(num(1));
+    for p in packs {
+        sizes.extend(num(p.len() as u64));
     }
     let mut unpack = Vec::new();
     for o in outs {
@@ -495,6 +502,28 @@ fn bcj2_bad_out_index() -> Vec<u8> {
 fn bcj2_two_inputs() -> Vec<u8> {
     let b = cat(&[&num(1), &BCJ2, &num(2), &num(1), &num(0), &num(1)]);
     one_block(2, &b, &[4], &["a"])
+}
+
+/// BCJ2 whose main input runs through a chain of `depth` Copy coders (in0 <- C1 <- ... <- Cn,
+/// Cn reads the packed main stream; call/jump empty, range coder 5 zero bytes). Valid, and
+/// decodes to `main` because it has no E8/E9/Jcc bytes. Review R2: the decode-time depth guard
+/// counted two steps per bind pair and refused such chains as a "bind pair cycle".
+fn bcj2_copy_chain(depth: u64, main: &[u8]) -> Vec<u8> {
+    let len = main.len() as u64;
+    let mut b = cat(&[&num(1 + depth), &BCJ2, &num(4), &num(1)]);
+    for _ in 0..depth {
+        b.extend([0x01, 0x00]); // Copy
+    }
+    // Bind pairs: BCJ2 in0 <- out1, then C_k's input (in 3 + k) <- out (k + 1).
+    b.extend(cat(&[&num(0), &num(1)]));
+    for k in 1..depth {
+        b.extend(cat(&[&num(3 + k), &num(k + 1)]));
+    }
+    // Packed: call, jump, range coder, then the last copy's input.
+    b.extend(cat(&[&num(1), &num(2), &num(3), &num(3 + depth)]));
+    let outs = vec![len; 1 + depth as usize];
+    let packs = [Vec::new(), Vec::new(), vec![0u8; 5], main.to_vec()];
+    one_block_packs(&packs, &b, &outs, &["a"])
 }
 
 /// `count` empty directories: a well-formed header whose file count is only limited by the cap.
@@ -834,6 +863,25 @@ fn bcj2_with_two_inputs_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn deep_valid_bcj2_chains_decode() {
+    // Review R2 B1: BCJ2 <- Copy <- Copy <- Copy (and deeper) is a valid graph that upstream
+    // decodes; the depth guard must count bind pairs, not recursion steps.
+    for depth in 1..=6u64 {
+        let tag = format!("bcj2-deep-{depth}");
+        let tmp = TempDir::new(&tag);
+        let path = tmp.path().join(format!("{tag}.7z"));
+        fs::write(&path, bcj2_copy_chain(depth, b"ABCD")).unwrap();
+        assert_eq!(list(&path).unwrap(), 1, "{tag}");
+        assert_eq!(read(&path, "a").unwrap(), b"ABCD", "{tag}");
+        assert_eq!(test(&path).unwrap(), 1, "{tag}");
+        let dest = tmp.path().join("out");
+        fs::create_dir_all(&dest).unwrap();
+        extract(&path, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"ABCD", "{tag}");
+    }
+}
+
+#[test]
 fn more_entries_than_the_cap_is_limit_exceeded_not_corrupt() {
     // Review R1 N1: a header that really describes 1,048,577 empty directories is well formed;
     // the crate's cap refuses it, and Ferrum reports it as too large, not as corrupt.
@@ -929,6 +977,7 @@ fn differential_fuzz_of_header_counts_never_panics_or_over_allocates() {
         encoded(&next_header_of(&sane_plain())),       // stored encoded header
         bcj2_plain(),                                  // reaches build_decode_stack2
         bcj2_chain(),                                  // BCJ2 with a bind pair
+        bcj2_copy_chain(3, b"ABCD"),                   // BCJ2 <- Copy <- Copy <- Copy
     ];
     for (i, seed) in seeds.iter().enumerate() {
         let open = sevenz_rust2::ArchiveReader::new(

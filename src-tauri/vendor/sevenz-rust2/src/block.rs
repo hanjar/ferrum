@@ -122,7 +122,7 @@ impl<'a> OrderedCoderIter<'a> {
         Self {
             block,
             current,
-            remaining: block.coders.len(),
+            remaining: block.coders.len(), // FERRUM PATCH (FER-588)
         }
     }
 }
