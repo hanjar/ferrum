@@ -202,8 +202,8 @@ describe('SettingsDialog build info (FER-548)', () => {
     const { host } = renderDialog();
     const label = host.container.querySelector('.buildLabelText') as HTMLElement;
     expect(label).not.toBeNull();
-    expect(label.textContent?.trim()).toBe('Ferrum · 0.2.2 · test000 · 14 Okt');
-    expect(label.getAttribute('title')).toContain('Ferrum 0.2.2');
+    expect(label.textContent?.trim()).toBe('Ferrum · 0.2.3 · test000 · 14 Okt');
+    expect(label.getAttribute('title')).toContain('Ferrum 0.2.3');
     expect(label.getAttribute('title')).toContain('Commit: test000');
   });
 
@@ -216,12 +216,12 @@ describe('SettingsDialog build info (FER-548)', () => {
 
     const { host } = renderDialog();
     const btn = host.getByRole('button', { name: /Salin info build/i });
-    expect(btn.getAttribute('title')).toContain('Ferrum 0.2.2');
+    expect(btn.getAttribute('title')).toContain('Ferrum 0.2.3');
     await fireEvent.click(btn);
 
     expect(writeText).toHaveBeenCalledTimes(1);
     const copiedText = writeText.mock.calls[0][0];
-    expect(copiedText).toContain('Ferrum 0.2.2');
+    expect(copiedText).toContain('Ferrum 0.2.3');
     expect(copiedText).toContain('Commit: test000');
     expect(copiedText).toContain('Status: clean');
     expect(copiedText).toContain('Built: 2026-10-14 00:00:00 UTC');
