@@ -42,7 +42,7 @@ function createButton(): HTMLButtonElement {
 describe('FER-590: Shift+F4 New file dialog', () => {
   it('renders the field with an empty name', async () => {
     render(Dialogs);
-    dialogs.open({ kind: 'newfile', parent: 'C:\t' });
+    dialogs.open({ kind: 'newfile', parent: 'C:\\t' });
     await tick();
     const modal = document.querySelector('[role="dialog"]');
     expect(modal?.textContent).toContain('New file');
@@ -54,22 +54,22 @@ describe('FER-590: Shift+F4 New file dialog', () => {
   });
 
   it('submit creates the file, then opens the created path', async () => {
-    mutMocks.createEntry.mockResolvedValue({ name: 'a.txt', path: 'C:\t\a.txt' });
+    mutMocks.createEntry.mockResolvedValue({ name: 'a.txt', path: 'C:\\t\\a.txt' });
     render(Dialogs);
-    dialogs.open({ kind: 'newfile', parent: 'C:\t' });
+    dialogs.open({ kind: 'newfile', parent: 'C:\\t' });
     await tick();
     typeName('a.txt');
     await tick();
     fireEvent.click(createButton());
     await vi.waitFor(() => expect(dialogs.current).toBeNull());
-    expect(mutMocks.createEntry).toHaveBeenCalledWith('file', 'C:\t', 'a.txt');
-    expect(activityMocks.shellOpen).toHaveBeenCalledWith('C:\t\a.txt', expect.any(Boolean));
+    expect(mutMocks.createEntry).toHaveBeenCalledWith('file', 'C:\\t', 'a.txt');
+    expect(activityMocks.shellOpen).toHaveBeenCalledWith('C:\\t\\a.txt', expect.any(Boolean));
   });
 
   it('an AlreadyExists error keeps the dialog open, shows it and opens nothing', async () => {
     mutMocks.createEntry.mockRejectedValue(new Error('AlreadyExists'));
     render(Dialogs);
-    dialogs.open({ kind: 'newfile', parent: 'C:\t' });
+    dialogs.open({ kind: 'newfile', parent: 'C:\\t' });
     await tick();
     typeName('taken.txt');
     await tick();
@@ -79,15 +79,15 @@ describe('FER-590: Shift+F4 New file dialog', () => {
         'AlreadyExists',
       );
     });
-    expect(dialogs.current).toMatchObject({ kind: 'newfile', parent: 'C:\t' });
+    expect(dialogs.current).toMatchObject({ kind: 'newfile', parent: 'C:\\t' });
     expect(activityMocks.shellOpen).not.toHaveBeenCalled();
   });
 
   it('a failed open does not reopen the dialog after the file was created', async () => {
-    mutMocks.createEntry.mockResolvedValue({ name: 'b.txt', path: 'C:\t\b.txt' });
+    mutMocks.createEntry.mockResolvedValue({ name: 'b.txt', path: 'C:\\t\\b.txt' });
     activityMocks.shellOpen.mockRejectedValueOnce(new Error('no app'));
     render(Dialogs);
-    dialogs.open({ kind: 'newfile', parent: 'C:\t' });
+    dialogs.open({ kind: 'newfile', parent: 'C:\\t' });
     await tick();
     typeName('b.txt');
     await tick();
