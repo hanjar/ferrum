@@ -50,6 +50,7 @@
   // observation only; the flows themselves are unchanged.
   import { noteScopeMutation, recordQueuedMove } from '../diskUsage/invalidation';
   import { activity } from '../stores/activityStore.svelte';
+  import { shellOpen } from '../ipc/activity';
 
   /** Access letters of the Pack format radios: Alt+Z / Alt+7 / Alt+R. */
   const PACK_FORMAT_MNEMONIC: Record<PackFormat, string> = {
@@ -402,6 +403,23 @@
     }
   }
 
+  /** Shift+F4: create an empty file, put the cursor on it, then open it with its default app. */
+  async function submitNewFile(parent: string) {
+    busy = true;
+    try {
+      const entry = await createEntry('file', parent, name);
+      dialogs.close();
+      const pane = activePane();
+      pane?.refresh();
+      // Path-based cursor: set after refresh() (which clears the selection); the re-list keeps it.
+      pane?.selectPaths?.([], entry.path);
+      // The file exists even when no app opens it: an open failure must not reopen the dialog.
+      void shellOpen(entry.path, activity.recordingActive).catch(() => undefined);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   async function submitRename(path: string) {
     busy = true;
     try {
@@ -630,6 +648,7 @@
     // "permanently" checkbox does nothing (Space toggles it).
     if (d?.kind === 'delete' && t !== modalEl) return;
     if (d?.kind === 'mkdir' && name.trim()) void submitMkdir(d.parent);
+    else if (d?.kind === 'newfile' && name.trim()) void submitNewFile(d.parent);
     else if (d?.kind === 'rename' && name.trim()) void submitRename(d.path);
     else if (d?.kind === 'delete') void submitDelete(d.paths);
     else if (d?.kind === 'selectGroup' && name.trim()) submitSelectGroup(d.unselect);
@@ -697,6 +716,19 @@
         spellcheck="false"
         disabled={busy}
       />
+    {:else if d.kind === 'newfile'}
+      <h2 id="dlg-title">New file</h2>
+      <p class="path mono">{d.parent}</p>
+      <label>
+        <Mnemonic label="&File name" />
+        <input
+          bind:this={inputEl}
+          bind:value={name}
+          placeholder="File name"
+          spellcheck="false"
+          disabled={busy}
+        />
+      </label>
     {:else if d.kind === 'rename'}
       <h2 id="dlg-title">Rename</h2>
       <p class="path mono">{d.original}</p>
@@ -1112,6 +1144,14 @@
           <button
             class="primary"
             onclick={() => void submitMkdir(d.parent)}
+            disabled={busy || !name.trim()}
+          >
+            <Mnemonic label="&Create" />
+          </button>
+        {:else if d.kind === 'newfile'}
+          <button
+            class="primary"
+            onclick={() => void submitNewFile(d.parent)}
             disabled={busy || !name.trim()}
           >
             <Mnemonic label="&Create" />

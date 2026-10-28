@@ -342,6 +342,7 @@
     add('file.delete.permanent');
     items.push({ separator: true });
     add('file.mkdir');
+    add('file.newfile');
     menuOpener = opener ?? (e.currentTarget instanceof HTMLElement ? e.currentTarget : undefined);
     // A keyboard-raised contextmenu event carries (0, 0): anchor it to the row instead.
     const me = e as MouseEvent;

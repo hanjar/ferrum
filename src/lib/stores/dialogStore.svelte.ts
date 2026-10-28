@@ -104,6 +104,8 @@ export function summarizeArchiveTest(
 
 export type Dialog =
   | { kind: 'mkdir'; parent: string }
+  /** Shift+F4 (Total Commander "New file"): creates an empty file, then opens it. */
+  | { kind: 'newfile'; parent: string }
   | { kind: 'rename'; path: string; original: string }
   /** FER-364: `permanent` is the dialog's initial checkbox state (D05) —
    *  carried through from beginDelete so Shift+F8 opens pre-checked while
@@ -626,6 +628,11 @@ class DialogStore {
   beginMkdir() {
     const pane = activePane();
     if (pane) this.open({ kind: 'mkdir', parent: pane.path });
+  }
+
+  beginNewFile() {
+    const pane = activePane();
+    if (pane) this.open({ kind: 'newfile', parent: pane.path });
   }
 
   beginRename() {
