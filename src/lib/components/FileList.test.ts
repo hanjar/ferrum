@@ -281,6 +281,7 @@ describe('row context menu', () => {
       'Delete (Recycle Bin)',
       'Delete permanently',
       'New folder',
+      'New file',
     ]);
     const menu = document.querySelector('[role="menu"]') as HTMLElement;
     for (const kbd of ['F5', 'F6', 'F2', 'F8', 'F7']) {

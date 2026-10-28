@@ -82,14 +82,27 @@ fn io_err(e: std::io::Error, path: &str) -> FsError {
 pub fn create_file(dir: &str, name: &str) -> Result<FileEntry, FsError> {
     validate_name(name)?;
     let target = join_name(dir, name);
-    if target.exists() {
-        return Err(
-            FsError::new(ErrorCode::AlreadyExists, "A file with this name exists")
-                .with_path(target.to_string_lossy()),
-        );
+    // create_new: an entry that appears after validation (or a dangling link with this name) is
+    // never followed or truncated; the name being taken is reported as AlreadyExists.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(_) => entry_of(&target),
+        // Windows reports an existing folder with this name as access denied.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AlreadyExists
+                || (e.kind() == std::io::ErrorKind::PermissionDenied
+                    && fs::symlink_metadata(&target).is_ok()) =>
+        {
+            Err(
+                FsError::new(ErrorCode::AlreadyExists, "A file with this name exists")
+                    .with_path(target.to_string_lossy()),
+            )
+        }
+        Err(e) => Err(io_err(e, &target.to_string_lossy())),
     }
-    fs::File::create(&target).map_err(|e| io_err(e, &target.to_string_lossy()))?;
-    entry_of(&target)
 }
 
 /// Create a directory; fails with AlreadyExists if the name is taken.

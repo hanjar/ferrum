@@ -229,6 +229,15 @@ describe('shared menu registry', () => {
     expect(searchActions('separate tree').some((a) => a.id === 'show.separateTree')).toBe(true);
   });
 
+  it('FER-590: New file is bound to Shift+F4 and opens the New-file dialog', () => {
+    const action = getAction('file.newfile')!;
+    expect(action.label).toBe('New file');
+    expect(action.group).toBe('File');
+    expect(action.shortcut).toEqual({ key: 'F4', shift: true });
+    expect(isEnabled(action)).toBe(true);
+    expect(searchActions('buat file').some((a) => a.id === 'file.newfile')).toBe(true);
+  });
+
   it('FER-364: permanent delete is enabled on Shift+F8 and opens a pre-checked confirm', () => {
     const action = getAction('file.delete.permanent')!;
     expect(action.disabledReason).toBeUndefined();
@@ -374,6 +383,9 @@ describe('shared menu registry', () => {
     dialogs.close();
     expect(runAction(getAction('file.mkdir')!)).toBe(true);
     expect(dialogs.current).toEqual({ kind: 'mkdir', parent: 'C:\\t' });
+    dialogs.close();
+    expect(runAction(getAction('file.newfile')!)).toBe(true);
+    expect(dialogs.current).toEqual({ kind: 'newfile', parent: 'C:\\t' });
     const wasHidden = ui.showHidden;
     expect(runAction(getAction('view.hidden')!)).toBe(true);
     expect(ui.showHidden).toBe(!wasHidden);

@@ -383,6 +383,14 @@ export const actions: Action[] = [
     run: () => dialogs.beginMkdir(),
   },
   {
+    id: 'file.newfile',
+    label: 'New file',
+    group: 'File',
+    shortcut: { key: 'F4', shift: true },
+    available: () => activePane() !== undefined,
+    run: () => dialogs.beginNewFile(),
+  },
+  {
     id: 'file.delete',
     label: 'Delete (Recycle Bin)',
     group: 'File',
@@ -1605,6 +1613,7 @@ const ACTION_KEYWORDS: Record<string, string[]> = {
   'file.delete.permanent': ['hapus permanen', 'delete'],
   'file.rename': ['ganti nama', 'rename'],
   'file.mkdir': ['folder baru', 'buat folder', 'new folder', 'mkdir'],
+  'file.newfile': ['file baru', 'buat file', 'new file', 'create file', 'touch'],
   'search.open': ['cari', 'search', 'find'],
   'nav.root': ['root', 'akar', 'drive'],
   'commands.search': ['cari', 'search', 'find'],
