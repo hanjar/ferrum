@@ -36,11 +36,11 @@ describe('searchActions (registry)', () => {
   const ids = (q: string) => searchActions(q, all).map((a) => a.id);
   it('"cpoy" -> Copy first', () => expect(ids('cpoy')[0]).toBe('file.copy'));
   it('"salin" -> Copy first', () => expect(ids('salin')[0]).toBe('file.copy'));
-  it('"nf" -> New folder first even with mid-word "nf" labels', () => {
+  it('"nf" -> New folder / New file first even with mid-word "nf" labels', () => {
     expect(
       actions.some((a) => labelOf(a) !== 'New folder' && labelOf(a).toLowerCase().includes('nf')),
     ).toBe(true);
-    expect(ids('nf')[0]).toBe('file.mkdir');
+    expect(ids('nf').slice(0, 2).sort()).toEqual(['file.mkdir', 'file.newfile']);
   });
   it('"cp" -> a C-P initialism command first', () => {
     const top = labelOf(searchActions('cp', all)[0]);
