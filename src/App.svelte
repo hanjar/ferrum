@@ -90,11 +90,16 @@
     return () => void guard.then((un) => un());
   });
 
+  // FER-591: OS drag-drop onto the window (files from other apps and Ferrum's own native drag).
+  onMount(() => {
+    const unlisten = setupExternalDrop();
+    return () => void unlisten.then((un) => un());
+  });
+
   onMount(async () => {
     void ops.start();
     void watcher.start();
     void driveStatus.refresh();
-    void setupExternalDrop(() => activePane()?.path ?? null);
     void hotlist.load(); // FER-458: hotlist from the backend (also migrates the old v1 list)
     void initProviderSetup(); // FER-430: AI provider setup from the backend (never blocks startup)
     await prefs.init(); // persisted prefs apply first…

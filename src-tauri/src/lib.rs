@@ -33,6 +33,7 @@ pub mod delete_walker;
 pub mod disk_usage;
 pub mod disk_usage_cache;
 pub mod domain;
+pub mod drag_out;
 pub mod fast_scan;
 pub mod file_identity;
 pub mod file_tools;
@@ -132,6 +133,8 @@ pub fn run() {
             ipc::clipboard_copy_files,
             ipc::clipboard_read_files,
             ipc::clipboard_finish_cut,
+            ipc::start_file_drag,
+            ipc::drag_shift_down,
             ipc::archive_list,
             ipc::archive_read,
             ipc::archive_extract,

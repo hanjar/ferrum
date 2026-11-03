@@ -50,6 +50,16 @@ folders for a cut, must exist). A paste then goes through `plan_copy` and `enque
 `enqueue_move` like F5/F6. After a pasted cut finishes, `clipboard_finish_cut` empties the clipboard
 if its sequence number is unchanged (Explorer does the same for a cut it performed itself).
 
+### Drag files out (FER-591)
+
+`start_file_drag(paths) -> "copy" | "none"` and `drag_shift_down() -> bool`. A row drag in the desktop app is a native
+shell drag (`SHCreateDataObject` + `SHDoDragDrop`, the data object Explorer builds), so browsers (upload boxes),
+Explorer and other apps receive real files, several at once. COPY only: the effect mask never allows move or link,
+so a drop target cannot remove Ferrum's files. Paths pass the same gates as the file clipboard and must share one
+parent folder (1 to 10,000 items). The drag runs on the main thread. Dropping on the other Ferrum pane still
+copies (Shift = move) via the webview drag-drop event, which targets the pane under the cursor; files dragged in
+from other apps are copied into the pane under the cursor.
+
 ## FileEntry
 
 ```ts

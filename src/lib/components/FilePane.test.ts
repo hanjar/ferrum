@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import FilePane from './FilePane.svelte';
 import Dialogs from './Dialogs.svelte';
 import { dialogs } from '../stores/dialogStore.svelte';
-import { endInternalDrag } from '../stores/dragPayload';
+import { dragOriginPane, endInternalDrag } from '../stores/dragPayload';
 import { FsError } from '../ipc/types';
 import { activity } from '../stores/activityStore.svelte';
 import { getPane } from '../stores/panesRegistry.svelte';
@@ -51,6 +51,18 @@ function dragEvent(type: string, dt: DataTransfer, shift = false): DragEvent {
   return e as unknown as DragEvent;
 }
 
+// FER-591: flipped only for the native-drag test (default = browser mode, HTML5 drag).
+let inTauri = false;
+vi.mock('../ipc/tauri', async (orig) => ({
+  ...(await orig<typeof import('../ipc/tauri')>()),
+  isInTauri: () => inTauri,
+}));
+const startFileDragMock = vi.fn();
+vi.mock('../ipc/dragOut', () => ({
+  startFileDrag: (...args: unknown[]) => startFileDragMock(...args),
+  dragShiftDown: vi.fn(async () => false),
+}));
+
 const shellOpenMock = vi.fn();
 vi.mock('../ipc/activity', async (orig) => ({
   ...(await orig<typeof import('../ipc/activity')>()),
@@ -95,6 +107,9 @@ beforeEach(() => {
   enqueueCopyMock.mockReset();
   shellOpenMock.mockReset();
   shellOpenMock.mockResolvedValue(true);
+  startFileDragMock.mockReset();
+  startFileDragMock.mockResolvedValue('none');
+  inTauri = false;
 });
 
 afterEach(() => {
@@ -162,6 +177,38 @@ describe('type-to-select', () => {
 
     expect(rowByName(left, 'README.md').getAttribute('aria-selected')).not.toBe('true');
     expect(rowByName(left, 'roadmap-2026.pdf').getAttribute('aria-selected')).not.toBe('true');
+  });
+});
+
+describe('native drag out (FER-591)', () => {
+  it('in the desktop app a row drag cancels the HTML5 drag and starts the native one with the selection', async () => {
+    await boot();
+    const a = rowByName(left, 'README.md');
+    const b = rowByName(left, 'meeting-notes.md');
+    fireEvent.click(a, { ctrlKey: true });
+    fireEvent.click(b, { ctrlKey: true });
+    await tick();
+
+    inTauri = true;
+    const dt = fakeDataTransfer();
+    const ev = dragEvent('dragstart', dt);
+    b.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(startFileDragMock).toHaveBeenCalledWith([
+      a.getAttribute('data-path'),
+      b.getAttribute('data-path'),
+    ]);
+    expect(dt.types).toEqual([]);
+    expect(dragOriginPane()).toBe(0);
+    await vi.waitFor(() => expect(dragOriginPane()).toBeNull());
+  });
+
+  it('an unselected row drags just itself', async () => {
+    await boot();
+    const a = rowByName(left, 'README.md');
+    inTauri = true;
+    a.dispatchEvent(dragEvent('dragstart', fakeDataTransfer()));
+    expect(startFileDragMock).toHaveBeenCalledWith([a.getAttribute('data-path')]);
   });
 });
 
