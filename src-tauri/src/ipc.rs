@@ -1088,6 +1088,46 @@ pub async fn clipboard_finish_cut(
         .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
 }
 
+/// FER-591: drag files out of Ferrum (browser upload, Explorer, any app). Same source gates as the
+/// clipboard copy, then the native shell drag runs on the main thread, COPY only. Returns `"copy"`
+/// when a target accepted the files, `"none"` otherwise (cancelled or refused).
+#[tauri::command]
+pub async fn start_file_drag(
+    paths: Vec<String>,
+    window: tauri::WebviewWindow,
+) -> Result<String, FsError> {
+    crate::drag_out::check_count(paths.len())?;
+    let hwnd = clipboard_owner_hwnd(&window)?;
+    let (checked, parent) = spawn_blocking(move || {
+        let checked = paths
+            .iter()
+            .map(|p| check_clipboard_source(p, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let parent = crate::drag_out::common_parent(&checked)?;
+        Ok::<_, FsError>((checked, parent))
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))??;
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .run_on_main_thread(move || {
+            let _ = tx.send(crate::drag_out::run_drag(hwnd, &parent, &checked));
+        })
+        .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?;
+    // The drag loop blocks the main thread until the mouse is released; wait off the async pool.
+    let copied = spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))?
+        .map_err(|_| FsError::new(crate::domain::ErrorCode::Io, "The drag did not run"))??;
+    Ok(if copied { "copy" } else { "none" }.to_string())
+}
+
+/// FER-591: is Shift held right now (an internal pane-to-pane drop then moves instead of copies).
+#[tauri::command]
+pub fn drag_shift_down() -> bool {
+    crate::drag_out::shift_down()
+}
+
 // ── Archive commands (F2-12) ────────────────────────────────────────────
 
 use crate::archive_contract::{

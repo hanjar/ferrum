@@ -25,6 +25,7 @@
   import { columns } from '../stores/columnsStore.svelte';
   import { effectiveSortSpec } from '../columns';
   import { isInTauri } from '../ipc/tauri';
+  import { startFileDrag } from '../ipc/dragOut';
   import { activity } from '../stores/activityStore.svelte';
   import { shellOpen } from '../ipc/activity';
   import { handleShellError } from '../ipc/shellOpen';
@@ -707,6 +708,20 @@
     if (!path) return;
     const paths = selected.has(path) ? [...selected] : [path];
     beginInternalDrag(paneId, paths.length);
+    if (isInTauri()) {
+      // FER-591: cancel the HTML5 drag and start a native shell drag instead, so browsers,
+      // Explorer and other apps receive real files (COPY only). The internal origin stays set
+      // until the native drag ends, so a drop on the other Ferrum pane is still recognised.
+      e.preventDefault();
+      void startFileDrag(paths)
+        .catch((err: unknown) => {
+          toast.show(err instanceof Error ? err.message : 'Could not start the drag', 4000);
+        })
+        // The drop event and this IPC reply race on the way to the page: keep the origin a
+        // moment longer so a drop on the source pane is never mistaken for a foreign one.
+        .finally(() => setTimeout(endInternalDrag, 500));
+      return;
+    }
     setDragPaths(e, paths);
   }
 
