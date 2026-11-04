@@ -66,4 +66,32 @@ describe('ThumbImage', () => {
     await settle();
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it('FER-593: an SVG cell queues only while visible and cancels when scrolled away first', async () => {
+    let cb: (e: { isIntersecting: boolean }[]) => void = () => {};
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(c: typeof cb) {
+          cb = c;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const cancel = vi.fn();
+    const request = vi.fn(() => ({ promise: new Promise<string | null>(() => {}), cancel }));
+    render(ThumbImage, {
+      path: 'C:\\d\\a.svg',
+      batcher: { scope: 's', request: vi.fn() },
+      svg: { request },
+    });
+    await settle();
+    expect(request).not.toHaveBeenCalled(); // off screen: no read queued
+    cb([{ isIntersecting: true }]);
+    await settle();
+    expect(request).toHaveBeenCalledTimes(1);
+    cb([{ isIntersecting: false }]); // scrolled away before its turn
+    await settle();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
 });

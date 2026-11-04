@@ -5,13 +5,21 @@
  * hotlist and saved searches; malformed entries are dropped on load. A
  * plugin API for NEW column kinds stays explicitly out of scope (D33).
  */
-import { viewState, type FilterMode, type ViewMode } from './viewStateStore.svelte';
+import {
+  viewState,
+  parseThumbSize,
+  type FilterMode,
+  type ThumbSize,
+  type ViewMode,
+} from './viewStateStore.svelte';
 import { ui, type PaneId } from '../uiState.svelte';
 import type { SortSpec } from '../selection';
 
 export interface ViewPreset {
   name: string;
   viewMode: ViewMode;
+  /** FER-593; presets saved before it existed load as Medium. */
+  thumbSize: ThumbSize;
   sort: SortSpec;
   reversed: boolean;
   filterMode: FilterMode;
@@ -55,6 +63,7 @@ export function parseViewPresets(raw: string | null): ViewPreset[] {
     out.push({
       name: p.name,
       viewMode: p.viewMode as ViewMode,
+      thumbSize: parseThumbSize(p.thumbSize),
       sort: { key: sort.key, dir: sort.dir },
       reversed: p.reversed === true,
       filterMode: p.filterMode as FilterMode,
@@ -101,6 +110,7 @@ class ViewPresetsStore {
     const preset: ViewPreset = {
       name,
       viewMode: viewState.viewMode(pane),
+      thumbSize: viewState.thumbSize(pane),
       sort: { ...viewState.sort(pane) },
       reversed: viewState.reversed(pane),
       filterMode: viewState.filterMode(pane),
@@ -116,6 +126,7 @@ class ViewPresetsStore {
   /** Apply a preset to a pane (the dialog applies to the active pane). */
   apply(preset: ViewPreset, pane: PaneId): void {
     viewState.setViewMode(pane, preset.viewMode);
+    viewState.setThumbSize(pane, preset.thumbSize);
     viewState.setSort(pane, preset.sort.key, preset.sort.dir);
     if (viewState.reversed(pane) !== preset.reversed) viewState.toggleReversed(pane);
     viewState.setFilterMode(pane, preset.filterMode, preset.filterPattern);

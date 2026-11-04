@@ -6,6 +6,7 @@
   import { view } from '../stores/viewStore.svelte';
   import { ui } from '../uiState.svelte';
   import FileGrid from './FileGrid.svelte';
+  import type { ThumbSize } from '../stores/viewStateStore.svelte';
   import { contextMenu, type ContextMenuItem } from '../stores/contextMenuStore.svelte';
   import { agentSubmenuItem } from '../ai/agentTerminal';
   import { dialogs } from '../stores/dialogStore.svelte';
@@ -41,6 +42,9 @@
     notice = null,
     /** 'full' shows the configured columns; 'brief' is names-only (F2-15). */
     mode = 'full',
+    /** FER-593: Thumbnail View size level; Ctrl+wheel asks `onthumbstep` for +1 / -1. */
+    thumbSize = 'medium',
+    onthumbstep,
     /** F2-365 Custom Columns: visible columns + order for Full mode. */
     columns = DEFAULT_COLUMN_CONFIG,
     /** FER-541: Optional column widths override / external state. */
@@ -69,6 +73,8 @@
     /** FER-457: small note when the tab was moved to a nearer existing folder. */
     notice?: string | null;
     mode?: 'brief' | 'full' | 'thumbnail';
+    thumbSize?: ThumbSize;
+    onthumbstep?: (delta: 1 | -1) => void;
     columns?: ColumnConfig;
     columnWidths?: FileListColumnWidths;
     showComments?: boolean;
@@ -560,7 +566,17 @@
   {:else if view.mode === 'grid'}
     <FileGrid {rows} {selected} {cursor} {onrowclick} {onrowactivate} {onup} />
   {:else if thumbnails}
-    <FileGrid {rows} {selected} {cursor} {onrowclick} {onrowactivate} {onup} thumbnails />
+    <FileGrid
+      {rows}
+      {selected}
+      {cursor}
+      {onrowclick}
+      {onrowactivate}
+      {onup}
+      thumbnails
+      {thumbSize}
+      {onthumbstep}
+    />
   {:else}
     <!-- total-height sizer: scrollbars behave as if all rows existed -->
     <div class="sizer" style:height="{total * rowPx}px">

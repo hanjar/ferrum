@@ -174,6 +174,7 @@ describe('Custom View Modes (view presets)', () => {
   const preset: ViewPreset = {
     name: 'Photos',
     viewMode: 'thumbnail',
+    thumbSize: 'medium',
     sort: { key: 'size', dir: -1 },
     reversed: false,
     filterMode: 'custom',

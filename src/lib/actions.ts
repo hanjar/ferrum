@@ -6,7 +6,7 @@ import { dialogs } from './stores/dialogStore.svelte';
 import { ops } from './stores/opsStore.svelte';
 import { baseName } from './stores/paneStore.svelte';
 import { restoreSelection, saveSelection } from './stores/selectionMemory.svelte';
-import { viewState } from './stores/viewStateStore.svelte';
+import { viewState, THUMB_METRICS, THUMB_SIZES } from './stores/viewStateStore.svelte';
 import { searchStore } from './stores/searchStore.svelte';
 import { activity } from './stores/activityStore.svelte';
 import { previewStore } from './stores/previewStore.svelte';
@@ -58,6 +58,7 @@ import { shell } from './stores/shellStore.svelte';
 import { isArchiveFile } from './stores/archiveFetcher';
 import { comments } from './stores/commentStore.svelte';
 import { codecs } from './stores/codecsStore.svelte';
+import { imageViewer, isViewableImage } from './stores/imageViewerStore.svelte';
 import { viewPresets } from './stores/viewPresetsStore.svelte';
 import { columns } from './stores/columnsStore.svelte';
 import { separateTree } from './stores/separateTreeStore.svelte';
@@ -1148,6 +1149,34 @@ export const actions: Action[] = [
     available: () => activePane() !== undefined,
     run: () => viewState.setViewMode(ui.activePane, 'thumbnail'),
   },
+  // ── FER-593: Thumbnail View size levels (per pane; Ctrl+wheel over the grid steps them too).
+  ...THUMB_SIZES.map((size): Action => {
+    const name = THUMB_METRICS[size].label;
+    return {
+      id: `show.thumbSize.${size}`,
+      label: () =>
+        viewState.thumbSize(ui.activePane) === size
+          ? `Thumbnail size: ${name} ✓`
+          : `Thumbnail size: ${name}`,
+      group: 'Show',
+      available: () => activePane() !== undefined,
+      run: () => viewState.setThumbSize(ui.activePane, size),
+    };
+  }),
+  {
+    id: 'show.thumbLarger',
+    label: 'Larger thumbnails',
+    group: 'Show',
+    available: () => activePane() !== undefined,
+    run: () => void viewState.stepThumbSize(ui.activePane, 1),
+  },
+  {
+    id: 'show.thumbSmaller',
+    label: 'Smaller thumbnails',
+    group: 'Show',
+    available: () => activePane() !== undefined,
+    run: () => void viewState.stepThumbSize(ui.activePane, -1),
+  },
   // ── F2-27: Comments view — the listing gains a comment column fed by the
   // per-directory sidecar map (commentStore).
   {
@@ -1331,6 +1360,30 @@ export const actions: Action[] = [
       if (!ui.quickViewOpen) previewStore.setTarget(null);
     },
   },
+  // ── FER-593: F3 (Total Commander "View"): an image opens the zoomable image viewer; any other
+  // file toggles Quick View (no backend work); a folder does nothing.
+  {
+    id: 'view.image',
+    label: 'View (image viewer / Quick View)',
+    group: 'Show',
+    shortcut: { key: 'F3' },
+    available: () => activePane() !== undefined,
+    run: () => {
+      const pane = activePane();
+      const cur = pane?.cursorEntry();
+      if (!pane || !cur || cur.isDir) return;
+      // The viewer reads from disk only; an image inside an archive goes to Quick View.
+      const inArchive = cur.path
+        .split(/[\\/]/)
+        .slice(0, -1)
+        .some((seg) => isArchiveFile(seg));
+      if (isViewableImage(cur.name) && !inArchive) {
+        imageViewer.show(ui.activePane, pane.visibleEntries?.() ?? [cur], cur.path);
+      } else {
+        getAction('show.quickView')?.run?.();
+      }
+    },
+  },
 ];
 
 /** Separator entry inside a menu group's `ids` (FER-429). */
@@ -1429,6 +1482,10 @@ export const menuGroups: {
       'show.brief',
       'show.full',
       'show.thumbnails',
+      'show.thumbSize.small',
+      'show.thumbSize.medium',
+      'show.thumbSize.large',
+      'show.thumbSize.xlarge',
       'show.comments',
       'show.customColumns',
       'show.customModes',
@@ -1436,6 +1493,7 @@ export const menuGroups: {
       'show.tree',
       'show.separateTree',
       'show.quickView',
+      'view.image',
       'show.vertical',
       MENU_SEPARATOR,
       'view.hidden',

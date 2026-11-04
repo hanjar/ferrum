@@ -444,6 +444,12 @@
           size: r.entry.size,
           modifiedMs: r.entry.modifiedMs,
         })),
+      // FER-593: put the cursor on a visible row without touching the marks.
+      setCursor: (path: string) => {
+        if (!visible.some((r) => r.entry.path === path)) return;
+        cursor = path;
+        anchor = path;
+      },
       selectPaths: (paths: Iterable<string>, cursorPath?: string) => {
         replaceSelection(new Set(paths));
         if (cursorPath !== undefined) cursor = cursorPath;
@@ -838,6 +844,8 @@
       {selected}
       {cursor}
       mode={view.viewMode}
+      thumbSize={view.thumbSize}
+      onthumbstep={(d) => viewState.stepThumbSize(paneId, d)}
       columns={colCfg}
       showComments={ui.showComments}
       comments={comments.map(paneId)}

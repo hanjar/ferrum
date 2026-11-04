@@ -64,6 +64,8 @@ export interface PaneApi {
   /** F2-14: replace the whole selection by path identity; optionally move
    *  the cursor onto one of the selected entries. */
   selectPaths?(paths: Iterable<string>, cursorPath?: string): void;
+  /** FER-593: move the cursor to a visible row by path; marks are left alone. */
+  setCursor?(path: string): void;
   /** FER-482 Ctrl+U: detach / attach the pane's whole content (tabs, selection, cursor). */
   takeContents?(): PaneContents;
   putContents?(contents: PaneContents): void;

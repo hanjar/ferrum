@@ -10,8 +10,27 @@ import type { SortSpec } from '../selection';
 export type ViewMode = 'brief' | 'full' | 'thumbnail';
 export type FilterMode = 'all' | 'programs' | 'custom' | 'selected';
 
+/** FER-593: Thumbnail View size levels, smallest first. */
+export type ThumbSize = 'small' | 'medium' | 'large' | 'xlarge';
+export const THUMB_SIZES: readonly ThumbSize[] = ['small', 'medium', 'large', 'xlarge'];
+export const DEFAULT_THUMB_SIZE: ThumbSize = 'medium';
+/** Preview box height and grid column width in px; Medium is the original look. */
+export const THUMB_METRICS: Record<ThumbSize, { box: number; col: number; label: string }> = {
+  small: { box: 48, col: 96, label: 'Small' },
+  medium: { box: 72, col: 124, label: 'Medium' },
+  large: { box: 128, col: 176, label: 'Large' },
+  xlarge: { box: 224, col: 272, label: 'Extra large' },
+};
+
+/** Validate a stored value; anything unknown (or missing) is Medium. */
+export function parseThumbSize(v: unknown): ThumbSize {
+  return THUMB_SIZES.includes(v as ThumbSize) ? (v as ThumbSize) : DEFAULT_THUMB_SIZE;
+}
+
 export interface PaneViewState {
   viewMode: ViewMode;
+  /** FER-593: size level of Thumbnail View (kept while another view mode is shown). */
+  thumbSize: ThumbSize;
   sort: SortSpec;
   reversed: boolean;
   filterMode: FilterMode;
@@ -22,6 +41,7 @@ export interface PaneViewState {
 function initialPane(): PaneViewState {
   return {
     viewMode: 'full',
+    thumbSize: DEFAULT_THUMB_SIZE,
     sort: { key: 'name', dir: 1 },
     reversed: false,
     filterMode: 'all',
@@ -45,6 +65,22 @@ class ViewStateStore {
 
   viewMode(pane: PaneId): ViewMode {
     return this.view(pane).viewMode;
+  }
+
+  setThumbSize(pane: PaneId, size: ThumbSize) {
+    this.view(pane).thumbSize = parseThumbSize(size);
+  }
+
+  thumbSize(pane: PaneId): ThumbSize {
+    return this.view(pane).thumbSize;
+  }
+
+  /** One level larger (+1) or smaller (-1), clamped at Small / Extra large. */
+  stepThumbSize(pane: PaneId, delta: 1 | -1): ThumbSize {
+    const i = THUMB_SIZES.indexOf(this.view(pane).thumbSize) + delta;
+    const next = THUMB_SIZES[Math.min(THUMB_SIZES.length - 1, Math.max(0, i))];
+    this.view(pane).thumbSize = next;
+    return next;
   }
 
   setSort(pane: PaneId, key: SortSpec['key'], dir: 1 | -1 = 1) {
