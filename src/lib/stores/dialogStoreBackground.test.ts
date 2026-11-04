@@ -283,6 +283,7 @@ describe('prompts in the middle of a docked job', () => {
       'skip',
       'secret',
       expect.any(String),
+      undefined,
     );
     expect(job.state).toBe('done');
     // After the answer the job keeps running in the dock: no progress dialog came back.

@@ -665,6 +665,7 @@ mod tests {
         ArchiveExtractRequest {
             archive_path: archive.to_string_lossy().into_owned(),
             member_paths: Vec::<MemberPath>::new(),
+            base_member_path: None,
             destination_path: dest.to_string_lossy().into_owned(),
             conflict: ArchiveConflictPolicy::Skip,
             limits: limits(),

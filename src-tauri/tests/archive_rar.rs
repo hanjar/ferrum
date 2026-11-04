@@ -379,6 +379,7 @@ fn extract_req(
     ArchiveExtractRequest {
         archive_path: path.to_string_lossy().into_owned(),
         member_paths,
+        base_member_path: None,
         destination_path: dest.to_string_lossy().into_owned(),
         conflict: policy,
         password,
@@ -496,6 +497,49 @@ fn basic_extract_full_identical_content() {
         })
         .collect();
     assert!(partials.is_empty(), "staging files left: {partials:?}");
+}
+
+#[test]
+fn base_folder_lands_selection_directly_in_destination() {
+    let Some(fixtures) = get_rar_fixtures() else {
+        eprintln!("SKIP base_folder_lands_selection_directly_in_destination: Rar.exe not found");
+        return;
+    };
+    let dir = TempDir::new("basic-x-base");
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let provider = RarProvider::new();
+    let mut req = extract_req(
+        &fixtures.basic,
+        &dest,
+        ArchiveConflictPolicy::Skip,
+        vec![
+            MemberPath::parse("docs/catatan.txt").unwrap(),
+            MemberPath::parse("docs/deep").unwrap(),
+        ],
+        None,
+    );
+    req.base_member_path = Some(MemberPath::parse("docs").unwrap());
+    provider.extract(&req, &mut |_| true).unwrap();
+
+    assert_eq!(
+        file_sha256(&dest.join("catatan.txt")),
+        fixtures.hash_catatan
+    );
+    assert_eq!(
+        file_sha256(&dest.join("deep/a/b/dalam.txt")),
+        fixtures.hash_dalam
+    );
+    assert!(!dest.join("docs").exists());
+
+    // A selection outside the base is refused and nothing is written.
+    let dest2 = dir.path().join("out2");
+    std::fs::create_dir_all(&dest2).unwrap();
+    req.destination_path = dest2.to_string_lossy().into_owned();
+    req.member_paths = vec![MemberPath::parse("readme.txt").unwrap()];
+    assert!(provider.extract(&req, &mut |_| true).is_err());
+    assert_eq!(std::fs::read_dir(&dest2).unwrap().count(), 0);
 }
 
 #[test]

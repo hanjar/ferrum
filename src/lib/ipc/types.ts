@@ -234,6 +234,8 @@ export interface ArchiveLimits {
 export interface ArchiveExtractRequest {
   archivePath: string;
   memberPaths: string[];
+  /** FER-594: archive folder the selection lives in; paths are written relative to it. */
+  baseMemberPath?: string;
   destinationPath: string;
   conflict: ArchiveConflictPolicy;
   limits: ArchiveLimits;

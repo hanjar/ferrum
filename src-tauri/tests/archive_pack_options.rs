@@ -253,6 +253,7 @@ fn test_all_levels_roundtrip() {
                 &ArchiveExtractRequest {
                     archive_path: zip_dest.to_string_lossy().into_owned(),
                     member_paths: vec![],
+                    base_member_path: None,
                     destination_path: extract_dir_zip.to_string_lossy().into_owned(),
                     conflict: ArchiveConflictPolicy::Overwrite,
                     password: None,
@@ -297,6 +298,7 @@ fn test_all_levels_roundtrip() {
                 &ArchiveExtractRequest {
                     archive_path: sevenz_dest.to_string_lossy().into_owned(),
                     member_paths: vec![],
+                    base_member_path: None,
                     destination_path: extract_dir_7z.to_string_lossy().into_owned(),
                     conflict: ArchiveConflictPolicy::Overwrite,
                     password: None,
@@ -430,6 +432,7 @@ fn test_request_without_level_defaults_to_normal() {
             &ArchiveExtractRequest {
                 archive_path: zip_dest.to_string_lossy().into_owned(),
                 member_paths: vec![],
+                base_member_path: None,
                 destination_path: extract_dir.to_string_lossy().into_owned(),
                 conflict: ArchiveConflictPolicy::Overwrite,
                 password: None,

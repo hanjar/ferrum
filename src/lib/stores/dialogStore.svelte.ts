@@ -220,6 +220,8 @@ export type Dialog =
 interface ExtractJob {
   archivePath: string;
   memberPaths: string[];
+  /** FER-594: archive folder the selection was picked from; absent = full member paths. */
+  baseMemberPath?: string;
 }
 
 const WRONG_PASSWORD = 'Password salah. Coba lagi.';
@@ -709,9 +711,18 @@ class DialogStore {
           '/',
         );
       });
+      // FER-594: the selected items land directly in the target (Total Commander / 7-Zip),
+      // keeping only the structure below the folder being browsed. All selected items share
+      // that folder; a selection at the archive root has no parent, hence no base.
+      const parents = new Set(memberPaths.map((m) => m.split('/').slice(0, -1).join('/')));
+      const parent = parents.size === 1 ? [...parents][0]! : '';
+      const baseMemberPath = parent === '' ? undefined : parent;
       // FER-368: same one-ask conflict flow as Alt+F9 unpack.
-      this.runExtractQueue([{ archivePath: srcArchiveRoot, memberPaths }], target, 'Extract', () =>
-        refreshPanesMatching(target),
+      this.runExtractQueue(
+        [{ archivePath: srcArchiveRoot, memberPaths, baseMemberPath }],
+        target,
+        'Extract',
+        () => refreshPanesMatching(target),
       );
       return;
     }
@@ -838,6 +849,7 @@ class DialogStore {
         job.memberPaths,
         target,
         passwords[job.archivePath],
+        job.baseMemberPath,
       ).then((report) => {
         conflicts.push(...report.conflicts);
         unlocked.push(job);
@@ -987,6 +999,7 @@ class DialogStore {
                 policy,
                 password,
                 requestId,
+                job.baseMemberPath,
               );
               if (flow.requestId === requestId) {
                 if (flow.writtenEntries !== undefined) batchWritten += flow.writtenEntries;

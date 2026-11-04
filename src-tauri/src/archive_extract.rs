@@ -8,7 +8,7 @@
 pub mod publish;
 
 use crate::archive_contract::{
-    ArchiveConflictPolicy, ArchiveError, ArchiveErrorCode, ArchiveLimits,
+    ArchiveConflictPolicy, ArchiveError, ArchiveErrorCode, ArchiveLimits, MemberPath,
 };
 use publish::{DirHandle, PublishError};
 use std::{
@@ -68,6 +68,9 @@ pub struct PlannedEntry {
 pub struct Plan {
     entries: Vec<PlannedEntry>,
     ratio_warnings: Vec<usize>,
+    /// FER-594: folder stripped from every `relative_path`; kept so the re-validation in
+    /// `extract`/`stream_checked` recomputes the same paths from the raw names.
+    base: Option<MemberPath>,
 }
 impl Plan {
     pub fn entries(&self) -> &[PlannedEntry] {
@@ -232,8 +235,49 @@ fn normalize(
     Ok((path, parts.join("/").to_lowercase()))
 }
 
+/// FER-594: the base folder of a request, after the fail-closed checks. `None` or an empty base
+/// means "no base" (full member paths, as before). A real base needs a nonempty selection and
+/// every selected path strictly below it (`<base>/...`), compared exactly like the providers'
+/// selection filter; anything else is refused before the archive is even listed.
+pub fn effective_base<'a>(
+    base: Option<&'a MemberPath>,
+    member_paths: &[MemberPath],
+) -> Result<Option<&'a MemberPath>, ArchiveError> {
+    let Some(base) = base.filter(|b| !b.as_str().is_empty()) else {
+        return Ok(None);
+    };
+    let prefix = format!("{}/", base.as_str());
+    if member_paths.is_empty()
+        || !member_paths
+            .iter()
+            .all(|mp| mp.as_str().starts_with(&prefix))
+    {
+        return Err(error(
+            ArchiveErrorCode::InvalidMemberPath,
+            "Selection is not inside the base folder",
+        ));
+    }
+    Ok(Some(base))
+}
+
 /// Validate entire listing, including implicit parent directories, before streaming.
 pub fn preflight(entries: &[Entry<'_>], limits: &ArchiveLimits) -> Result<Plan, ArchiveError> {
+    preflight_with_base(entries, limits, None)
+}
+
+/// `preflight` with FER-594's base folder. Every raw name is validated whole by `normalize`
+/// (depth, `..`, reserved names, ...) FIRST; only the already-validated path then loses the
+/// base's leading components, so stripping can never let a name through that the full-path
+/// checks would refuse. Duplicate and file-ancestor checks run on the stripped paths, which are
+/// the ones that get written. A directory entry that is the base itself is dropped; any other
+/// entry outside the base is an error (the selection filter cannot let one through).
+pub fn preflight_with_base(
+    entries: &[Entry<'_>],
+    limits: &ArchiveLimits,
+    base: Option<&MemberPath>,
+) -> Result<Plan, ArchiveError> {
+    let base = base.filter(|b| !b.as_str().is_empty());
+    let base_parts: Vec<&str> = base.map_or_else(Vec::new, |b| b.as_str().split('/').collect());
     let limits = bounded_limits(limits);
     if entries.len() as u64 > limits.max_entries {
         return Err(error(
@@ -269,7 +313,35 @@ pub fn preflight(entries: &[Entry<'_>], limits: &ArchiveLimits) -> Result<Plan, 
                 "Archive links and special entries are unsupported",
             ));
         }
-        let (path, key) = normalize(entry.raw_name, entry.kind, limits.max_depth)?;
+        let (full_path, full_key) = normalize(entry.raw_name, entry.kind, limits.max_depth)?;
+        let (path, key) = if base_parts.is_empty() {
+            (full_path, full_key)
+        } else {
+            let comps: Vec<_> = full_path.components().collect();
+            let under = comps.len() >= base_parts.len()
+                && comps
+                    .iter()
+                    .zip(&base_parts)
+                    .all(|(c, b)| c.as_os_str() == std::ffi::OsStr::new(b));
+            if under && comps.len() == base_parts.len() && entry.kind == EntryKind::Directory {
+                continue; // the base folder itself: nothing to publish
+            }
+            if !under || comps.len() == base_parts.len() {
+                return Err(member_error(
+                    ArchiveErrorCode::InvalidMemberPath,
+                    entry.raw_name,
+                    "Archive member is not inside the base folder",
+                ));
+            }
+            let stripped: PathBuf = comps[base_parts.len()..].iter().collect();
+            let key = stripped
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+                .to_lowercase();
+            (stripped, key)
+        };
         if seen.insert(key, entry.kind).is_some() {
             return Err(member_error(
                 ArchiveErrorCode::Conflict,
@@ -354,6 +426,7 @@ pub fn preflight(entries: &[Entry<'_>], limits: &ArchiveLimits) -> Result<Plan, 
     Ok(Plan {
         entries: planned,
         ratio_warnings,
+        base: base.cloned(),
     })
 }
 
@@ -432,7 +505,7 @@ where
             modified_ms: entry.modified_ms,
         })
         .collect();
-    let checked = preflight(&metadata, limits)?;
+    let checked = preflight_with_base(&metadata, limits, plan.base.as_ref())?;
     if checked
         .entries
         .iter()
@@ -575,7 +648,7 @@ where
             modified_ms: entry.modified_ms,
         })
         .collect();
-    let checked = preflight(&metadata, &limits)?;
+    let checked = preflight_with_base(&metadata, &limits, plan.base.as_ref())?;
     if checked
         .entries
         .iter()
@@ -1051,6 +1124,108 @@ fn publish_err(e: PublishError, rel: &Path) -> ArchiveError {
     let mut err = error(code, "Publication refused");
     err.member_path = Some(rel.to_string_lossy().into_owned());
     err
+}
+
+#[cfg(test)]
+mod base_tests {
+    use super::*;
+
+    fn file(name: &str) -> Entry<'_> {
+        Entry {
+            raw_name: name,
+            kind: EntryKind::File,
+            expanded_size: Some(1),
+            compressed_size: None,
+            modified_ms: None,
+        }
+    }
+
+    fn limits() -> ArchiveLimits {
+        ArchiveLimits {
+            max_entries: 100,
+            max_total_bytes: 1 << 20,
+            max_entry_bytes: 1 << 20,
+            max_depth: 8,
+        }
+    }
+
+    fn base(s: &str) -> MemberPath {
+        MemberPath::parse(s).unwrap()
+    }
+
+    #[test]
+    fn strips_the_base_after_validating_the_full_name() {
+        let entries = [file("a/b/x.txt"), file("a/b/sub/y.txt")];
+        let plan = preflight_with_base(&entries, &limits(), Some(&base("a/b"))).unwrap();
+        let rels: Vec<_> = plan
+            .entries()
+            .iter()
+            .map(|e| e.relative_path.clone())
+            .collect();
+        assert_eq!(rels, [PathBuf::from("x.txt"), PathBuf::from("sub/y.txt")]);
+        // raw names are untouched: providers match archive members by them.
+        assert_eq!(plan.entries()[0].raw_name, "a/b/x.txt");
+    }
+
+    #[test]
+    fn hostile_names_below_the_base_are_still_refused() {
+        for bad in [
+            "a/b/../../evil",
+            "a/b/../evil",
+            "a/b/CON",
+            "a/b/x.",
+            "a/b/c:d",
+            "/a/b/x",
+        ] {
+            let err =
+                preflight_with_base(&[file(bad)], &limits(), Some(&base("a/b"))).expect_err(bad);
+            assert_eq!(err.code, ArchiveErrorCode::UnsafeEntry, "{bad}");
+        }
+        // Depth is judged on the full name, not the stripped one.
+        let deep = "a/b/1/2/3/4/5/6/7.txt";
+        let err = preflight_with_base(&[file(deep)], &limits(), Some(&base("a/b"))).unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::LimitExceeded);
+    }
+
+    #[test]
+    fn entry_outside_the_base_is_an_error_and_the_base_directory_is_dropped() {
+        let err =
+            preflight_with_base(&[file("a/other.txt")], &limits(), Some(&base("a/b"))).unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::InvalidMemberPath);
+        // A file named like the base itself is not a folder to drop.
+        assert!(preflight_with_base(&[file("a/b")], &limits(), Some(&base("a/b"))).is_err());
+        let dir = Entry {
+            kind: EntryKind::Directory,
+            expanded_size: None,
+            ..file("a/b")
+        };
+        let plan =
+            preflight_with_base(&[dir, file("a/b/x.txt")], &limits(), Some(&base("a/b"))).unwrap();
+        assert_eq!(plan.entries().len(), 1);
+    }
+
+    #[test]
+    fn duplicates_are_judged_on_the_stripped_path() {
+        // `a/b/x` and `a/b/X` collide once the base is gone (case-insensitive Windows).
+        let err = preflight_with_base(
+            &[file("a/b/x"), file("a/b/X")],
+            &limits(),
+            Some(&base("a/b")),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ArchiveErrorCode::Conflict);
+    }
+
+    #[test]
+    fn effective_base_requires_a_nonempty_selection_strictly_below_it() {
+        let sel = [base("a/b/x.txt")];
+        assert!(effective_base(None, &sel).unwrap().is_none());
+        assert!(effective_base(Some(&base("")), &[]).unwrap().is_none());
+        assert!(effective_base(Some(&base("a/b")), &sel).unwrap().is_some());
+        assert!(effective_base(Some(&base("a/b")), &[]).is_err());
+        assert!(effective_base(Some(&base("a/b")), &[base("a/b")]).is_err());
+        assert!(effective_base(Some(&base("a/b")), &[base("a/bb/x")]).is_err());
+    }
 }
 
 #[cfg(all(test, windows))]

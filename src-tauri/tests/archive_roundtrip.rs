@@ -170,6 +170,7 @@ fn extract_request(
     ArchiveExtractRequest {
         archive_path: archive.to_string_lossy().into_owned(),
         member_paths: vec![],
+        base_member_path: None,
         destination_path: dest.to_string_lossy().into_owned(),
         conflict: policy,
         limits: limits(),

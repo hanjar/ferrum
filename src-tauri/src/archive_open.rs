@@ -509,6 +509,7 @@ pub fn extract_member(
     let request = ArchiveExtractRequest {
         archive_path: archive_path.to_owned(),
         member_paths: vec![member.clone()],
+        base_member_path: None,
         destination_path: key_dir.to_string_lossy().into_owned(),
         conflict: ArchiveConflictPolicy::Overwrite,
         limits: ArchiveLimits {

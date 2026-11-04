@@ -708,6 +708,11 @@ fn extract_counted_with_limit(
         });
     }
 
+    // FER-594: refuse a base that does not contain the whole selection (nothing written yet).
+    let base = crate::archive_extract::effective_base(
+        request.base_member_path.as_ref(),
+        &request.member_paths,
+    )?;
     // Selection: empty = all; nonempty = exact paths or subtrees.
     let selected = |raw: &str| {
         request.member_paths.is_empty()
@@ -721,7 +726,7 @@ fn extract_counted_with_limit(
         .filter(|e| selected(e.raw_name))
         .cloned()
         .collect();
-    let plan = archive_extract::preflight(&selected_entries, &request.limits)?;
+    let plan = archive_extract::preflight_with_base(&selected_entries, &request.limits, base)?;
 
     // Archive index of every selected file (preflight rejects duplicate
     // names, so the name identifies the member), and which of them carry a
@@ -1323,6 +1328,7 @@ mod solid_tests {
                 .iter()
                 .map(|m| MemberPath::parse(m).unwrap())
                 .collect(),
+            base_member_path: None,
             destination_path: dest.to_string_lossy().into_owned(),
             conflict,
             limits: crate::archive_contract::ArchiveLimits {
@@ -2197,6 +2203,7 @@ mod ultra_text_tests {
         crate::archive_contract::ArchiveExtractRequest {
             archive_path: archive.to_string_lossy().into_owned(),
             member_paths: vec![],
+            base_member_path: None,
             destination_path: dest.to_string_lossy().into_owned(),
             conflict: ArchiveConflictPolicy::Overwrite,
             limits: crate::archive_contract::ArchiveLimits {

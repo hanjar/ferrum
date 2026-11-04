@@ -422,6 +422,7 @@ fn test_rar_create_tree_unicode_empty_dir_matches_zip() {
     fs::create_dir_all(&extract_dir).unwrap();
     let extract_req = ArchiveExtractRequest {
         archive_path: s(&rar_dest),
+        base_member_path: None,
         destination_path: s(&extract_dir),
         member_paths: Vec::new(),
         conflict: ArchiveConflictPolicy::Overwrite,

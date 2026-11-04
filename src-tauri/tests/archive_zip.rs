@@ -325,6 +325,7 @@ fn extract_req(
     archive_contract::ArchiveExtractRequest {
         archive_path: path.to_string_lossy().into_owned(),
         member_paths: vec![],
+        base_member_path: None,
         destination_path: dest.to_string_lossy().into_owned(),
         conflict: policy,
         password: None,
@@ -465,6 +466,102 @@ fn partial_selection_extracts_only_subtree() {
         b"n"
     );
     assert!(!dest.join("other.txt").exists());
+}
+
+// ── FER-594: base folder strips the browsed folder from the written paths ─
+
+fn base_zip(dir: &Path) -> PathBuf {
+    let zip_path = dir.join("b.zip");
+    write_zip(
+        &zip_path,
+        &[
+            ("a/", None),
+            ("a/b/", None),
+            ("a/b/x.txt", Some(b"x")),
+            ("a/b/sub/", None),
+            ("a/b/sub/y.txt", Some(b"y")),
+            ("a/other.txt", Some(b"o")),
+        ],
+    );
+    zip_path
+}
+
+fn base_req(
+    zip_path: &Path,
+    dest: &Path,
+    base: &str,
+    members: &[&str],
+) -> archive_contract::ArchiveExtractRequest {
+    let mut req = extract_req(
+        zip_path,
+        dest,
+        archive_contract::ArchiveConflictPolicy::Skip,
+    );
+    req.member_paths = members
+        .iter()
+        .map(|m| MemberPath::parse(m).unwrap())
+        .collect();
+    req.base_member_path = Some(MemberPath::parse(base).unwrap());
+    req
+}
+
+#[test]
+fn base_folder_lands_selection_directly_in_destination() {
+    let dir = temp("x-base");
+    let zip_path = base_zip(&dir);
+    let dest = dir.join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let req = base_req(&zip_path, &dest, "a/b", &["a/b/x.txt", "a/b/sub"]);
+    ZipProvider::new().extract(&req, &mut |_| true).unwrap();
+    assert_eq!(std::fs::read(dest.join("x.txt")).unwrap(), b"x");
+    assert_eq!(std::fs::read(dest.join("sub").join("y.txt")).unwrap(), b"y");
+    assert!(!dest.join("a").exists());
+    assert!(!dest.join("other.txt").exists());
+}
+
+#[test]
+fn no_base_keeps_the_full_member_paths() {
+    let dir = temp("x-nobase");
+    let zip_path = base_zip(&dir);
+    let dest = dir.join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut req = base_req(&zip_path, &dest, "a/b", &["a/b/x.txt"]);
+    req.base_member_path = None;
+    ZipProvider::new().extract(&req, &mut |_| true).unwrap();
+    assert!(dest.join("a").join("b").join("x.txt").exists());
+    // An empty base behaves like no base too.
+    let dest2 = dir.join("out2");
+    std::fs::create_dir_all(&dest2).unwrap();
+    let mut req = base_req(&zip_path, &dest2, "a/b", &["a/b/x.txt"]);
+    req.base_member_path = Some(MemberPath::parse("").unwrap());
+    ZipProvider::new().extract(&req, &mut |_| true).unwrap();
+    assert!(dest2.join("a").join("b").join("x.txt").exists());
+}
+
+#[test]
+fn base_that_does_not_contain_the_selection_is_refused_and_writes_nothing() {
+    let dir = temp("x-base-bad");
+    let zip_path = base_zip(&dir);
+    for (base, members) in [
+        ("a/b", vec!["a/b/x.txt", "a/other.txt"]),
+        ("a/b", vec!["a/b"]),
+        ("a/b", vec![]),
+        ("a/bb", vec!["a/b/x.txt"]),
+    ] {
+        let dest = dir.join("out");
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        let req = base_req(&zip_path, &dest, base, &members);
+        let err = ZipProvider::new()
+            .extract(&req, &mut |_| true)
+            .expect_err("must refuse");
+        assert_eq!(err.code, Code::InvalidMemberPath, "{base} {members:?}");
+        assert_eq!(
+            std::fs::read_dir(&dest).unwrap().count(),
+            0,
+            "{base} {members:?}"
+        );
+    }
 }
 
 #[test]
