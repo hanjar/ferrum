@@ -4,7 +4,14 @@
   import ThumbImage from './ThumbImage.svelte';
   import { createGrantBatcher, mediaRevoke, newMediaScope } from '../ipc/media';
   import { isInTauri } from '../ipc/tauri';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { createSvgThumbQueue, SVG_EXT } from '../ipc/svgThumbs';
+  import {
+    DEFAULT_THUMB_SIZE,
+    THUMB_METRICS,
+    type ThumbSize,
+  } from '../stores/viewStateStore.svelte';
   import { ui } from '../uiState.svelte';
   import { displayName } from '../columns';
 
@@ -13,6 +20,7 @@
   // FER-489: keep the cursor cell visible after navigation / refresh.
   $effect(() => {
     void cursor;
+    void thumbSize; // FER-593: a size change moves the cell, keep it in view
     root?.querySelector<HTMLElement>('.cell.cursor')?.scrollIntoView?.({ block: 'nearest' });
   });
 
@@ -25,6 +33,10 @@
     onup,
     /** F2-27 Thumbnail View: image rows preview through the `ferrum-media` protocol (FER-452). */
     thumbnails = false,
+    /** FER-593: size level of the thumbnail boxes / columns. */
+    thumbSize = DEFAULT_THUMB_SIZE,
+    /** FER-593: Ctrl+wheel in Thumbnail View asks for one level larger (+1) / smaller (-1). */
+    onthumbstep,
   }: {
     rows: Row[];
     selected?: Set<string>;
@@ -33,6 +45,8 @@
     onrowactivate?: (row: Row) => void;
     onup?: () => void;
     thumbnails?: boolean;
+    thumbSize?: ThumbSize;
+    onthumbstep?: (delta: 1 | -1) => void;
   } = $props();
 
   // Only clear image extensions preview; lazy + async decoding keeps large
@@ -41,7 +55,34 @@
   const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?)$/i;
 
   function isThumbable(path: string): boolean {
-    return IMG_EXT.test(path) && isInTauri();
+    return (IMG_EXT.test(path) || SVG_EXT.test(path)) && isInTauri();
+  }
+
+  // FER-593: SVG cells read their bytes inline through one bounded queue per grid (never
+  // `ferrum-media`); one that is too big or unreadable lands here and keeps its icon.
+  const svgQueue = createSvgThumbQueue('grid-svg');
+  const svgFailed = new SvelteSet<string>();
+  $effect(() => {
+    void rows; // a new listing forgets earlier failures (the file may have changed)
+    untrack(() => svgFailed.clear());
+  });
+
+  const metrics = $derived(THUMB_METRICS[thumbSize] ?? THUMB_METRICS[DEFAULT_THUMB_SIZE]);
+
+  // Ctrl+wheel steps one size level and must not zoom the webview: a non-passive listener.
+  let wheelAcc = 0;
+  function wheelStep(node: HTMLElement) {
+    function onwheel(e: WheelEvent) {
+      if (!thumbnails || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      wheelAcc += e.deltaY;
+      if (Math.abs(wheelAcc) < 50) return;
+      const up = wheelAcc < 0; // wheel up = larger thumbnails
+      wheelAcc = 0;
+      onthumbstep?.(up ? 1 : -1);
+    }
+    node.addEventListener('wheel', onwheel, { passive: false });
+    return { destroy: () => node.removeEventListener('wheel', onwheel) };
   }
 
   // Thumbnail tokens live in one scope per grid: dropped when the listing
@@ -57,8 +98,13 @@
   onDestroy(() => void mediaRevoke(batcher.scope));
 </script>
 
-<div class="body" role="grid" aria-label="File grid" bind:this={root}>
-  <div class="grid" class:thumbs={thumbnails}>
+<div class="body" role="grid" aria-label="File grid" bind:this={root} use:wheelStep>
+  <div
+    class="grid"
+    class:thumbs={thumbnails}
+    style:--thumb-box="{metrics.box}px"
+    style:--thumb-col="{metrics.col}px"
+  >
     <div class="cell up" role="gridcell" onclick={() => onup?.()} title="Parent folder">
       <span class="ico">
         <svg
@@ -89,8 +135,17 @@
         ondblclick={() => onrowactivate?.(r)}
       >
         <span class="thumbBox">
-          {#if thumbnails && isThumbable(r.entry.path)}
-            <ThumbImage path={r.entry.path} {batcher} />
+          {#if thumbnails && isThumbable(r.entry.path) && !svgFailed.has(r.entry.path)}
+            {#if SVG_EXT.test(r.entry.path)}
+              <ThumbImage
+                path={r.entry.path}
+                {batcher}
+                svg={svgQueue}
+                onfail={() => svgFailed.add(r.entry.path)}
+              />
+            {:else}
+              <ThumbImage path={r.entry.path} {batcher} />
+            {/if}
           {:else}
             <FileIcon kind={r.kind} name={r.entry.name} size={38} variant="grid" />
           {/if}
@@ -115,7 +170,7 @@
   }
   /* Thumbnails: bigger tiles for the preview boxes (F2-27). */
   .grid.thumbs {
-    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(var(--thumb-col, 124px), 1fr));
   }
   .cell {
     display: flex;
@@ -151,7 +206,7 @@
     place-items: center;
   }
   .thumbs .thumbBox {
-    height: 72px;
+    height: var(--thumb-box, 72px);
   }
   .name {
     max-width: 100%;

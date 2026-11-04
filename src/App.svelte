@@ -42,6 +42,7 @@
   import { activePane } from './lib/stores/panesRegistry.svelte';
   import SearchPanel from './lib/components/SearchPanel.svelte';
   import QuickView from './lib/components/QuickView.svelte';
+  import ImageViewer from './lib/components/ImageViewer.svelte';
   import ComparePanel from './lib/components/ComparePanel.svelte';
   import SyncPanel from './lib/components/SyncPanel.svelte';
   import MultiRenameDialog from './lib/components/MultiRenameDialog.svelte';
@@ -215,6 +216,7 @@
     <Keybar />
     <OpsPanel />
     <Dialogs />
+    <ImageViewer />
     <MultiRenameDialog />
     <PropertiesDialog />
     <HotlistMenu />
