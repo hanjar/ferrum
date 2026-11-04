@@ -467,6 +467,11 @@ impl ArchiveProvider for ZipProvider {
             });
         }
 
+        // FER-594: refuse a base that does not contain the whole selection (nothing written yet).
+        let base = crate::archive_extract::effective_base(
+            request.base_member_path.as_ref(),
+            &request.member_paths,
+        )?;
         // Selection: empty = all; nonempty = exact paths or subtrees.
         let selected = |raw: &str| {
             request.member_paths.is_empty()
@@ -481,7 +486,8 @@ impl ArchiveProvider for ZipProvider {
             .filter(|(i, _)| selected(&names[*i]))
             .map(|(_, e)| e.clone())
             .collect();
-        let plan = crate::archive_extract::preflight(&selected_entries, &request.limits)?;
+        let plan =
+            crate::archive_extract::preflight_with_base(&selected_entries, &request.limits, base)?;
 
         let op_id = format!("zip-extract-{}", std::process::id());
         let total = plan

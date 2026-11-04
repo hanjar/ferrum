@@ -73,7 +73,8 @@ pub fn detect_conflicts(destination: &Path, relative_files: &[String]) -> Vec<Pr
 
 /// Enumerate the selected members of `archive_path` through `provider.list`
 /// (recursive, bounded by `limits.max_entries` total listing rows) and report
-/// destination collisions. Listing errors propagate typed: `PasswordRequired`
+/// destination collisions. FER-594: with a `base`, the reported paths are the ones extraction
+/// will write (relative to the base), validated by the same `effective_base` rule. Listing errors propagate typed: `PasswordRequired`
 /// lets the UI run its password-retry flow before the conflict ask.
 ///
 /// FER-504: `password` (the one the user already typed for this archive)
@@ -84,10 +85,13 @@ pub fn preflight_extract(
     provider: &dyn crate::archive_contract::ArchiveProvider,
     archive_path: &str,
     member_paths: &[MemberPath],
+    base: Option<&MemberPath>,
     destination: &Path,
     limits: &ArchiveLimits,
     password: Option<&str>,
 ) -> Result<PreflightReport, ArchiveError> {
+    let base = crate::archive_extract::effective_base(base, member_paths)?;
+    let base_prefix = base.map(|b| format!("{}/", b.as_str()));
     let mut report = PreflightReport::default();
     let mut listed: usize = 0usize;
     let mut files: Vec<String> = Vec::new();
@@ -124,7 +128,10 @@ pub fn preflight_extract(
             } else if selected(&raw, member_paths) {
                 report.total_files += 1;
                 report.total_bytes = report.total_bytes.saturating_add(size);
-                files.push(raw);
+                files.push(match &base_prefix {
+                    Some(prefix) => raw.strip_prefix(prefix.as_str()).unwrap_or(&raw).to_owned(),
+                    None => raw,
+                });
             }
         }
     }
@@ -197,6 +204,7 @@ mod tests {
             &ZipProvider::new(),
             archive.to_string_lossy().as_ref(),
             &[],
+            None,
             &dest,
             &limits(),
             None,
@@ -213,6 +221,7 @@ mod tests {
             &ZipProvider::new(),
             archive.to_string_lossy().as_ref(),
             &[MemberPath::parse("Sample/sub").unwrap()],
+            None,
             &dest,
             &limits(),
             None,
@@ -221,6 +230,75 @@ mod tests {
         assert_eq!(scoped.total_files, 1);
         assert!(scoped.conflicts.is_empty());
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn preflight_with_base_checks_the_stripped_paths() {
+        let base = temp_dir("base");
+        let src = base.join("Sample");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("alpha.txt"), b"alpha").unwrap();
+        fs::write(src.join("sub").join("inner.txt"), b"inner").unwrap();
+        let archive = base.join("sample.zip");
+        crate::archive_create_test::create_zip(
+            &[src.to_string_lossy().into_owned()],
+            &archive,
+            &limits(),
+        )
+        .unwrap();
+        let arc = archive.to_string_lossy().into_owned();
+
+        // `Sample/alpha.txt` extracted with base `Sample` lands at `dest/alpha.txt`.
+        let dest = base.join("out");
+        fs::create_dir_all(dest.join("Sample")).unwrap();
+        fs::write(dest.join("Sample").join("alpha.txt"), b"old").unwrap();
+        let sel = [
+            MemberPath::parse("Sample/alpha.txt").unwrap(),
+            MemberPath::parse("Sample/sub").unwrap(),
+        ];
+        let sample = MemberPath::parse("Sample").unwrap();
+        let report = preflight_extract(
+            &ZipProvider::new(),
+            &arc,
+            &sel,
+            Some(&sample),
+            &dest,
+            &limits(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.total_files, 2);
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+
+        fs::write(dest.join("alpha.txt"), b"old").unwrap();
+        let report = preflight_extract(
+            &ZipProvider::new(),
+            &arc,
+            &sel,
+            Some(&sample),
+            &dest,
+            &limits(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].member_path, "alpha.txt");
+
+        // A selection outside the base is refused, same rule as extraction.
+        let sub = MemberPath::parse("Sample/sub").unwrap();
+        assert!(
+            preflight_extract(
+                &ZipProvider::new(),
+                &arc,
+                &sel,
+                Some(&sub),
+                &dest,
+                &limits(),
+                None
+            )
+            .is_err()
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -238,6 +316,7 @@ mod tests {
             &crate::archive_sevenz::SevenZProvider::new(),
             archive.to_string_lossy().as_ref(),
             &[],
+            None,
             &dest,
             &limits(),
             None,
@@ -250,6 +329,7 @@ mod tests {
             &crate::archive_sevenz::SevenZProvider::new(),
             archive.to_string_lossy().as_ref(),
             &[],
+            None,
             &dest,
             &limits(),
             Some("fixture-only-not-a-secret"),
@@ -285,6 +365,7 @@ mod tests {
             &ZipProvider::new(),
             archive.to_string_lossy().as_ref(),
             &[],
+            None,
             &base.join("out"),
             &tight,
             None,

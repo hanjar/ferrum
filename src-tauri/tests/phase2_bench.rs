@@ -161,6 +161,7 @@ fn bench_pack_extract_small_many() {
     let req = ArchiveExtractRequest {
         archive_path: work.join("small.zip").to_string_lossy().into_owned(),
         member_paths: vec![],
+        base_member_path: None,
         destination_path: work.join("out-zip").to_string_lossy().into_owned(),
         conflict: ArchiveConflictPolicy::Overwrite,
         limits: limits(10_000),
@@ -228,6 +229,7 @@ fn bench_pack_extract_large() {
     let req = ArchiveExtractRequest {
         archive_path: work.join("big.zip").to_string_lossy().into_owned(),
         member_paths: vec![],
+        base_member_path: None,
         destination_path: work.join("out-big").to_string_lossy().into_owned(),
         conflict: ArchiveConflictPolicy::Overwrite,
         limits: limits(10),

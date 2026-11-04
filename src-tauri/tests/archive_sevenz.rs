@@ -117,6 +117,7 @@ fn extract_req(path: &Path, dest: &Path, password: Option<&str>) -> ArchiveExtra
     ArchiveExtractRequest {
         archive_path: path.to_string_lossy().into_owned(),
         member_paths: vec![],
+        base_member_path: None,
         destination_path: dest.to_string_lossy().into_owned(),
         conflict: ArchiveConflictPolicy::Overwrite,
         limits: ArchiveLimits {
@@ -415,6 +416,66 @@ fn write_sevenz(path: &Path, entries: &[(&str, bool, Option<&[u8]>)]) {
         }
     }
     writer.finish().unwrap();
+}
+
+// ── FER-594: base folder (7z) ────────────────────────────────────────────
+
+#[test]
+fn sevenz_base_folder_lands_selection_directly_in_destination() {
+    let dir = temp("7z-base");
+    let arc_path = dir.join("b.7z");
+    write_sevenz(
+        &arc_path,
+        &[
+            ("a", true, None),
+            ("a/b", true, None),
+            ("a/b/x.txt", false, Some(b"x")),
+            ("a/b/sub", true, None),
+            ("a/b/sub/y.txt", false, Some(b"y")),
+            ("a/other.txt", false, Some(b"o")),
+        ],
+    );
+    let provider = SevenZProvider::new();
+
+    let dest = dir.join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mut req = extract_req(&arc_path, &dest, None);
+    req.member_paths = vec![
+        MemberPath::parse("a/b/x.txt").unwrap(),
+        MemberPath::parse("a/b/sub").unwrap(),
+    ];
+    req.base_member_path = Some(MemberPath::parse("a/b").unwrap());
+    provider.extract(&req, &mut |_| true).unwrap();
+    assert_eq!(std::fs::read(dest.join("x.txt")).unwrap(), b"x");
+    assert_eq!(std::fs::read(dest.join("sub").join("y.txt")).unwrap(), b"y");
+    assert!(!dest.join("a").exists());
+    assert!(!dest.join("other.txt").exists());
+
+    // No base: today's full paths.
+    let dest2 = dir.join("out2");
+    std::fs::create_dir_all(&dest2).unwrap();
+    req.destination_path = dest2.to_string_lossy().into_owned();
+    req.base_member_path = None;
+    provider.extract(&req, &mut |_| true).unwrap();
+    assert!(dest2.join("a").join("b").join("x.txt").exists());
+
+    // A selection outside the base, or no selection, is refused with nothing written.
+    for members in [vec!["a/b/x.txt", "a/other.txt"], vec![]] {
+        let dest3 = dir.join("out3");
+        let _ = std::fs::remove_dir_all(&dest3);
+        std::fs::create_dir_all(&dest3).unwrap();
+        req.destination_path = dest3.to_string_lossy().into_owned();
+        req.member_paths = members
+            .iter()
+            .map(|m| MemberPath::parse(m).unwrap())
+            .collect();
+        req.base_member_path = Some(MemberPath::parse("a/b").unwrap());
+        let err = provider
+            .extract(&req, &mut |_| true)
+            .expect_err("must refuse");
+        assert_eq!(err.code, Code::InvalidMemberPath);
+        assert_eq!(std::fs::read_dir(&dest3).unwrap().count(), 0);
+    }
 }
 
 #[test]

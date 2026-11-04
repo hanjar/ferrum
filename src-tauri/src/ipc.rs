@@ -1345,6 +1345,9 @@ pub struct ArchiveExtractPreflightRequest {
     /// identical to `ArchiveExtractRequest.member_paths`.
     #[serde(default)]
     pub member_paths: Vec<crate::archive_contract::MemberPath>,
+    /// FER-594: archive folder the selection lives in; see `ArchiveExtractRequest`.
+    #[serde(default)]
+    pub base_member_path: Option<crate::archive_contract::MemberPath>,
     pub destination_path: String,
     /// FER-504: the password already unlocked this archive in the UI, so the
     /// preflight can list header-encrypted RAR/7z too. Memory-only.
@@ -1357,6 +1360,7 @@ impl std::fmt::Debug for ArchiveExtractPreflightRequest {
         f.debug_struct("ArchiveExtractPreflightRequest")
             .field("archive_path", &self.archive_path)
             .field("member_paths", &self.member_paths)
+            .field("base_member_path", &self.base_member_path)
             .field("destination_path", &self.destination_path)
             .field(
                 "password",
@@ -1386,6 +1390,7 @@ pub async fn archive_extract_preflight(
             provider.as_ref(),
             &job_archive_path,
             &request.member_paths,
+            request.base_member_path.as_ref(),
             Path::new(&request.destination_path),
             &limits,
             request.password.as_deref(),
@@ -3954,6 +3959,7 @@ mod preflight_request_debug_tests {
         let mut request = ArchiveExtractPreflightRequest {
             archive_path: r"C:\a\enc.rar".into(),
             member_paths: Vec::new(),
+            base_member_path: None,
             destination_path: r"C:\out".into(),
             password: Some("hunter2-secret".into()),
         };

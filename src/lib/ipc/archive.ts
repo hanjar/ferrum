@@ -81,6 +81,7 @@ export async function archiveExtract(
   conflict: 'skip' | 'overwrite' | 'rename' | 'overwriteOlder',
   password?: string,
   requestId?: string,
+  baseMemberPath?: string,
 ): Promise<void> {
   if (!isInTauri()) throw unsupported();
   await wrap(
@@ -89,6 +90,8 @@ export async function archiveExtract(
       request: {
         archivePath,
         memberPaths,
+        // FER-594: archive folder the selection lives in; omitted = full member paths.
+        ...(baseMemberPath ? { baseMemberPath } : {}),
         destinationPath,
         conflict,
         password: password ?? null,
@@ -323,11 +326,18 @@ export async function archiveExtractPreflight(
   memberPaths: string[],
   destinationPath: string,
   password?: string,
+  baseMemberPath?: string,
 ): Promise<ArchivePreflightReport> {
   if (!isInTauri()) throw unsupported();
   return wrap(
     invoke('archive_extract_preflight', {
-      request: { archivePath, memberPaths, destinationPath, password: password ?? null },
+      request: {
+        archivePath,
+        memberPaths,
+        ...(baseMemberPath ? { baseMemberPath } : {}),
+        destinationPath,
+        password: password ?? null,
+      },
     }),
   );
 }

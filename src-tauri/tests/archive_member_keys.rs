@@ -157,6 +157,7 @@ fn extract_all(provider: &dyn ArchiveProvider, archive: &Path, dest: &Path) {
             &ArchiveExtractRequest {
                 archive_path: archive.to_string_lossy().into_owned(),
                 member_paths: vec![],
+                base_member_path: None,
                 destination_path: dest.to_string_lossy().into_owned(),
                 conflict: ArchiveConflictPolicy::Overwrite,
                 password: None,
@@ -227,6 +228,7 @@ fn zip_traversal_directory_entries_stay_rejected() {
             &ArchiveExtractRequest {
                 archive_path: archive.to_string_lossy().into_owned(),
                 member_paths: vec![],
+                base_member_path: None,
                 destination_path: dest.to_string_lossy().into_owned(),
                 conflict: ArchiveConflictPolicy::Overwrite,
                 password: None,

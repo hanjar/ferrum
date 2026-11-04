@@ -385,6 +385,7 @@ impl std::fmt::Debug for ArchiveExtractRequest {
         f.debug_struct("ArchiveExtractRequest")
             .field("archive_path", &self.archive_path)
             .field("member_paths", &self.member_paths)
+            .field("base_member_path", &self.base_member_path)
             .field("destination_path", &self.destination_path)
             .field("conflict", &self.conflict)
             .field("limits", &self.limits)
@@ -491,6 +492,12 @@ pub struct ArchiveExtractRequest {
     pub archive_path: String,
     /// Empty selects every member. Nonempty selects exact paths/subtrees.
     pub member_paths: Vec<MemberPath>,
+    /// FER-594: archive folder the selection was picked from. When set (and not empty), every
+    /// extracted path is made relative to it, so the selected items land directly in the
+    /// destination instead of recreating the folders above them. Every `member_paths` entry
+    /// must lie strictly under it; `None`/empty keeps the full member paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_member_path: Option<MemberPath>,
     pub destination_path: String,
     pub conflict: ArchiveConflictPolicy,
     pub limits: ArchiveLimits,
@@ -937,6 +944,7 @@ mod debug_redaction_tests {
         let extract = ArchiveExtractRequest {
             archive_path: r"C:\a\enc.rar".into(),
             member_paths: Vec::new(),
+            base_member_path: None,
             destination_path: r"C:\out".into(),
             conflict: ArchiveConflictPolicy::Skip,
             limits: ArchiveLimits {

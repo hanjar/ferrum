@@ -380,6 +380,11 @@ impl ArchiveProvider for RarProvider {
                 modified_ms: None, // DOS time conversion skipped in F2-06
             })
             .collect();
+        // FER-594: refuse a base that does not contain the whole selection (nothing written yet).
+        let base = crate::archive_extract::effective_base(
+            request.base_member_path.as_ref(),
+            &request.member_paths,
+        )?;
         let selected = |raw: &str| {
             request.member_paths.is_empty()
                 || request
@@ -393,7 +398,8 @@ impl ArchiveProvider for RarProvider {
             .filter(|(i, _)| selected(&names[*i]))
             .map(|(_, e)| e.clone())
             .collect();
-        let plan = crate::archive_extract::preflight(&selected_entries, &request.limits)?;
+        let plan =
+            crate::archive_extract::preflight_with_base(&selected_entries, &request.limits, base)?;
 
         let op_id = format!("rar-extract-{}", std::process::id());
         let total = plan

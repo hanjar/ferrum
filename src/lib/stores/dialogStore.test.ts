@@ -234,6 +234,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       [],
       'D:\\Backup',
       undefined,
+      undefined,
     );
     expect(archiveExtractMock).toHaveBeenCalledWith(
       'C:\\Projects\\sample.zip',
@@ -242,6 +243,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'skip',
       undefined,
       expect.any(String),
+      undefined,
     );
     expect(dialogs.current).toBeNull();
   });
@@ -272,6 +274,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'overwrite',
       undefined,
       expect.any(String),
+      undefined,
     );
     expect(dialogs.current).toBeNull();
   });
@@ -323,6 +326,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       [],
       'D:\\Backup',
       'pw1',
+      undefined,
     );
     expect(archiveExtractMock).toHaveBeenCalledTimes(1);
     expect(archiveExtractMock).toHaveBeenCalledWith(
@@ -332,6 +336,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'skip',
       'pw1',
       expect.any(String),
+      undefined,
     );
     expect(dialogs.current).toBeNull();
   });
@@ -363,6 +368,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'skip',
       'pw1',
       expect.any(String),
+      undefined,
     );
     expect(dialogs.current).toBeNull();
   });
@@ -413,6 +419,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'rename',
       undefined,
       expect.stringMatching(/^req-/),
+      undefined,
     ]);
     expect(archiveExtractMock.mock.calls[1]).toEqual([
       'C:\\Projects\\two.zip',
@@ -421,6 +428,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'rename',
       undefined,
       expect.stringMatching(/^req-/),
+      undefined,
     ]);
   });
 
@@ -442,6 +450,7 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       ['docs/readme.md'],
       'D:\\Backup',
       undefined,
+      'docs',
     );
     dialogs.confirmExtractConflicts('skip');
     await flush();
@@ -452,7 +461,66 @@ describe('FER-368 unpack flow (Alt+F9): D21 one-ask conflict dialog', () => {
       'skip',
       undefined,
       expect.any(String),
+      'docs',
     );
+  });
+
+  // FER-594: the selected items land directly in the target; only the folder being browsed
+  // is dropped from the written paths.
+  it('copy from an archive subfolder sends the parent folder as the base', async () => {
+    register(0, 'C:\\arc', [
+      'C:\\arc\\sample.zip\\arsip\\export\\a.md',
+      'C:\\arc\\sample.zip\\arsip\\export\\sub',
+    ]);
+    register(1, 'D:\\Backup');
+    archivePreflightMock.mockResolvedValue({ totalFiles: 2, totalBytes: 1, conflicts: [] });
+    archiveExtractMock.mockResolvedValue(undefined);
+    await dialogs.beginCopyFlow();
+    await flush();
+    expect(archivePreflightMock).toHaveBeenCalledWith(
+      'C:\\arc\\sample.zip',
+      ['arsip/export/a.md', 'arsip/export/sub'],
+      'D:\\Backup',
+      undefined,
+      'arsip/export',
+    );
+    expect(archiveExtractMock).toHaveBeenCalledWith(
+      'C:\\arc\\sample.zip',
+      ['arsip/export/a.md', 'arsip/export/sub'],
+      'D:\\Backup',
+      'skip',
+      undefined,
+      expect.any(String),
+      'arsip/export',
+    );
+  });
+
+  it('copy from the archive root sends no base', async () => {
+    register(0, 'C:\\arc', ['C:\\arc\\sample.zip\\readme.md', 'C:\\arc\\sample.zip\\docs']);
+    register(1, 'D:\\Backup');
+    archivePreflightMock.mockResolvedValue({ totalFiles: 2, totalBytes: 1, conflicts: [] });
+    archiveExtractMock.mockResolvedValue(undefined);
+    await dialogs.beginCopyFlow();
+    await flush();
+    expect(archiveExtractMock).toHaveBeenCalledWith(
+      'C:\\arc\\sample.zip',
+      ['readme.md', 'docs'],
+      'D:\\Backup',
+      'skip',
+      undefined,
+      expect.any(String),
+      undefined,
+    );
+  });
+
+  it('a selection spread over different folders sends no base (full paths, safe)', async () => {
+    register(0, 'C:\\arc', ['C:\\arc\\sample.zip\\a\\x.md', 'C:\\arc\\sample.zip\\b\\y.md']);
+    register(1, 'D:\\Backup');
+    archivePreflightMock.mockResolvedValue({ totalFiles: 2, totalBytes: 1, conflicts: [] });
+    archiveExtractMock.mockResolvedValue(undefined);
+    await dialogs.beginCopyFlow();
+    await flush();
+    expect(archiveExtractMock.mock.calls[0]![6]).toBeUndefined();
   });
 });
 

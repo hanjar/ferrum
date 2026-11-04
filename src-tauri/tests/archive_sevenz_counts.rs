@@ -609,6 +609,7 @@ fn extract(path: &Path, dest: &Path) -> Result<(), ArchiveError> {
         &ArchiveExtractRequest {
             archive_path: path.to_string_lossy().into_owned(),
             member_paths: Vec::new(),
+            base_member_path: None,
             destination_path: dest.to_string_lossy().into_owned(),
             conflict: ArchiveConflictPolicy::Overwrite,
             limits: ArchiveLimits {
