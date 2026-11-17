@@ -89,15 +89,17 @@ describe('recentStore (FER-598)', () => {
     expect(ipc.recentNewItems).toHaveBeenLastCalledWith(['D:\\Work'], 14, 200);
   });
 
-  it('a private session hides Ferrum items and new items at once, and reads none of them', async () => {
+  it('a private session hides every source at once, and reads none of them', async () => {
     await recentStore.refresh();
     activity.privateSession = true;
-    expect(recentStore.items.map((i) => i.path)).toEqual(['c:\\docs\\A.TXT', 'D:\\Other\\b.pdf']);
+    expect(recentStore.items).toEqual([]);
     activityRecent.mockClear();
     ipc.recentNewItems.mockClear();
+    ipc.recentWindows.mockClear();
     await recentStore.refresh();
     expect(activityRecent).not.toHaveBeenCalled();
     expect(ipc.recentNewItems).not.toHaveBeenCalled();
+    expect(ipc.recentWindows).not.toHaveBeenCalled();
     activity.privateSession = false;
   });
 

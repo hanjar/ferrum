@@ -130,11 +130,13 @@ describe('Ctrl+K Recent files group (FER-598)', () => {
     expect(labels(pal, 'Recent files')).toHaveLength(5);
   });
 
-  it('a private session hides Ferrum and new items but keeps Windows Recent', async () => {
+  it('a private session hides every recent source and reads none', async () => {
     activity.privateSession = true;
     const pal = await openPalette();
-    expect(labels(pal, 'Recent files')).toEqual(['SHARED.txt', 'budget-2026.xlsx']);
+    expect(group(pal, 'Recent files')).toBeNull();
     expect(ipc.activityRecent).not.toHaveBeenCalled();
+    expect(recentIpc.recentWindows).not.toHaveBeenCalled();
+    expect(recentIpc.recentNewItems).not.toHaveBeenCalled();
   });
 
   it('"Include Windows Recent" off hides those items and never reads the folder', async () => {

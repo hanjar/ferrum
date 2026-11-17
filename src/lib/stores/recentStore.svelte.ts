@@ -1,7 +1,7 @@
 /**
  * FER-598: reactive cache of the recent files and folders, merged from three sources:
  *  - Ferrum's own Activity history (hidden in a private session, like the sidebar),
- *  - Windows Recent (`shell:recent`), only while "Include Windows Recent" is on,
+ *  - Windows Recent (`shell:recent`), only while "Include Windows Recent" is on and not private,
  *  - newly added items of the watched folders, only while that setting is on and not private.
  *
  * The raw per-source lists are cached; the privacy / toggle filters are applied when reading, so
@@ -56,7 +56,7 @@ class RecentStore {
   get items(): RecentItem[] {
     const lists: RecentItem[][] = [];
     if (!activity.privateSession) lists.push(this.ferrum);
-    if (ui.includeWindowsRecent) lists.push(this.windows);
+    if (ui.includeWindowsRecent && !activity.privateSession) lists.push(this.windows);
     if (ui.recentNewItems && !activity.privateSession) lists.push(this.added);
     return mergeRecent(lists, RECENT_CAP);
   }
@@ -71,7 +71,7 @@ class RecentStore {
     const seq = ++this.#seq;
     this.loading = true;
     const privateNow = activity.privateSession;
-    const wantWindows = ui.includeWindowsRecent;
+    const wantWindows = ui.includeWindowsRecent && !privateNow;
     const wantAdded = ui.recentNewItems && !privateNow;
     const days = ui.recentNewDays;
     const configured = ui.recentWatchFolders;
