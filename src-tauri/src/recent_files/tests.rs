@@ -307,7 +307,7 @@ fn windows_recent_roundtrip_with_real_lnk_files() {
     assert_eq!(created, Some(true), "could not create .lnk files");
     std::fs::write(dir.join("garbage.lnk"), b"not a shortcut").unwrap();
 
-    let blocked = vec![blocked_dir.to_string_lossy().into_owned()];
+    let blocked = expand_blocked_roots(vec![blocked_dir.to_string_lossy().into_owned()]);
     let items = read_windows_recent(&dir, &blocked, 50);
     let mut names: Vec<_> = items.iter().map(|i| i.name.clone()).collect();
     names.sort();
@@ -343,4 +343,62 @@ fn real_recent_folder_is_readable_and_filtered() {
         assert!(sanitize_abs_path(&item.path, &[]).is_some(), "{item:?}");
         assert_eq!(item.source, "windows");
     }
+}
+
+#[cfg(windows)]
+fn short_form(path: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut buf = vec![0u16; 4096];
+    let n =
+        unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    (n > 0 && n < buf.len()).then(|| String::from_utf16_lossy(&buf[..n]))
+}
+
+#[cfg(windows)]
+#[test]
+fn blocked_root_in_8_3_short_form_still_filters_long_form_targets() {
+    // A directory whose long name forces a distinct 8.3 alias, so the short and long forms differ.
+    let base = temp_dir("shortroot");
+    let blocked_dir = base.join("Ferrum Blocked Directory Long Name");
+    std::fs::create_dir(&blocked_dir).unwrap();
+    let blocked_file = blocked_dir.join("secret.json");
+    std::fs::write(&blocked_file, "x").unwrap();
+    let Some(short) = short_form(&blocked_dir) else {
+        let _ = std::fs::remove_dir_all(&base);
+        return; // 8.3 name generation is disabled on this volume: nothing to test
+    };
+    if norm_key(&short) == norm_key(blocked_dir.to_str().unwrap()) {
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    let dir = temp_dir("shortlnk");
+    let created = com::with_apartment(|| {
+        com::write_link(&dir.join("secret.json.lnk"), blocked_file.to_str().unwrap())
+    });
+    assert_eq!(created, Some(true));
+    // Unexpanded short root would not match; expanded it must.
+    let blocked = expand_blocked_roots(vec![short.clone()]);
+    assert!(blocked.len() == 2, "{blocked:?}");
+    assert!(read_windows_recent(&dir, &blocked, 50).is_empty());
+    // The long-form root is unchanged (only the original is kept).
+    let long = expand_blocked_roots(vec![blocked_dir.to_string_lossy().into_owned()]);
+    assert_eq!(long.len(), 1);
+    assert!(read_windows_recent(&dir, &long, 50).is_empty());
+    for d in [&dir, &base] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn expand_blocked_roots_keeps_originals_and_ignores_missing_or_non_drive_roots() {
+    let roots = vec![
+        r"C:\definitely\missing\dir".to_owned(),
+        r"\srv\share".to_owned(),
+    ];
+    assert_eq!(expand_blocked_roots(roots.clone()), roots);
 }

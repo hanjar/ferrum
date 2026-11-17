@@ -229,6 +229,43 @@ pub fn now_ms() -> i64 {
     ms_of(SystemTime::now())
 }
 
+/// Long form of a LOCAL root (`GetLongPathNameW`), or `None` when it fails, is unchanged or the
+/// root is not a drive path. Only ever used on blocked roots, never on link targets: it touches the
+/// disk, and a target on a dead network share must not be stat'ed.
+#[cfg(windows)]
+fn long_form(root: &str) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    if !is_drive_abs(&root.replace('/', "\\")) {
+        return None;
+    }
+    let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 4096];
+    // SAFETY: `wide` is NUL-terminated; the API writes at most `buf.len()` units.
+    let n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return None;
+    }
+    let long = String::from_utf16(&buf[..n]).ok()?;
+    (norm_key(&long) != norm_key(root)).then_some(long)
+}
+
+#[cfg(not(windows))]
+fn long_form(_root: &str) -> Option<String> {
+    None
+}
+
+/// Blocked roots as given plus their long (non 8.3) form, so a root written in short form still
+/// matches the long-form targets that links store. Falls back to the original on failure.
+pub fn expand_blocked_roots(roots: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(roots.len() * 2);
+    for root in roots {
+        let long = long_form(&root);
+        out.push(root);
+        out.extend(long);
+    }
+    out
+}
+
 // ── Windows Recent ───────────────────────────────────────────────────────────
 
 /// Enumerate `*.lnk` files (top level only), newest `limit` by last-write time.

@@ -2586,7 +2586,7 @@ fn recent_blocked_roots(app: &AppHandle, activity: &State<'_, ActivityHandle>) -
     {
         roots.extend(excluded);
     }
-    roots
+    crate::recent_files::expand_blocked_roots(roots)
 }
 
 /// Windows Recent (`shell:recent`): files opened in other apps. Read-only, worker thread, never
