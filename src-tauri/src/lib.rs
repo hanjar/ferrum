@@ -57,6 +57,7 @@ pub mod preview_image;
 pub mod profile;
 pub mod properties;
 pub mod protected_dirs;
+pub mod recent_files;
 pub mod recycle_gate;
 pub mod rename_batch;
 pub mod search;
@@ -206,6 +207,10 @@ pub fn run() {
             ipc::activity_set_recording,
             ipc::activity_forget,
             ipc::activity_exclude,
+            ipc::recent_windows,
+            ipc::recent_default_folders,
+            ipc::recent_new_items,
+            ipc::recent_validate_folders,
             ipc::activity_clear,
             ipc::activity_favorites,
             ipc::activity_add_favorite,

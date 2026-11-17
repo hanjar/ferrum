@@ -64,6 +64,15 @@ pub struct Prefs {
     /// FerrumIndexer journal proves unchanged. Opt-in (security review):
     /// off by default.
     pub sync_journal_skip: bool,
+    /// FER-598: include Windows Recent (`shell:recent`) in the Recent files list. On by default;
+    /// off means the folder is not read at all.
+    pub include_windows_recent: bool,
+    /// FER-598: include newly added items of the watched folders. On by default.
+    pub recent_new_items: bool,
+    /// FER-598: watched folders. `None` (key absent) = the user's Downloads folder.
+    pub recent_watch_folders: Option<Vec<String>>,
+    /// FER-598: how many days back a new item counts as recent (1, 3, 7, 14 or 30).
+    pub recent_new_days: u32,
     pub confirm_before_deleting: bool,
     pub verify_after_copy: bool,
     /// JSON key is `copyBufferKiB` (the frontend contract); camelCase alone
@@ -209,6 +218,10 @@ impl Default for Prefs {
             address_own_row: false,
             indexer_folder_sizes: false,
             sync_journal_skip: false,
+            include_windows_recent: true,
+            recent_new_items: true,
+            recent_watch_folders: None,
+            recent_new_days: 7,
             confirm_before_deleting: true,
             verify_after_copy: false,
             copy_buffer_kib: 1024,
@@ -353,6 +366,14 @@ impl Prefs {
         self.copy_threads = self.copy_threads.min(COPY_THREADS_MAX);
         if !(1..=8760).contains(&self.disk_usage_cache_warn_hours) {
             self.disk_usage_cache_warn_hours = 24;
+        }
+        if !matches!(self.recent_new_days, 1 | 3 | 7 | 14 | 30) {
+            self.recent_new_days = 7;
+        }
+        if let Some(folders) = &mut self.recent_watch_folders {
+            // Same rules as the `recent_*` commands (own data folders are filtered there, where
+            // the app paths are known): absolute, no device path, de-duplicated, capped.
+            *folders = crate::recent_files::validate_watch_folders(folders, &[]);
         }
         if !matches!(self.copy_priority.as_str(), "normal" | "background") {
             self.copy_priority = "normal".into();
@@ -545,6 +566,28 @@ mod tests {
     }
 
     #[test]
+    fn recent_prefs_default_on_and_are_validated() {
+        let d = Prefs::default();
+        assert!(d.include_windows_recent && d.recent_new_items);
+        assert_eq!(d.recent_watch_folders, None); // absent = Downloads (resolved by the UI)
+        assert_eq!(d.recent_new_days, 7);
+        let dir = temp("recent");
+        fs::write(
+            dir.join(FILE_NAME),
+            r#"{"recentNewDays":5,"recentWatchFolders":["C:\\Work","relative","\\\\?\\C:\\x","C:\\Work"],"includeWindowsRecent":false}"#,
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.recent_new_days, 7); // 5 is not an allowed choice
+        assert_eq!(
+            loaded.recent_watch_folders,
+            Some(vec![r"C:\Work".to_owned()])
+        );
+        assert!(!loaded.include_windows_recent);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn address_own_row_defaults_off_and_old_configs_load_without_it() {
         assert!(!Prefs::default().address_own_row);
         let dir = temp("ownrow");
@@ -594,6 +637,10 @@ mod tests {
             address_own_row: true,
             indexer_folder_sizes: true,
             sync_journal_skip: true,
+            include_windows_recent: true,
+            recent_new_items: true,
+            recent_watch_folders: None,
+            recent_new_days: 7,
             confirm_before_deleting: false,
             verify_after_copy: true,
             copy_buffer_kib: 2048,
@@ -738,6 +785,10 @@ mod tests {
                 address_own_row: false,
                 indexer_folder_sizes: false,
                 sync_journal_skip: false,
+                include_windows_recent: true,
+                recent_new_items: true,
+                recent_watch_folders: None,
+                recent_new_days: 7,
                 confirm_before_deleting: false,
                 verify_after_copy: false,
                 copy_buffer_kib: 0,

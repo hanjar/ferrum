@@ -643,6 +643,15 @@ impl ActivityStore {
         )
     }
 
+    /// FER-598: the exclusion roots, so other recent-file sources can honour them.
+    pub fn exclusion_roots(&self) -> rusqlite::Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT root FROM activity_exclusions")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     pub fn recording_enabled(&self) -> rusqlite::Result<bool> {
         self.connection.query_row(
             "SELECT recording_enabled FROM activity_state WHERE id = 1",
