@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+See [docs/release/v0.2.6/CHANGELOG.md](docs/release/v0.2.6/CHANGELOG.md). Release notes: [docs/release/v0.2.6/RELEASE-NOTES.md](docs/release/v0.2.6/RELEASE-NOTES.md).
+
 ## 0.2.5
 
 See [docs/release/v0.2.5/CHANGELOG.md](docs/release/v0.2.5/CHANGELOG.md). Release notes: [docs/release/v0.2.5/RELEASE-NOTES.md](docs/release/v0.2.5/RELEASE-NOTES.md).
