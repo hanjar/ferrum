@@ -30,6 +30,8 @@ export interface PaneApi {
   readonly path: string;
   /** True while the pane's current tab has back history (Go Back, Alt+Left). */
   readonly canGoBack?: boolean;
+  /** FER-598: the pane shows a read-only virtual view (Recent files and folders): no writes. */
+  readonly readOnlyView?: boolean;
   /** Operation targets: the marked rows, else the cursor row (FER-492). */
   selectedPaths(): string[];
   /** Only the explicitly marked rows (empty when nothing is marked). */

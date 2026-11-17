@@ -2581,10 +2581,10 @@ fn recent_blocked_roots(app: &AppHandle, activity: &State<'_, ActivityHandle>) -
     for dir in own.into_iter().flatten() {
         roots.push(dir.to_string_lossy().into_owned());
     }
-    if let Some(service) = activity.0.as_ref() {
-        if let Ok(excluded) = service.exclusion_roots() {
-            roots.extend(excluded);
-        }
+    if let Some(service) = activity.0.as_ref()
+        && let Ok(excluded) = service.exclusion_roots()
+    {
+        roots.extend(excluded);
     }
     roots
 }

@@ -179,6 +179,12 @@ class UiState {
   indexerFolderSizes: boolean = $state(false);
   /** FER-477b: sync may skip content reads the indexer journal proves unnecessary (opt-in). */
   syncJournalSkip: boolean = $state(false);
+  /** FER-598: Recent files sources (Settings). Windows Recent and watched folders default ON. */
+  includeWindowsRecent: boolean = $state(true);
+  recentNewItems: boolean = $state(true);
+  /** null = the Downloads folder (resolved by the backend); otherwise the owner's list. */
+  recentWatchFolders: string[] | null = $state(null);
+  recentNewDays: number = $state(7);
   /** FER-505/511: display-only mirror of the Rar.exe path stored on disk. Never persisted by
    *  the webview — it changes only through archive_rar_tool_set_path (native confirmation). */
   rarExePath: string | null = $state(null);

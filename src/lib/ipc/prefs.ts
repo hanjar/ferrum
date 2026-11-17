@@ -134,6 +134,14 @@ export interface Prefs extends Partial<FileOperationPrefs> {
   addressOwnRow?: boolean;
   /** FER-477a: folder sizes from the FerrumIndexer in the Size column (absent = false). */
   indexerFolderSizes?: boolean;
+  /** FER-598: include Windows Recent in the Recent files list (absent = true). */
+  includeWindowsRecent?: boolean;
+  /** FER-598: include newly added items of the watched folders (absent = true). */
+  recentNewItems?: boolean;
+  /** FER-598: watched folders; absent/null = the Downloads folder. */
+  recentWatchFolders?: string[] | null;
+  /** FER-598: age window for new items in days (1, 3, 7, 14, 30; absent = 7). */
+  recentNewDays?: number;
   /** FER-477b: sync may skip reading files the indexer journal proves unchanged (absent = false). */
   syncJournalSkip?: boolean;
   /** FER-505: path to WinRAR Rar.exe (absent/null = feature disabled).
@@ -236,6 +244,10 @@ export function defaultPrefs(): Prefs {
     addressOwnRow: false,
     indexerFolderSizes: false,
     syncJournalSkip: false,
+    includeWindowsRecent: true,
+    recentNewItems: true,
+    recentWatchFolders: null,
+    recentNewDays: 7,
     rarExePath: null,
     rarExeFingerprint: null,
     preview: { ...PREVIEW_DEFAULTS },

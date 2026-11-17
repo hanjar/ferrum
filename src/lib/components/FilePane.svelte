@@ -45,6 +45,7 @@
   import { previewStore } from '../stores/previewStore.svelte';
   import { compareStore } from '../stores/compareStore.svelte';
   import { branch } from '../stores/branchStore.svelte';
+  import { RECENT_LABEL, leaveRecent, showRecent } from '../stores/recentView.svelte';
   import { comments } from '../stores/commentStore.svelte';
   import {
     beginInternalDrag,
@@ -119,6 +120,9 @@
   // sort/filter/selection and the pane's tab/history stay exactly the same.
   const branchActive = $derived(branch.activeFor(paneId));
   const branchRows = $derived(branchActive ? branch.rows(paneId) : []);
+  // FER-598: the Recent files and folders view (read-only; Backspace / Back leaves it).
+  const recentActive = $derived(branch.isRecent(paneId));
+  const shownCrumbs = $derived(recentActive ? [{ label: RECENT_LABEL, path: store.path }] : crumbs);
   // View pipeline (F2-15): sort the full listing, apply the Show filter
   // preset, then the query/hidden filter; reversed flips the final display
   // order. F2-18's Hide Same names filter last. Selection and cursor
@@ -347,7 +351,10 @@
         return store.path;
       },
       get canGoBack() {
-        return store.canBack;
+        return recentActive || store.canBack;
+      },
+      get readOnlyView() {
+        return recentActive;
       },
       // Operation targets: the marks, else the cursor row (FER-492).
       selectedPaths: () => effectiveSelection(),
@@ -363,6 +370,10 @@
           : undefined;
       },
       refresh: () => {
+        if (recentActive) {
+          showRecent(paneId, store.path); // reload the sources; the view stays open
+          return;
+        }
         selected.clear();
         anchor = undefined; // FER-489: the cursor survives a refresh (reconcileCursor)
         void store.refresh();
@@ -397,7 +408,10 @@
         }
       },
       closeCurrentTab: () => void store.closeTab(store.current),
-      goUp: () => void store.goUp(),
+      goUp: () => {
+        if (leaveRecent(paneId)) return;
+        void store.goUp();
+      },
       openCursorEntry: () => {
         const target = visible.find((r) => r.entry.path === cursor);
         if (!target) return;
@@ -455,6 +469,7 @@
         if (cursorPath !== undefined) cursor = cursorPath;
       },
       back: () => {
+        if (leaveRecent(paneId)) return;
         selected.clear();
         cursor = undefined;
         anchor = undefined;
@@ -472,6 +487,7 @@
       revealPath: (path: string) => {
         const parent = parentOf(path);
         if (!parent) return;
+        branch.exit(paneId);
         selected.clear();
         cursor = undefined;
         anchor = undefined;
@@ -546,6 +562,7 @@
   function rowActivate(row: Row) {
     if ((row.entry.isDir && !row.entry.isSymlink) || isArchiveFile(row.entry.name)) {
       pendingFocus = true;
+      branch.exit(paneId);
       selected.clear();
       cursor = undefined;
       void store.open(row.entry.path);
@@ -758,6 +775,8 @@
     if (!isInternalDrag(e)) return;
     const origin = dragOriginPane();
     if (origin === null || origin === paneId) return;
+    // FER-598: the Recent view is read-only; nothing can be dropped into it.
+    if (recentActive) return;
     const paths = readDragPaths(e);
     const move = e.shiftKey;
     e.preventDefault();
@@ -818,7 +837,7 @@
       onnew={() => void store.newTab()}
     />
     <PaneToolbar
-      {crumbs}
+      crumbs={shownCrumbs}
       path={store.path}
       bind:editing={addressEditing}
       onnavigate={navigate}
@@ -826,11 +845,15 @@
       dim={!active}
       filterValue={filterQ}
       onfilter={(q) => (filterQ = q)}
-      canBack={store.canBack}
+      canBack={store.canBack || recentActive}
       canFwd={store.canFwd}
-      onback={() => void store.back()}
+      onback={() => {
+        if (!leaveRecent(paneId)) void store.back();
+      }}
       onforward={() => void store.forward()}
-      onup={() => void store.goUp()}
+      onup={() => {
+        if (!leaveRecent(paneId)) void store.goUp();
+      }}
       oncrumb={navigate}
       onDiskUsage={() => duWorkspace.openFromPanes()}
     />
@@ -861,7 +884,9 @@
       onlistfocus={ensureCursor}
       onrowclick={rowClick}
       onrowactivate={rowActivate}
-      onup={() => void store.goUp()}
+      onup={() => {
+        if (!leaveRecent(paneId)) void store.goUp();
+      }}
     />
     {#if branchActive && branch.isLoading(paneId)}
       <button type="button" class="branchCancel" onclick={() => branch.cancel(paneId)}>
@@ -870,7 +895,7 @@
     {/if}
     <PaneStatusBar
       status={statusText}
-      readonly={inArchive}
+      readonly={inArchive || recentActive}
       drive={driveStatus.driveFor(store.path)}
     />
   </div>

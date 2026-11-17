@@ -357,9 +357,11 @@ pub(crate) mod com {
     // vtable slots. IUnknown 0..=2; IShellLinkW follows; IPersistFile follows IPersist.
     const SLOT_RELEASE: usize = 2;
     const SLOT_SL_GET_PATH: usize = 3;
+    #[cfg(test)]
     const SLOT_SL_SET_PATH: usize = 20;
     const SLOT_QUERY_INTERFACE: usize = 0;
     const SLOT_PF_LOAD: usize = 5;
+    #[cfg(test)]
     const SLOT_PF_SAVE: usize = 6;
 
     /// An owned COM interface pointer, released on drop.
@@ -481,6 +483,7 @@ pub(crate) mod com {
     }
 
     /// Test helper: write a `.lnk` pointing at `target`.
+    #[cfg(test)]
     pub(crate) fn write_link(lnk: &Path, target: &str) -> bool {
         let Some(link) = new_shell_link() else {
             return false;

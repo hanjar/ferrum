@@ -17,6 +17,8 @@ export interface Row {
   kind: Kind;
   sizeText: string;
   modText: string;
+  /** FER-598: secondary text shown after the name (Recent view: parent folder and source). */
+  note?: string;
 }
 
 export interface TabState {

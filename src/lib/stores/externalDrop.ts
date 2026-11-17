@@ -50,12 +50,14 @@ export async function routeDrop(
   if (pane === null) return false;
   if (origin !== null) {
     if (origin === pane) return false;
+    if (paneById(pane)?.readOnlyView) return false; // FER-598: Recent view is read-only
     const folder = paneById(pane)?.path;
     if (!folder) return false;
     const shift = await dragShiftDown();
     dialogs.beginTransferTo(shift ? 'move' : 'copy', paths, folder);
     return true;
   }
+  if (paneById(pane)?.readOnlyView) return false;
   return handleExternalDrop(paths, paneById(pane)?.path ?? null);
 }
 

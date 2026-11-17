@@ -39,6 +39,7 @@
   import { formatSize } from '../format';
   import AiSettingsSection from './ai/AiSettingsSection.svelte';
   import HotlistSettingsSection from './HotlistSettingsSection.svelte';
+  import RecentSettingsSection from './RecentSettingsSection.svelte';
   import IndexerSettingsSection from './IndexerSettingsSection.svelte';
   import ArchiveSettingsSection from './ArchiveSettingsSection.svelte';
 
@@ -896,6 +897,7 @@
           </div>
         </div>
       {/if}
+      <RecentSettingsSection />
       <HotlistSettingsSection />
       <IndexerSettingsSection />
       <ArchiveSettingsSection />

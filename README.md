@@ -17,6 +17,7 @@ Features in Ferrum are designed with safety, reliability, and keyboard productiv
   - Session restoration across restarts (tabs, active locations, and pane layout).
   - Directory Tree panel, Places sidebar, and Directory Hotlist (`Ctrl+D`).
   - Branch View (`Ctrl+B`) showing all recursive files flat in a single pane.
+  - Recent files and folders (`Ctrl+E`): the active tab becomes a read-only list merged from Ferrum history, Windows Recent and newly added items of watched folders (Downloads by default); also the Recent files group in `Ctrl+K`.
 
 - **Fast & Safe File Operations**:
   - Non-blocking asynchronous queue with Background Transfer Manager (`Alt+B`), progress indicators, pause/cancel support, and batch conflict resolution (Skip, Overwrite, Auto-Rename).
