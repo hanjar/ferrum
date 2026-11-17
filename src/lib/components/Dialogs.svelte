@@ -392,12 +392,16 @@
     dialogs.close();
   }
 
+  /** F7: create a folder and put the cursor on it, so Enter opens it straight away. */
   async function submitMkdir(parent: string) {
     busy = true;
     try {
-      await createEntry('dir', parent, name);
+      const entry = await createEntry('dir', parent, name);
       dialogs.close();
-      activePane()?.refresh();
+      const pane = activePane();
+      pane?.refresh();
+      // Same as Shift+F4: path-based cursor set after refresh(); the re-list keeps it.
+      pane?.selectPaths?.([], entry.path);
     } catch (e) {
       fail(e);
     }
