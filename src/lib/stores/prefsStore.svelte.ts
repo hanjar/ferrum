@@ -86,6 +86,10 @@ function snapshot(session: unknown): string {
     ui.addressOwnRow,
     ui.indexerFolderSizes,
     ui.syncJournalSkip,
+    ui.includeWindowsRecent,
+    ui.recentNewItems,
+    ui.recentWatchFolders,
+    ui.recentNewDays,
     ...operationPrefs(),
     session,
   ]);
@@ -157,6 +161,14 @@ export class PrefsStore {
       ui.addressOwnRow = p.addressOwnRow === true;
       ui.indexerFolderSizes = p.indexerFolderSizes === true;
       ui.syncJournalSkip = p.syncJournalSkip === true;
+      ui.includeWindowsRecent = p.includeWindowsRecent !== false;
+      ui.recentNewItems = p.recentNewItems !== false;
+      ui.recentWatchFolders = Array.isArray(p.recentWatchFolders)
+        ? p.recentWatchFolders.filter((f): f is string => typeof f === 'string')
+        : null;
+      ui.recentNewDays = [1, 3, 7, 14, 30].includes(p.recentNewDays as number)
+        ? (p.recentNewDays as number)
+        : 7;
       // FER-511: display-only mirror of the path stored on disk. It is loaded from
       // load_prefs, updated after archive_rar_tool_set_path succeeds, and never persisted
       // by this store (see persist()).
@@ -273,6 +285,10 @@ export class PrefsStore {
       addressOwnRow: ui.addressOwnRow,
       indexerFolderSizes: ui.indexerFolderSizes,
       syncJournalSkip: ui.syncJournalSkip,
+      includeWindowsRecent: ui.includeWindowsRecent,
+      recentNewItems: ui.recentNewItems,
+      recentWatchFolders: ui.recentWatchFolders ? [...ui.recentWatchFolders] : null,
+      recentNewDays: ui.recentNewDays,
       // FER-511: rarExePath is deliberately NOT part of the saved payload — the backend keeps
       // the disk value anyway, and the path only changes through archive_rar_tool_set_path
       // (which pops a native confirmation the webview can neither draw nor answer).

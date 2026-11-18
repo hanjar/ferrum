@@ -30,6 +30,8 @@
   import { flattenHotlist, matchHotlist, type PaletteHotItem } from '../hotlist/paletteItems';
   import { dialog, roving } from '../dialogKit';
   import { recentCommands } from '../stores/recentCommands.svelte';
+  import { recentStore } from '../stores/recentStore.svelte';
+  import { matchRecentByName, sourcesText, type RecentItem } from '../recent/recentModel';
 
   type PaletteMode = 'all' | 'folder' | 'file' | 'command';
 
@@ -56,7 +58,7 @@
   let searchSeq = 0;
 
   type FlatItem = {
-    group: 'rcmd' | 'fav' | 'recent' | 'frequent' | 'hot' | 'loc' | 'cmd';
+    group: 'rcmd' | 'fav' | 'recent' | 'rfile' | 'frequent' | 'hot' | 'loc' | 'cmd';
     id: string;
     label: string;
     sub: string;
@@ -68,6 +70,8 @@
     /** Parent folder, used only to tell apart identically named results. */
     parent?: string;
     activate: () => void;
+    /** Ctrl+Enter: go to the folder with the item selected (Recent files). */
+    reveal?: () => void;
   };
 
   /** Last `n` path segments of a folder path, either separator style. */
@@ -132,9 +136,34 @@
           activate: () => openLocation(loc),
         });
       }
+      // FER-598: also match Windows Recent / newly added items by name (files opened outside
+      // Ferrum); the activity search above only knows Ferrum's own history.
+      const seen = new Set(shown.map((l) => l.entity.locator.toLowerCase()));
+      const pool = recentStore.items.filter((i) =>
+        mode === 'folder' ? i.isDir === true : i.isDir !== true,
+      );
+      for (const r of matchRecentByName(pool, query, RECENT_FILE_QUOTA)) {
+        if (seen.has(r.path.toLowerCase())) continue;
+        items.push(recentFileItem(r));
+      }
     }
     return items;
   });
+
+  const RECENT_FILE_QUOTA = 5;
+
+  /** FER-598: a recent file (or folder in Folder mode): Enter opens it, Ctrl+Enter goes to its folder. */
+  function recentFileItem(r: RecentItem): FlatItem {
+    return {
+      group: 'rfile',
+      id: `rfile:${r.path.toLowerCase()}`,
+      label: r.name,
+      parent: r.parent,
+      sub: `${r.isDir === true ? 'Folder' : 'File'} · ${sourcesText(r)} · ${r.parent}`,
+      activate: () => openRecentItem(r),
+      reveal: () => revealRecentItem(r),
+    };
+  }
 
   /** FER-580: the stored recent ids that exist and can run right now (newest first, max 3). */
   function recentActions(): Action[] {
@@ -147,7 +176,7 @@
   }
 
   // Empty query (spec §3): labeled groups with limited quotas, favorite-first.
-  const EMPTY_QUOTA = { fav: 3, recent: 3, frequent: 3, cmd: 8 } as const;
+  const EMPTY_QUOTA = { fav: 3, recent: 3, rfile: 5, frequent: 3, cmd: 8 } as const;
   const emptyItems = $derived.by((): FlatItem[] => {
     const items: FlatItem[] = [];
     // FER-580: the commands run last, above everything else, only with a truly empty input.
@@ -173,6 +202,11 @@
         activate: () => activateFavorite(fav),
       });
     }
+    // FER-598: recent FILES from every source (Ferrum, Windows Recent, new items), files only.
+    // In File mode the group is the whole content of the empty state.
+    const fileQuota = mode === 'file' ? 20 : EMPTY_QUOTA.rfile;
+    const recentFiles = recentStore.files.slice(0, fileQuota).map(recentFileItem);
+    if (mode === 'file') return recentFiles;
     for (const item of activity.recent.slice(0, EMPTY_QUOTA.recent)) {
       items.push({
         group: 'recent',
@@ -183,6 +217,7 @@
         activate: () => navigateEntity(item.entity),
       });
     }
+    items.push(...recentFiles);
     for (const item of activity.frequent.slice(0, EMPTY_QUOTA.frequent)) {
       items.push({
         group: 'frequent',
@@ -228,7 +263,9 @@
   });
   const flatItems = $derived(baseItems);
   const total = $derived(flatItems.length);
-  const showChips = $derived(query.trim().length >= 2);
+  // FER-598: with an empty input the chips appear once a mode other than "all" is active, so the
+  // File tab (recent files) stays reachable and can be left again.
+  const showChips = $derived(query.trim().length >= 2 || mode !== 'all');
 
   // FER-577: the element that had focus before the palette opened. Captured before the DOM
   // changes and handed back BEFORE an action runs, so a dialog the action opens remembers a live
@@ -265,6 +302,7 @@
       // not re-run this effect (which would reset the query and retarget).
       targetPaneId = untrack(() => ui.activePane);
       void activity.refresh().catch(() => undefined);
+      void recentStore.refresh().catch(() => undefined);
       queueMicrotask(() => inputEl?.focus());
     }
   });
@@ -385,6 +423,26 @@
     getPane(targetPaneId)?.openPath?.(fav.path);
   }
 
+  /** Enter on a recent item: files open with the default app (recorded unless private / paused),
+   *  folders navigate the target pane. */
+  function openRecentItem(r: RecentItem): void {
+    ui.paletteOpen = false;
+    if (r.isDir === true) {
+      getPane(targetPaneId)?.openPath?.(r.path);
+      return;
+    }
+    void shellOpen(r.path, activity.recordingActive).catch(() => undefined);
+  }
+
+  /** Ctrl+Enter: open the containing folder with the item selected. */
+  function revealRecentItem(r: RecentItem): void {
+    ui.paletteOpen = false;
+    const pane = getPane(targetPaneId);
+    if (r.isDir === true) pane?.openPath?.(r.path);
+    else if (pane?.revealPath) pane.revealPath(r.path);
+    else pane?.openPath?.(r.parent);
+  }
+
   function navigateEntity(entity: ActivityEntityDto): void {
     ui.paletteOpen = false;
     getPane(targetPaneId)?.openPath?.(entity.locator);
@@ -455,6 +513,12 @@
       selectedId = idAt(index);
     } else if (e.key === 'Enter' && index < total) {
       e.preventDefault();
+      const item = flatItems[index];
+      if ((e.ctrlKey || e.metaKey) && item?.reveal) {
+        restoreFocus();
+        item.reveal();
+        return;
+      }
       runResult(index);
     }
   }
@@ -493,6 +557,7 @@
     rcmd: 'Recent commands',
     fav: 'Favorites',
     recent: 'Recent',
+    rfile: 'Recent files',
     frequent: 'Frequent',
     hot: 'Hotlist',
     loc: 'Pernah diakses di Ferrum',

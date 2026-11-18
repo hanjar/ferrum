@@ -77,6 +77,10 @@ function resetUi(): void {
   ui.addressOwnRow = false;
   ui.indexerFolderSizes = false;
   ui.syncJournalSkip = false;
+  ui.includeWindowsRecent = true;
+  ui.recentNewItems = true;
+  ui.recentWatchFolders = null;
+  ui.recentNewDays = 7;
 }
 
 beforeEach(() => {
@@ -153,6 +157,10 @@ describe('prefsStore — paneSplit (FER-406)', () => {
       addressOwnRow: false,
       indexerFolderSizes: false,
       syncJournalSkip: false,
+      includeWindowsRecent: true,
+      recentNewItems: true,
+      recentWatchFolders: null,
+      recentNewDays: 7,
       ...DEFAULT_FILE_OPERATION_PREFS,
     });
   });
@@ -190,6 +198,53 @@ describe('prefsStore — addressOwnRow (FER-491)', () => {
     await vi.advanceTimersByTimeAsync(400);
     expect(mockedSave).toHaveBeenCalledTimes(1);
     expect(mockedSave.mock.calls[0][0].addressOwnRow).toBe(true);
+  });
+});
+
+describe('prefsStore — recent files sources (FER-598)', () => {
+  it('missing keys mean: Windows Recent on, new items on, Downloads (null), 7 days', async () => {
+    const old = { ...DEFAULTS } as Record<string, unknown>;
+    for (const k of [
+      'includeWindowsRecent',
+      'recentNewItems',
+      'recentWatchFolders',
+      'recentNewDays',
+    ]) {
+      delete old[k];
+    }
+    mockedLoad.mockResolvedValue(old as never);
+    await makeStore().init();
+    expect(ui.includeWindowsRecent).toBe(true);
+    expect(ui.recentNewItems).toBe(true);
+    expect(ui.recentWatchFolders).toBeNull();
+    expect(ui.recentNewDays).toBe(7);
+  });
+
+  it('applies saved values and rejects an unsupported day window', async () => {
+    mockedLoad.mockResolvedValue({
+      ...DEFAULTS,
+      includeWindowsRecent: false,
+      recentNewItems: false,
+      recentWatchFolders: ['D:\\Work', 5 as unknown as string],
+      recentNewDays: 5,
+    });
+    await makeStore().init();
+    expect(ui.includeWindowsRecent).toBe(false);
+    expect(ui.recentNewItems).toBe(false);
+    expect(ui.recentWatchFolders).toEqual(['D:\\Work']);
+    expect(ui.recentNewDays).toBe(7);
+  });
+
+  it('a change reaches the save payload', async () => {
+    vi.useFakeTimers();
+    mockedLoad.mockResolvedValue({ ...DEFAULTS });
+    await makeStore().init();
+    ui.includeWindowsRecent = false;
+    ui.recentWatchFolders = ['D:\\Work'];
+    await vi.advanceTimersByTimeAsync(400);
+    const saved = mockedSave.mock.calls.at(-1)![0];
+    expect(saved.includeWindowsRecent).toBe(false);
+    expect(saved.recentWatchFolders).toEqual(['D:\\Work']);
   });
 });
 

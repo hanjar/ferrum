@@ -2566,6 +2566,95 @@ pub fn activity_remove_favorite(
         .map_err(fs_io)
 }
 
+// ── FER-598: recent files outside the Activity store ───────────────────────
+
+/// Ferrum's own data folders plus the Activity exclusion roots: never listed by the recent
+/// sources that read the file system.
+fn recent_blocked_roots(app: &AppHandle, activity: &State<'_, ActivityHandle>) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    let own = [
+        crate::profile::config_dir(app),
+        crate::profile::data_dir(app),
+        crate::profile::activity_dir(app),
+        crate::profile::local_data_dir(app),
+    ];
+    for dir in own.into_iter().flatten() {
+        roots.push(dir.to_string_lossy().into_owned());
+    }
+    if let Some(service) = activity.0.as_ref()
+        && let Ok(excluded) = service.exclusion_roots()
+    {
+        roots.extend(excluded);
+    }
+    crate::recent_files::expand_blocked_roots(roots)
+}
+
+/// Windows Recent (`shell:recent`): files opened in other apps. Read-only, worker thread, never
+/// resolves a link (see `recent_files`). The renderer calls it only while "Include Windows
+/// Recent" is on and the window is not private.
+#[tauri::command]
+pub async fn recent_windows(
+    limit: Option<u32>,
+    app: AppHandle,
+    activity: State<'_, ActivityHandle>,
+) -> Result<Vec<crate::recent_files::RecentFile>, FsError> {
+    let blocked = recent_blocked_roots(&app, &activity);
+    let limit = limit.map_or(crate::recent_files::MAX_LIMIT, |l| l as usize);
+    spawn_blocking(move || match crate::recent_files::windows_recent_dir() {
+        Some(dir) => crate::recent_files::read_windows_recent(&dir, &blocked, limit),
+        None => Vec::new(),
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))
+}
+
+/// The default watched folder list (the user's Downloads folder).
+#[tauri::command]
+pub fn recent_default_folders() -> Vec<String> {
+    crate::recent_files::downloads_dir()
+        .map(|d| vec![d.to_string_lossy().into_owned()])
+        .unwrap_or_default()
+}
+
+/// Newly added top-level items (by creation time) of the watched folders.
+#[tauri::command]
+pub async fn recent_new_items(
+    folders: Vec<String>,
+    max_age_days: u32,
+    limit: Option<u32>,
+    app: AppHandle,
+    activity: State<'_, ActivityHandle>,
+) -> Result<Vec<crate::recent_files::RecentFile>, FsError> {
+    let blocked = recent_blocked_roots(&app, &activity);
+    let limit = limit.map_or(crate::recent_files::MAX_LIMIT, |l| l as usize);
+    spawn_blocking(move || {
+        let valid = crate::recent_files::validate_watch_folders(&folders, &blocked);
+        let downloads =
+            crate::recent_files::downloads_dir().map(|d| d.to_string_lossy().into_owned());
+        let labelled = valid
+            .into_iter()
+            .map(|p| {
+                let label = crate::recent_files::folder_label(&p, downloads.as_deref());
+                (p, label)
+            })
+            .collect();
+        crate::recent_files::scan_watched_folders(labelled, max_age_days, limit, blocked, None)
+    })
+    .await
+    .map_err(|e| FsError::new(crate::domain::ErrorCode::Io, e.to_string()))
+}
+
+/// Settings validation: the subset of `folders` that is acceptable as a watched folder.
+#[tauri::command]
+pub fn recent_validate_folders(
+    folders: Vec<String>,
+    app: AppHandle,
+    activity: State<'_, ActivityHandle>,
+) -> Vec<String> {
+    let blocked = recent_blocked_roots(&app, &activity);
+    crate::recent_files::validate_watch_folders(&folders, &blocked)
+}
+
 /// ACT-08 R1: read-only history lookup for chat. The request is the strict
 /// `ai::contract::ActivityQuery` wire (deny_unknown_fields; kind recent/frequent/findByName,
 /// periodDays 7/30/90, plain name, limit 1..20, default 10). The answer is the chat tool's

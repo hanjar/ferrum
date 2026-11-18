@@ -1547,6 +1547,15 @@ impl ActivityService {
         })
     }
 
+    /// FER-598: Activity exclusion roots (read-only), applied to the other recent-file sources.
+    pub fn exclusion_roots(&self) -> Result<Vec<String>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "activity store unavailable".to_owned())?;
+        store.exclusion_roots().map_err(|e| e.to_string())
+    }
+
     pub fn state(&self) -> Result<ActivityStateDto, String> {
         let store = self
             .store

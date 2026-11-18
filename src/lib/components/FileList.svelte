@@ -659,6 +659,7 @@
                       <span class="nameText"
                         >{displayName(r.entry.name, r.entry.isDir, ui.showExtensions)}</span
                       >
+                      {#if r.note}<span class="rowNote">{r.note}</span>{/if}
                     {/if}
                   </div>
                 {:else if c.id === 'size'}
@@ -688,6 +689,7 @@
                   <span class="nameText"
                     >{displayName(r.entry.name, r.entry.isDir, ui.showExtensions)}</span
                   >
+                  {#if r.note}<span class="rowNote">{r.note}</span>{/if}
                 {/if}
               </div>
             {/if}
@@ -824,6 +826,17 @@
     flex: none;
     display: grid;
     place-items: center;
+  }
+  /* FER-598: Recent view: parent folder and source after the name. */
+  .rowNote {
+    margin-left: 10px;
+    color: var(--text3);
+    font-size: 0.86em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 0 1 auto;
   }
   .nameText {
     min-width: 0;

@@ -30,6 +30,7 @@ import { multiRename } from './stores/multiRenameStore.svelte';
 import { hotlist } from './stores/hotlistStore.svelte';
 import { historyMenu } from './stores/historyMenuStore.svelte';
 import { branch } from './stores/branchStore.svelte';
+import { showRecent } from './stores/recentView.svelte';
 import {
   archiveMemberSelection,
   isCombineCandidate,
@@ -707,6 +708,35 @@ export const actions: Action[] = [
     run: () => {
       targetFromSource();
     },
+  },
+  {
+    // FER-598: the active tab becomes a list of recently used files and folders (Ferrum Activity,
+    // Windows Recent, newly added items of the watched folders). Ctrl+E was free; read-only view.
+    id: 'go.recent',
+    label: 'Recent files and folders',
+    group: 'Navigate',
+    shortcut: ctrl('e'),
+    available: () => activePane() !== undefined,
+    run: () => {
+      const pane = activePane();
+      if (pane) showRecent(ui.activePane, pane.path);
+    },
+    keywords: ['recent', 'terbaru', 'baru dibuka', 'riwayat', 'history', 'downloads', 'file baru'],
+  },
+  {
+    // FER-598: from the Recent view, jump to the folder that holds the cursor item.
+    id: 'recent.reveal',
+    label: 'Go to containing folder',
+    group: 'Navigate',
+    shortcut: ctrl('Enter'),
+    available: () =>
+      activePane()?.readOnlyView === true && activePane()?.cursorEntry() !== undefined,
+    run: () => {
+      const pane = activePane();
+      const cursor = pane?.cursorEntry();
+      if (pane && cursor) pane.revealPath?.(cursor.path);
+    },
+    keywords: ['reveal', 'folder induk', 'show in folder', 'buka folder'],
   },
   {
     id: 'commands.branch',
@@ -1460,6 +1490,7 @@ export const menuGroups: {
       'commands.hotlist',
       'commands.back',
       'nav.historyMenu',
+      'go.recent',
       'commands.prompt',
       'commands.branch',
       'commands.desktop',
@@ -1566,7 +1597,52 @@ export function getAction(id: string): Action | undefined {
   return Object.hasOwn(actionsById, id) ? actionsById[id] : undefined;
 }
 
+/**
+ * FER-598: the Recent files and folders view is read-only. These commands write to (or take their
+ * input from) the listing of the active pane, so they are disabled while it shows that view.
+ */
+const RECENT_READONLY_BLOCKED: ReadonlySet<string> = new Set([
+  'file.rename',
+  'file.copy',
+  'file.move',
+  'file.clipCut',
+  'file.clipPaste',
+  'file.mkdir',
+  'file.newfile',
+  'file.delete',
+  'file.delete.permanent',
+  'file.multiRename',
+  'file.comment',
+  'file.encode',
+  'file.decode',
+  'file.attributes',
+  'file.createChecksum',
+  'file.split',
+  'file.combine',
+  'archive.pack',
+  'archive.pack7z',
+  'archive.unpack',
+  'file.pack',
+  'file.unpack',
+]);
+
+/** Commands that write INTO the other pane: refused while that pane shows the Recent view. */
+const RECENT_TARGET_BLOCKED: ReadonlySet<string> = new Set([
+  'file.copy',
+  'file.move',
+  'archive.pack',
+  'archive.pack7z',
+  'archive.unpack',
+  'file.pack',
+  'file.unpack',
+  'file.split',
+  'file.combine',
+  'file.decode',
+]);
+
 export function isEnabled(action: Action): boolean {
+  if (RECENT_READONLY_BLOCKED.has(action.id) && activePane()?.readOnlyView === true) return false;
+  if (RECENT_TARGET_BLOCKED.has(action.id) && inactivePane()?.readOnlyView === true) return false;
   return !!action.run && !action.disabledReason && (action.available?.() ?? true);
 }
 

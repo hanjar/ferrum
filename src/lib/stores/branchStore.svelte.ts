@@ -42,6 +42,8 @@ export interface BranchState {
   /** Set when the rows were FED from elsewhere (e.g. search results) instead
    *  of traversed from `root`; shown in the pane status line. */
   label?: string;
+  /** FER-598: 'recent' marks the Recent files and folders view: read-only, never writes. */
+  kind?: 'recent';
 }
 
 /** What the store needs from the backend (injectable for tests). */
@@ -88,6 +90,11 @@ export class BranchStore {
 
   stateFor(paneId: 0 | 1): BranchState | undefined {
     return this.states[paneId];
+  }
+
+  /** FER-598: the pane shows the Recent files and folders view (read-only). */
+  isRecent(paneId: 0 | 1): boolean {
+    return this.states[paneId]?.kind === 'recent';
   }
 
   /** True while the pane's walk is still running (Esc / Cancel apply). */
@@ -189,19 +196,31 @@ export class BranchStore {
    *  pane as a virtual listing. Reuses the branch row source, so sort/filter/
    *  selection/copy/open behave like any pane listing. Cancels an in-flight
    *  traversal so it can never overwrite the fed rows. */
-  feed(paneId: 0 | 1, root: string, label: string, entries: FileEntry[]): void {
+  feed(
+    paneId: 0 | 1,
+    root: string,
+    label: string,
+    entries: FileEntry[],
+    opts: { kind?: 'recent'; notes?: ReadonlyMap<string, string> } = {},
+  ): void {
     this.dropWalk(paneId, true);
     this.states = {
       ...this.states,
       [paneId]: {
         root,
-        rows: rawRows(entries.map((entry) => toRow(entry))),
+        rows: rawRows(
+          entries.map((entry) => {
+            const note = opts.notes?.get(entry.path);
+            return note === undefined ? toRow(entry) : { ...toRow(entry), note };
+          }),
+        ),
         loading: false,
         error: null,
         truncated: false,
         failedCount: 0,
         cancelled: false,
         label,
+        ...(opts.kind ? { kind: opts.kind } : {}),
       },
     };
   }
