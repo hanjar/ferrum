@@ -156,7 +156,8 @@
     rows = filterRows(rows, { query: filterQ, showHidden: ui.showHidden });
     const hideSame = compareStore.hiddenSameNames;
     if (hideSame) rows = rows.filter((r) => !hideSame.has(r.entry.name));
-    if (view.reversed) rows.reverse();
+    // The tab's Reverse order flag belongs to its folder sort, not to the Recent view.
+    if (view.reversed && !recentActive) rows.reverse();
     return rows;
   });
   // Total size of the marked FILES (folders have no size until calculated).
