@@ -10,9 +10,23 @@ import type { FileEntry } from '../ipc/types';
 import type { PaneId } from '../uiState.svelte';
 import { branch } from './branchStore.svelte';
 import { recentStore } from './recentStore.svelte';
+import type { SortSpec } from '../selection';
 import { RECENT_CAP, sourcesText, type RecentItem } from '../recent/recentModel';
 
 export const RECENT_LABEL = 'Recent files and folders';
+
+/**
+ * FER-599: the Recent view's own sort. The Modified column carries the last-used time, so
+ * "date descending" is newest used first. It lives in the pane component (never in the tab's
+ * view state or any saved sort setting) and is dropped on leaving the view, so the tab's own
+ * sort comes back untouched. Folders are never grouped first inside this view.
+ */
+export const RECENT_DEFAULT_SORT: SortSpec = { key: 'modified', dir: -1 };
+
+/** Header click inside the Recent view: same key flips direction, a new key starts ascending. */
+export function nextRecentSort(cur: SortSpec, key: SortSpec['key']): SortSpec {
+  return cur.key === key ? { key, dir: cur.dir === 1 ? -1 : 1 } : { key, dir: 1 };
+}
 
 function toEntry(item: RecentItem): FileEntry {
   return {
