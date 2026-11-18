@@ -1600,6 +1600,8 @@ export function getAction(id: string): Action | undefined {
 /**
  * FER-598: the Recent files and folders view is read-only. These commands write to (or take their
  * input from) the listing of the active pane, so they are disabled while it shows that view.
+ * FER-600: Delete (F8, Shift+F8) is the one exception: it works on the full paths of the marked or
+ * cursor items (never the tab's folder) through the normal confirm dialog and Recycle Bin.
  */
 const RECENT_READONLY_BLOCKED: ReadonlySet<string> = new Set([
   'file.rename',
@@ -1609,8 +1611,6 @@ const RECENT_READONLY_BLOCKED: ReadonlySet<string> = new Set([
   'file.clipPaste',
   'file.mkdir',
   'file.newfile',
-  'file.delete',
-  'file.delete.permanent',
   'file.multiRename',
   'file.comment',
   'file.encode',

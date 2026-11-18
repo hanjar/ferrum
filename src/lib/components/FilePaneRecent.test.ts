@@ -18,7 +18,17 @@ vi.mock('../ipc/activity', async (orig) => ({
   activityRecent: (...args: unknown[]) => activityRecentMock(...args),
 }));
 
+const delIpc = vi.hoisted(() => ({ runDelete: vi.fn() }));
+vi.mock('../ipc/deleteJobs', async (orig) => ({
+  ...(await orig<typeof import('../ipc/deleteJobs')>()),
+  runDelete: (...a: unknown[]) => delIpc.runDelete(...a),
+  newDeleteRequestId: () => 'del-recent',
+}));
+
 import FilePane from './FilePane.svelte';
+import Dialogs from './Dialogs.svelte';
+import { parentOf } from '../format';
+import { dialogs } from '../stores/dialogStore.svelte';
 import { getAction, isEnabled, menuGroups } from '../actions';
 import { branch } from '../stores/branchStore.svelte';
 import { getPane } from '../stores/panesRegistry.svelte';
@@ -152,8 +162,6 @@ describe('Recent view in a tab (FER-598)', () => {
       'file.move',
       'file.mkdir',
       'file.newfile',
-      'file.delete',
-      'file.delete.permanent',
       'file.rename',
       'file.clipPaste',
       'file.clipCut',
@@ -168,6 +176,108 @@ describe('Recent view in a tab (FER-598)', () => {
     // Reading stays possible, and so does leaving the view.
     expect(isEnabled(getAction('commands.copyItemPaths')!)).toBe(true);
     expect(isEnabled(getAction('nav.up')!)).toBe(true);
+  });
+
+  it('FER-600: F8 / Shift+F8 stay enabled in the Recent view; other writers stay blocked', async () => {
+    await openRecent();
+    await fireEvent.click(rowByName('note.txt'));
+    expect(isEnabled(getAction('file.delete')!)).toBe(true);
+    expect(isEnabled(getAction('file.delete.permanent')!)).toBe(true);
+    for (const id of ['file.copy', 'file.move', 'file.mkdir', 'file.rename', 'file.clipPaste']) {
+      expect(isEnabled(getAction(id)!), id).toBe(false);
+    }
+  });
+
+  describe('FER-600: Delete inside the Recent view', () => {
+    const NOTE = 'C:\\Elsewhere\\note.txt';
+    const DATA = 'C:\\Projects\\datasets';
+    const doneResult = (paths: string[]) => ({
+      report: { requested: paths.length, deleted: paths.length, failed: [] },
+      cancelled: false,
+      notProcessed: [],
+      partial: [],
+    });
+    const rowPaths = () =>
+      Array.from(pane.container.querySelectorAll('.row[data-path]')).map((r) =>
+        r.getAttribute('data-path'),
+      );
+    const confirmButton = () =>
+      Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"] button')).find(
+        (b) => b.textContent?.trim() === 'Delete',
+      )!;
+
+    beforeEach(() => {
+      delIpc.runDelete.mockReset();
+      render(Dialogs);
+    });
+    afterEach(() => dialogs.close());
+
+    async function markBoth() {
+      await openRecent();
+      await fireEvent.click(rowByName('datasets'), { ctrlKey: true });
+      await fireEvent.click(rowByName('note.txt'), { ctrlKey: true });
+    }
+
+    it('deletes exactly the marked items by their own full paths, never the tab folder', async () => {
+      const tabFolder = getPane(0)!.path;
+      delIpc.runDelete.mockImplementation(async (paths: string[]) => doneResult(paths));
+      await markBoth();
+      getAction('file.delete')!.run!();
+      await tick();
+      fireEvent.click(confirmButton());
+      await vi.waitFor(() => expect(delIpc.runDelete).toHaveBeenCalledTimes(1));
+      const [paths, permanent] = delIpc.runDelete.mock.calls[0]!;
+      expect([...(paths as string[])].sort()).toEqual([DATA, NOTE].sort());
+      expect(permanent).toBe(false);
+      for (const p of paths as string[]) expect(parentOf(p)).not.toBe(tabFolder);
+      // Gone from the list; the view stays open.
+      await vi.waitFor(() => expect(rowPaths()).toEqual([]));
+      expect(branch.isRecent(0)).toBe(true);
+    });
+
+    it('deletes only the cursor item when nothing is marked', async () => {
+      delIpc.runDelete.mockImplementation(async (paths: string[]) => doneResult(paths));
+      await openRecent();
+      await fireEvent.click(rowByName('note.txt'));
+      getAction('file.delete')!.run!();
+      await tick();
+      fireEvent.click(confirmButton());
+      await vi.waitFor(() => expect(delIpc.runDelete).toHaveBeenCalledTimes(1));
+      expect(delIpc.runDelete.mock.calls[0]![0]).toEqual([NOTE]);
+      await vi.waitFor(() => expect(rowPaths()).toEqual([DATA]));
+    });
+
+    it('a failed delete leaves the list unchanged', async () => {
+      delIpc.runDelete.mockImplementation(async (paths: string[]) => ({
+        report: {
+          requested: paths.length,
+          deleted: 0,
+          failed: paths.map((p) => ({ path: p, code: 'io', message: 'locked' })),
+        },
+        cancelled: false,
+        notProcessed: [],
+        partial: [],
+      }));
+      await openRecent();
+      await fireEvent.click(rowByName('note.txt'));
+      getAction('file.delete')!.run!();
+      await tick();
+      fireEvent.click(confirmButton());
+      await vi.waitFor(() => expect(delIpc.runDelete).toHaveBeenCalledTimes(1));
+      await tick();
+      expect(rowPaths()).toEqual([DATA, NOTE]);
+    });
+
+    it('a cancelled confirmation never calls the backend', async () => {
+      await openRecent();
+      await fireEvent.click(rowByName('note.txt'));
+      getAction('file.delete')!.run!();
+      await tick();
+      dialogs.close();
+      await tick();
+      expect(delIpc.runDelete).not.toHaveBeenCalled();
+      expect(rowPaths()).toEqual([DATA, NOTE]);
+    });
   });
 
   it('the other pane cannot copy into a Recent view', async () => {

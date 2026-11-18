@@ -110,6 +110,54 @@ describe('Ctrl+Right / Ctrl+Left open in other pane (FER-482)', () => {
   });
 });
 
+describe('Ctrl+Right / Ctrl+Left in the Recent view (FER-600)', () => {
+  const recentPane = (item: { name: string; path: string; isDir: boolean } | undefined) => {
+    const p = pane('C:\\previous\\folder');
+    Object.defineProperty(p, 'readOnlyView', { get: () => true });
+    p.cursorEntry = () => item;
+    registerPane(0, p);
+    right.revealPath = vi.fn();
+    return p;
+  };
+
+  it('a file opens its parent folder in the other pane with the cursor on it', () => {
+    const src = recentPane({ name: 'note.txt', path: 'E:\\Docs\\sub\\note.txt', isDir: false });
+    expect(openInOtherPane(true)).toBe(true);
+    expect(right.revealPath).toHaveBeenCalledExactlyOnceWith('E:\\Docs\\sub\\note.txt');
+    expect(right.openPath).not.toHaveBeenCalled();
+    expect(src.openPath).not.toHaveBeenCalled();
+  });
+
+  it('also for Ctrl+Left (away direction), never the tab previous folder', () => {
+    recentPane({ name: 'a.zip', path: 'E:\\Docs\\a.zip', isDir: false });
+    openInOtherPane(false);
+    expect(right.revealPath).toHaveBeenCalledExactlyOnceWith('E:\\Docs\\a.zip');
+  });
+
+  it('a folder opens the folder itself', () => {
+    recentPane({ name: 'data', path: 'E:\\Docs\\data', isDir: true });
+    expect(openInOtherPane(true)).toBe(true);
+    expect(right.openPath).toHaveBeenCalledExactlyOnceWith('E:\\Docs\\data');
+    expect(right.revealPath).not.toHaveBeenCalled();
+  });
+
+  it('falls back to opening the parent when the target cannot reveal', () => {
+    recentPane({ name: 'n.txt', path: 'E:\\Docs\\n.txt', isDir: false });
+    right.revealPath = undefined;
+    openInOtherPane(true);
+    expect(right.openPath).toHaveBeenCalledExactlyOnceWith('E:\\Docs\\');
+  });
+
+  it('the .. row or no item does nothing and never throws', () => {
+    recentPane({ name: '..', path: 'C:\\previous', isDir: true });
+    expect(openInOtherPane(true)).toBe(false);
+    recentPane(undefined);
+    expect(openInOtherPane(true)).toBe(false);
+    expect(right.openPath).not.toHaveBeenCalled();
+    expect(right.revealPath).not.toHaveBeenCalled();
+  });
+});
+
 describe('Ctrl+U swaps whole panes (FER-482)', () => {
   it('exchanges tabs, selection and per-pane view state', () => {
     const mk = (tag: string) => {

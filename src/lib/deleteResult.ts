@@ -25,6 +25,12 @@ export function deleteRemaining(r: DeleteJobResult): string[] {
   return [...new Set([...r.partial, ...r.notProcessed])];
 }
 
+/** FER-600: the requested paths that are really gone (not failed, partly deleted or untouched). */
+export function deleteDone(paths: string[], r: DeleteJobResult): string[] {
+  const keep = new Set([...r.report.failed.map((f) => f.path), ...deleteRemaining(r)]);
+  return paths.filter((p) => !keep.has(p));
+}
+
 /** Dialog text for a job that did not end cleanly. Empty when everything was deleted. */
 export function deleteProblemText(r: DeleteJobResult): string {
   const parts: string[] = [];
