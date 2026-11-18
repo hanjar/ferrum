@@ -213,7 +213,11 @@ fn temp_dir(tag: &str) -> PathBuf {
         now_ms()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // CI runners give TEMP in 8.3 short form (C:\Users\RUNNER~1\...), but link targets read back
+    // in long form: work in the long form so path comparisons in these tests mean what they say.
+    long_form(&dir.to_string_lossy())
+        .map(PathBuf::from)
+        .unwrap_or(dir)
 }
 
 #[test]
