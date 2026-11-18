@@ -3,7 +3,8 @@
  * and the Desktop folder. Pure pane-registry orchestration so actions.ts
  * stays a thin registry and every move here is unit-testable.
  */
-import { activePane, inactivePane } from './stores/panesRegistry.svelte';
+import { activePane, inactivePane, type PaneApi } from './stores/panesRegistry.svelte';
+import { parentOf } from './format';
 import { dialogs } from './stores/dialogStore.svelte';
 import { ui } from './uiState.svelte';
 import { viewState } from './stores/viewStateStore.svelte';
@@ -48,6 +49,7 @@ export function openInOtherPane(towardOther: boolean): boolean {
   const source = activePane();
   const target = inactivePane();
   if (!source || !target?.openPath) return false;
+  if (source.readOnlyView === true) return openRecentItemInOtherPane(target);
   let path = source.path;
   if (towardOther) {
     const item = source.cursorEntry();
@@ -55,6 +57,26 @@ export function openInOtherPane(towardOther: boolean): boolean {
   }
   if (!path) return false;
   target.openPath(path);
+  return true;
+}
+
+/** FER-600: Recent view (its `path` is only the tab's previous folder, useless here). A folder
+ *  opens itself; a file opens its PARENT folder with the cursor on the file (the same reveal
+ *  Ctrl+Enter uses). No item or the `..` row: nothing happens. */
+function openRecentItemInOtherPane(target: PaneApi): boolean {
+  const item = activePane()?.cursorEntry();
+  if (!item || item.name === '..' || !item.path) return false;
+  if (item.isDir) {
+    target.openPath?.(item.path);
+    return true;
+  }
+  if (target.revealPath) {
+    target.revealPath(item.path);
+    return true;
+  }
+  const parent = parentOf(item.path);
+  if (!parent) return false;
+  target.openPath?.(parent);
   return true;
 }
 

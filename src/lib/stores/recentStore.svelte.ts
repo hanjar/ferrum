@@ -20,6 +20,7 @@ import { ui } from '../uiState.svelte';
 import { activity } from './activityStore.svelte';
 import {
   RECENT_CAP,
+  pathKey,
   fromActivity,
   fromRecentFiles,
   mergeRecent,
@@ -51,6 +52,9 @@ class RecentStore {
   added = $state<RecentItem[]>([]);
   loading = $state(false);
   #seq = 0;
+  /** FER-600: paths deleted from the Recent view (pathKey). The history sources still list them,
+   *  so they are hidden here, together with anything below a deleted folder. */
+  deleted = $state<string[]>([]);
 
   /** Merged view with the current privacy settings applied. */
   get items(): RecentItem[] {
@@ -58,7 +62,19 @@ class RecentStore {
     if (!activity.privateSession) lists.push(this.ferrum);
     if (ui.includeWindowsRecent && !activity.privateSession) lists.push(this.windows);
     if (ui.recentNewItems && !activity.privateSession) lists.push(this.added);
-    return mergeRecent(lists, RECENT_CAP);
+    const gone = this.deleted;
+    const merged = mergeRecent(lists, RECENT_CAP);
+    if (gone.length === 0) return merged;
+    return merged.filter((i) => {
+      const k = pathKey(i.path);
+      return !gone.some((g) => k === g || k.startsWith(`${g}\\`));
+    });
+  }
+
+  /** FER-600: drop deleted items from the list at once (and keep them out after a refresh). */
+  forget(paths: string[]): void {
+    if (paths.length === 0) return;
+    this.deleted = [...new Set([...this.deleted, ...paths.map(pathKey)])];
   }
 
   /** Files only (the Ctrl+K group). Unknown kind counts as a file. */
@@ -102,6 +118,7 @@ class RecentStore {
     this.ferrum = [];
     this.windows = [];
     this.added = [];
+    this.deleted = [];
     this.loading = false;
   }
 }

@@ -9,6 +9,7 @@
   } from '../ipc/deleteJobs';
   import {
     deleteChangedDisk,
+    deleteDone,
     deleteHasProblems,
     deleteOutcome,
     deleteProblemText,
@@ -50,6 +51,7 @@
   // observation only; the flows themselves are unchanged.
   import { noteScopeMutation, recordQueuedMove } from '../diskUsage/invalidation';
   import { activity } from '../stores/activityStore.svelte';
+  import { recentStore } from '../stores/recentStore.svelte';
   import { shellOpen } from '../ipc/activity';
 
   /** Access letters of the Pack format radios: Alt+Z / Alt+7 / Alt+R. */
@@ -520,6 +522,7 @@
     const dlg = d;
     if (dlg?.kind === 'delete') dialogs.beginDeleteRun(dlg);
     const perm = permanent;
+    const inRecent = activePane()?.readOnlyView === true;
     const requestId = newDeleteRequestId();
     const flow = jobs.begin({
       kind: 'delete',
@@ -555,6 +558,8 @@
         noteScopeMutation(paths);
         activity.noteFsChange();
       }
+      // FER-600: deleted from the Recent view - drop exactly the items that are gone.
+      if (inRecent) recentStore.forget(deleteDone(paths, result));
       activePane()?.refresh();
       const problems = deleteProblemText(result);
       if (flow.docked) {
