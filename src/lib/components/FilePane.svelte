@@ -45,7 +45,13 @@
   import { previewStore } from '../stores/previewStore.svelte';
   import { compareStore } from '../stores/compareStore.svelte';
   import { branch } from '../stores/branchStore.svelte';
-  import { RECENT_LABEL, leaveRecent, showRecent } from '../stores/recentView.svelte';
+  import {
+    RECENT_DEFAULT_SORT,
+    RECENT_LABEL,
+    leaveRecent,
+    nextRecentSort,
+    showRecent,
+  } from '../stores/recentView.svelte';
   import { comments } from '../stores/commentStore.svelte';
   import {
     beginInternalDrag,
@@ -114,7 +120,7 @@
   // pane's sort falls back to Name while its column is hidden so the visible
   // order is always explained by a visible header.
   const colCfg = $derived(columns.config);
-  const effSort = $derived(effectiveSortSpec(colCfg, view.sort));
+  const tabSort = $derived(effectiveSortSpec(colCfg, view.sort));
   // Branch View (F2-23): an optional per-pane row SOURCE swap — the subtree
   // listing replaces the directory listing as the pipeline's input while
   // sort/filter/selection and the pane's tab/history stay exactly the same.
@@ -122,6 +128,13 @@
   const branchRows = $derived(branchActive ? branch.rows(paneId) : []);
   // FER-598: the Recent files and folders view (read-only; Backspace / Back leaves it).
   const recentActive = $derived(branch.isRecent(paneId));
+  // FER-599: the Recent view sorts by last use (newest first) with files and folders mixed; its
+  // sort is local and dropped on leaving, so the tab's own sort is never changed or persisted.
+  let recentSort = $state(RECENT_DEFAULT_SORT);
+  $effect(() => {
+    if (!recentActive) recentSort = RECENT_DEFAULT_SORT;
+  });
+  const effSort = $derived(recentActive ? recentSort : tabSort);
   const shownCrumbs = $derived(recentActive ? [{ label: RECENT_LABEL, path: store.path }] : crumbs);
   // View pipeline (F2-15): sort the full listing, apply the Show filter
   // preset, then the query/hidden filter; reversed flips the final display
@@ -130,7 +143,11 @@
   // at the FRONT of this same pipeline, so they are sorted and filtered
   // exactly like directory rows.
   const visible = $derived.by(() => {
-    let rows = sortRows(branchActive ? branchRows : store.rows, effSort, ui.foldersFirst);
+    let rows = sortRows(
+      branchActive ? branchRows : store.rows,
+      effSort,
+      recentActive ? false : ui.foldersFirst,
+    );
     rows = filterByView(rows, {
       mode: view.filterMode,
       pattern: view.filterPattern,
@@ -139,7 +156,8 @@
     rows = filterRows(rows, { query: filterQ, showHidden: ui.showHidden });
     const hideSame = compareStore.hiddenSameNames;
     if (hideSame) rows = rows.filter((r) => !hideSame.has(r.entry.name));
-    if (view.reversed) rows.reverse();
+    // The tab's Reverse order flag belongs to its folder sort, not to the Recent view.
+    if (view.reversed && !recentActive) rows.reverse();
     return rows;
   });
   // Total size of the marked FILES (folders have no size until calculated).
@@ -159,6 +177,10 @@
   );
 
   function setSort(key: SortKey) {
+    if (recentActive) {
+      recentSort = nextRecentSort(recentSort, key);
+      return;
+    }
     viewState.setSort(paneId, key);
   }
 
