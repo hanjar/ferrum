@@ -59,8 +59,8 @@ describe('Titlebar window controls', () => {
     const { container } = await mount();
     const label = container.querySelector('.buildLabel') as HTMLElement;
     expect(label).not.toBeNull();
-    expect(label.textContent?.trim()).toBe('0.2.8 · test000');
-    expect(label.getAttribute('title')).toContain('Ferrum 0.2.8');
+    expect(label.textContent?.trim()).toBe('0.2.9 · test000');
+    expect(label.getAttribute('title')).toContain('Ferrum 0.2.9');
     expect(label.getAttribute('title')).toContain('Commit: test000');
   });
 });
